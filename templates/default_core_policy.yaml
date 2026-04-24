@@ -1,0 +1,22 @@
+# templates/default_core_policy.yaml
+# Aegis v2 — Ring Model Policy
+version: "2.0"
+enforcement_level: "ring0_only"
+
+ring0:
+  syntax_validity:
+    enabled: true
+    message: "系統內核攔截：程式碼存在致命語法錯誤，無法被 Tree-sitter 解析。請檢查括號、縮排或語言基本語法。"
+  anti_circular_dependency:
+    enabled: true
+    message: "系統內核攔截：偵測到循環依賴 A→B→A。這表示模組職責不清，請提取共用介面以打破迴圈。"
+
+ring0_5_signals:
+  # These thresholds are advisory only — they are NEVER enforced.
+  # Values are passed to the LLM as structural observations for decision-making.
+  fan_out_advisory: 15
+  max_chain_depth_advisory: 3
+  note: >
+    Ring 0.5 signals are observations, not violations.
+    High fan-out or deep chain depth are signals for the LLM to consider,
+    not grounds to block execution. Only Ring 0 (syntax + circular dep) blocks.

@@ -1,0 +1,43 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Rust ---
+aegis-core-rs/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Aegis runtime artifacts ---
+.aegis/
+.aegis/backups/
+
+# --- Agent tooling / local state ---
+.claude/
+.claw/
+.hermes/
+.agents/
+
+# --- Misc scratch ---
+hello_tool.txt
+*.log
+rtk

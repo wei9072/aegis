@@ -1,0 +1,23 @@
+[package]
+name = "aegis-core-rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "aegis_core_rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.20.2", features = ["extension-module"] }
+tree-sitter = "0.20"
+tree-sitter-typescript = "0.20"
+petgraph = "0.6.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tree-sitter-python = "0.20"
+serde_yaml = "0.9"
+
+[dev-dependencies]
+# 用於單元測試
+tempfile = "3"
