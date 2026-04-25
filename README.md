@@ -1,9 +1,13 @@
 # Aegis — Architecture-Aware Control Plane for LLM Code Generation
 
 > 一個由 **Rust 內核** 與 **Python 控制平面** 組成的「行為守門員」。
-> 它在 LLM 生成程式碼的每一個回合做兩件事：用硬性規則阻擋語法 / 結構違規（Ring 0），並把每一個決定寫進結構化的 **DecisionTrace**，讓決策路徑變成可驗證的資料。
+> 每一個 LLM 回合都跑過完整的 dataflow `signal → policy → decision → action → trace`：
+> 結構性 gate（Ring 0 / 0.5）擷取訊號，policy 把訊號翻譯成 `allow / warn / block`，
+> delivery 用獨立通道把 warning 顯示給人類（不汙染下一輪 LLM context），
+> toolcall validator 比對 LLM 自述 vs Executor 實際寫入，
+> intent 層分類 prompt 並偵測語意 bypass。
 >
-> **North Star** — Aegis 的正確性來自對行為的控制與對決策路徑的驗證，而不是對輸出內容的檢查。
+> **North Star** — 正確性的定義是 **decision correctness**，不是 output correctness。
 
 ---
 
@@ -11,49 +15,62 @@
 
 Aegis 把整個系統視為一個帶有回饋迴路的決策系統，沿三個能力軸演進：
 
-| 能力軸 | 已有機制 | 後續層級 |
+| 能力軸 | 機制 | 收口的 GAP |
 | :--- | :--- | :--- |
-| **State validation**（看見現實） | Side-effect 收斂到 Executor、Ring 0 語法 / 循環依賴 | ToolCallValidator（Tier-1 / Tier-2） |
-| **Intent reasoning**（理解語意） | — | Intent classification、Intent-bypass detection |
-| **Delivery control**（讓判斷被感知） | Ring 0.5 訊號（同通道附掛） | Delivery layer、Policy engine |
+| **State validation**（看見現實） | Side-effect 收斂到 Executor、Ring 0、ToolCallValidator Tier-1（path）+ Tier-2（content） | scenario 10 + 13/14 |
+| **Intent reasoning**（理解語意） | IntentClassifier（前置 keyword）+ IntentBypassDetector（後置 semantic） | scenario 09 + 11/15 |
+| **Delivery control**（讓判斷被感知） | PolicyEngine（rule table）+ DeliveryRenderer（雙通道） | scenarios 04/05 + 12 |
 
-層級不是線性堆疊，而是 dataflow：每一層的 decision 都寫進同一份 trace，eval harness 對 trace 事件序列做斷言。
+每一層的 decision 都寫進同一份 trace，eval harness 對 trace 事件序列做斷言。
 
-兩個目前已落地的硬層：
+落地的層級：
 
-| Ring | 性質 | 動作 | 規則 |
+| Layer | 性質 | 動作 | 規則 / 條件 |
 | :--- | :--- | :--- | :--- |
 | **Ring 0** | 硬性（Binary） | **阻擋 / SystemExit(1)** | 語法錯誤、模組循環依賴 |
-| **Ring 0.5** | 觀察性（Advisory） | emit `observe` 事件 | Fan-out、方法鏈深度（Demeter）、耦合、內聚 |
+| **Ring 0.5** | 觀察性 | emit `observe` 事件 | Fan-out、方法鏈深度、耦合、內聚 |
+| **PolicyEngine** | 規則驅動（無 LLM） | emit `policy:warn / block` | 預設規則：`fan_out ≥ 10 warn / ≥ 20 block`、`max_chain_depth ≥ 5 warn` |
+| **DeliveryRenderer** | 純呈現 | emit `delivery:observe warning_surfaced` | 雙通道隔離（human banner / LLM 純 code） |
+| **ToolCallValidator Tier-1** | 確定性（無 LLM） | emit `toolcall:block` | 寫檔宣稱詞 + path-like token + executor 是否真寫 |
+| **ToolCallValidator Tier-2** | 語意（1 LLM call） | emit `toolcall:pass / block` | LLM 描述 vs `ExecutionResult.path_contents` 語意對齊 |
+| **IntentClassifier** | 確定性（無 LLM） | emit `intent:observe normal_dev/teaching/adversarial` | 中英 phrase 列表，adversarial 優先於 teaching |
+| **IntentBypassDetector** | 語意（1 LLM call，後置） | emit `intent_bypass:pass / block` | 只在 teaching/adversarial 跑，比對 prompt rejection-target 與 response |
 
 完整路線圖見 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
 
 ---
 
-## 控制平面四步地基
+## 已完成 phase
 
-下面四個 PR 已經建立起決策可觀測 + 行為可控的最小骨架：
+四步地基讓「決策可觀測」就位；Phase 1–3b 把它推到「決策可控制」。
 
-| 步驟 | Commit | 帶來的能力 |
+| Phase | 主題 | 收口 scenarios |
 | :--- | :--- | :--- |
-| 1 | [`e977f23`](https://github.com/wei9072/aegis/commit/e977f23) | **DecisionTrace** — 每個 gate 的決定變成 first-class data |
-| 2 | [`42d7356`](https://github.com/wei9072/aegis/commit/42d7356) | **Side-effect 單一真實來源** — LLM 沒有直接寫檔通道；寫入只能走 Executor |
-| 3 | [`ec2ebb5`](https://github.com/wei9072/aegis/commit/ec2ebb5) | **Per-request tool surface** — Tool list 從 session 屬性變成 request 函式 |
-| 4 | [`d1e058d`](https://github.com/wei9072/aegis/commit/d1e058d) | **Eval Harness** — 10 scenarios 對 trace 事件序列做斷言 |
+| Foundation（1–4） | DecisionTrace、Side-effect 收斂、per-request tool surface、Eval harness | — |
+| **Phase 1** | PolicyEngine + DeliveryRenderer + decision→action mapping | 04, 05 |
+| **Phase 2** | ToolCallValidator Tier-1 + IntentClassifier | 10, 11, 12 |
+| **Phase 3a** | IntentBypassDetector + SemanticComparator + GeminiSemanticComparator（LLM-backed） | 09, 15 |
+| **Phase 3b** | ToolCallValidator Tier-2（重用同一個 SemanticComparator） | 13, 14 |
 
-驗證：`pytest`（122 tests）+ `aegis eval`（10/10 scenarios）皆綠。
+ROADMAP §7 中尚未動的只有 §4.3 Adaptive Policy（trust-score / cross-layer reasoning），刻意保留——它需要 multi-turn 真實流量資料才有 motivation，目前 dogfood 都是 single-turn。
+
+驗證：`pytest`（194 tests）+ `aegis eval`（15/15 scenarios）雙綠。
 
 ---
 
 ## 架構不變式
 
-下列是程式上強制的（structural test 會擋 PR），不是慣例：
+下列是程式上強制的（structural test 會擋 PR），不是慣例（對應 ROADMAP §5 七條 invariants）：
 
 1. **Executor 是檔案系統唯一的寫入者。** LLM 看不到 `write_file`；嘗試把 mutating callable 加進 `LLM_TOOLS_READ_ONLY` 會在 `tests/test_side_effect_isolation.py` 失敗。
-2. **每個 request 都產出一份 DecisionTrace。** 由 `LLMGateway.last_trace` 暴露，`aegis eval` 對它做斷言。
-3. **Tool list 是 per-request 函式，不是 session 屬性。** GeminiProvider 不快取 chat session，避免未來 intent 層無法切換工具表。
-4. **新層加 emit 不能破壞舊 scenario。** Eval harness 用 subsequence 比對，加事件 OK，改 reason code 禁止。
-5. **Intent 不能影響 side effects。** 即便未來引入「教學 / 開發」分類，呈現可放鬆，落地一律不放鬆。
+2. **Intent 不能弱化 invariants。** Intent label 只影響呈現，不影響執行——scenario 12 把這條 pin 死（teaching prompt + fan_out=15 仍 emit `policy:warn`）。
+3. **每個 decision 都必須可追蹤。** 寫入 `DecisionTrace` 是 mandatory；`aegis eval` 對 trace 序列做斷言。
+4. **不允許 silent failure / silent pass。** 沒有 emit 的決定 = bug——IntentBypassDetector 與 ToolCallValidator Tier-2 在 pass 時也 emit。
+5. **PolicyEngine 是唯一的 decision verb 來源。** 其他層只能 observe + emit raw event；policy 把 signal 翻譯成 verb。
+6. **Decision phase 不讀 live state。** Validator 與 policy 操作 caller 提供的 snapshot（`ExecutionResult.path_contents` 等），避免 TOCTOU。
+7. **Delivery 雙通道強制隔離。** Human-visible warning（banner）絕不進入 LLM-bound channel，否則 signal 會被 recursive pollution 稀釋。
+8. **新層加 emit 不能破壞舊 scenario。** Eval harness 用 subsequence 比對，加事件 OK，改 reason code 禁止。
+9. **Tool list 是 per-request 函式，不是 session 屬性。** GeminiProvider 不快取 chat session，per-turn 重新解析 tool surface。
 
 ---
 
@@ -66,19 +83,25 @@ aegis/
 │   ├── core/                  # Rust 綁定薄封裝（bindings.py）
 │   ├── enforcement/           # Ring 0：語法 + 循環依賴；emit pass / block
 │   ├── analysis/              # Ring 0.5：訊號層、coupling、demeter、metrics；emit observe
+│   ├── policy/                # ★ PolicyEngine：deterministic SignalRule 驅動的 decision verb 來源
+│   ├── delivery/              # ★ DeliveryRenderer：雙通道呈現（human banner / LLM clean code）
+│   ├── toolcall/              # ★ ToolCallValidator：Tier-1 path 比對 + Tier-2 semantic content 比對
+│   ├── intent/                # ★ IntentClassifier（前置）+ IntentBypassDetector（後置）
+│   ├── semantic/              # ★ SemanticComparator Protocol + Stub + GeminiSemanticComparator
 │   ├── graph/                 # 依賴圖服務（build / has_cycle / fan_out）
 │   ├── ir/                    # PatchPlan 資料模型、模組名稱正規化
 │   ├── runtime/               # Refactor Pipeline、Executor、Validator、攔截器
-│   │   └── trace.py           # ★ DecisionEvent + DecisionTrace（pure data）
+│   │   ├── trace.py           # ★ DecisionEvent + DecisionTrace（pure data）
+│   │   └── executor.py        #   - ExecutionResult.path_contents 餵給 Tier-2
 │   ├── agents/                # LLM Providers + LLMGateway（trace 主織入點）
-│   │   ├── llm_adapter.py     #   - LLMProvider Protocol、Gateway、Ring0Validator、SignalContextBuilder
+│   │   ├── llm_adapter.py     #   - LLMProvider Protocol、Gateway、Ring0Validator、SignalContextBuilder、ExecutionRecorder Protocol
 │   │   └── gemini.py          #   - LLM_TOOLS_READ_ONLY、per-request session、runtime mutation guard
 │   ├── shared/                # EditEngine（unique-anchor 編輯引擎）
 │   ├── tools/                 # 給 LLM 用的 read-only 工具（read_file、list_directory）
 │   │                          #   - MUTATING_TOOL_NAMES：結構性 + runtime 雙重黑名單
-│   ├── eval/                  # ★ Eval harness
-│   │   ├── harness.py         #   - Scenario / ExpectedEvent / run_all
-│   │   └── scenarios.py       #   - 10 個內建情境，含 4 個 GAP 標註
+│   ├── eval/                  # Eval harness
+│   │   ├── harness.py         #   - Scenario / ExpectedEvent / run_all + _StubExecutorRecorder
+│   │   └── scenarios.py       #   - 15 個內建情境（4 GAP 已收口 + 4 新增覆蓋 Phase 2/3）
 │   ├── config/                # policy YAML 載入器與 schema
 │   └── daemons/               # 檔案監看、自動修復、增量更新（部分為骨架）
 │
@@ -183,7 +206,7 @@ python -m aegis.cli eval            # 簡潔輸出
 python -m aegis.cli eval --verbose  # 含事件數、raise 訊息
 ```
 
-跑 10 個內建情境，斷言 trace 的事件序列是否符合預期。**任一情境失敗 → exit 1**。新增層級時的回歸防線。
+跑 15 個內建情境，斷言 trace 的事件序列是否符合預期。**任一情境失敗 → exit 1**。新增層級時的回歸防線。
 
 ---
 
@@ -195,6 +218,9 @@ python -m aegis.cli eval --verbose  # 含事件數、raise 訊息
 Prompt ──▶ trace.emit(gateway:request_started)
             │
             ▼
+       IntentClassifier.classify(prompt)       ◀── emit intent:observe normal_dev/teaching/adversarial
+            │
+            ▼  （retry loop 開始）
        provider.generate(prompt, tools)        ◀── per-request tool surface
             │
             ▼
@@ -207,12 +233,33 @@ Prompt ──▶ trace.emit(gateway:request_started)
             │
             No
             ▼
+       ToolCallValidator.validate(code, executor_result, trace)
+            │                                  ◀── Tier-1 deterministic; Tier-2 semantic if comparator wired
+       block?──Yes──▶ trace.emit(gateway:block toolcall_block) → raise
+            │
+            No
+            ▼
        SignalContextBuilder.build_context(trace)  ◀── emit ring0_5:observe 多次
             │
             ▼
+       PolicyEngine.evaluate(trace)            ◀── emit policy:warn / block
+            │
+       block?──Yes──▶ trace.emit(gateway:block policy_block) → raise
+            │
+            No
+            ▼
+       DeliveryRenderer.render(code, verdict)  ◀── emit delivery:observe warning_surfaced
+            │                                      （human view 帶 banner / LLM view 純 code）
+            ▼
+       IntentBypassDetector.detect(prompt, code, intent)  ◀── 只在 teaching/adversarial 跑
+            │                                              emit intent_bypass:pass / block
+       block?──Yes──▶ trace.emit(gateway:block intent_bypass_block) → raise
+            │
+            No
+            ▼
        trace.emit(gateway:response_accepted)
             ▼
-       回傳安全程式碼，trace 落在 gateway.last_trace
+       回傳 view.human，trace 落在 gateway.last_trace
 ```
 
 ### 2. Refactor Pipeline（`aegis/runtime/pipeline.py`）
@@ -287,7 +334,7 @@ DecisionEvent(
 ## 測試
 
 ```bash
-pytest                                    # 全部（122 passed）
+pytest                                    # 全部（194 passed）
 pytest tests/test_decision_trace.py -v
 pytest tests/test_eval_harness.py -v
 pytest tests/test_side_effect_isolation.py -v
@@ -303,8 +350,31 @@ pytest tests/test_dynamic_tool_control.py -v
 | `test_decision_trace.py` | DecisionTrace primitives + 各 gate emit 路徑 |
 | `test_side_effect_isolation.py` | 結構性守則：LLM 不可有 mutating tool |
 | `test_dynamic_tool_control.py` | Per-request tool surface + runtime guard |
-| `test_eval_harness.py` | 10 個內建情境 + harness 自身邏輯 |
+| `test_policy_engine.py` | PolicyEngine deterministic rule eval、threshold edge、custom rules |
+| `test_delivery_renderer.py` | 雙通道隔離、banner-before-code、emit warning_surfaced |
+| `test_toolcall_validator.py` | Tier-1 path 比對 + Tier-2 semantic comparator |
+| `test_intent_classifier.py` | 中英 phrase 分類、adversarial > teaching priority |
+| `test_intent_bypass.py` | 只在 teaching/adversarial 跑、threshold inclusive、emit-on-pass |
+| `test_semantic_comparator.py` | Stub fixed/mapping 模式、Protocol 一致性 |
+| `test_gemini_comparator.py` | JSON parser 邊界、clamp、lazy provider |
+| `test_eval_harness.py` | 15 個內建情境 + harness 自身邏輯 |
 | `test_refactor_pipeline.py` | Planner-Validator-Executor 完整流水線 |
+
+---
+
+## Dogfood（真實流量）
+
+`pytest` 跟 `aegis eval` 都是 deterministic — fake provider、canned response、stub comparator。要看每一層在真實 LLM 流量下的行為差異，用 `scripts/dogfood.py`：
+
+```bash
+PYTHONPATH=. python scripts/dogfood.py                    # 5 probes against gemma-4-31b-it（預設）
+PYTHONPATH=. python scripts/dogfood.py --probe C          # 只跑 fan_out probe
+PYTHONPATH=. python scripts/dogfood.py --model gemini-2.5-flash
+```
+
+5 個 probe 各壓一層：A normal-dev、B teaching、C fan-out=15、D adversarial、E side-effect 幻覺。輸出每個 probe 的 trace 事件序列 + raise / output 摘要，方便比對跨模型行為。
+
+> 預設 `gemma-4-31b-it` 是有理由的：跨模型實測發現 Gemini 對 read-only tool surface 會自我拒絕，Gemma 則會幻覺出 side-effect 宣稱——後者實際觸發 ToolCallValidator Tier-1，是 Aegis 縱深防禦的真實 motivation 來源。
 
 ---
 
@@ -327,7 +397,7 @@ ring0_5_signals:
   max_chain_depth_advisory: 3
 ```
 
-修改這個檔案即可調整 Aegis 的嚴格度；Ring 0.5 閾值**不會阻擋**，只是當作 LLM 的決策提示。未來 policy engine 上線後（見 [ROADMAP §Layer 7](docs/ROADMAP.md)），閾值將驅動真正的 `policy:warn` 事件而非僅作 advisory。
+這個 YAML 是早期 advisory 設計留下的；Phase 1 已把實際 policy 規則搬進 `aegis/policy/engine.py` 的 `DEFAULT_RULES`（`SignalRule` 列表）。`fan_out_advisory` 等舊欄位現在是文件值，真正驅動 `policy:warn / block` 的是 `DEFAULT_RULES`。要調 threshold 改後者即可，加新規則只需新增 `SignalRule(...)`，不必動 gate 程式碼（這也是 ROADMAP §8 設計目標 condition 3）。
 
 ---
 
@@ -336,7 +406,10 @@ ring0_5_signals:
 - **新語言支援**：在 `aegis-core-rs/src/ast/languages/` 加入對應 tree-sitter grammar，再擴充 `get_imports` / `extract_signals` 分支。
 - **新 LLM Provider**：在 `aegis/agents/` 新增 class，實作 `generate(prompt: str, tools: tuple | None = None) -> str`，並暴露 `last_used_tools` 屬性供 gateway 觀察工具使用。
 - **自訂 Ring 0 規則**：在 `aegis/enforcement/rules.py` 加新檢查，並在 `Ring0Enforcer.check_project` 串接，記得接 `trace` 參數並 emit 對應事件。
-- **新增 eval scenario**：在 `aegis/eval/scenarios.py` 加入 `Scenario(...)`，標 `expected_events`；GAP scenario 必須帶 ≥ 40 字元的 `note` 解釋未來哪一層該介入。
+- **新增 policy 規則**：在 `aegis/policy/engine.py` 的 `DEFAULT_RULES` 加 `SignalRule(signal_name, threshold, decision, reason)`；不要動 gate 程式碼。新 reason code 也要在 scenarios 補對應斷言。
+- **擴充 IntentClassifier phrase 列表**：在 `aegis/intent/classifier.py` 的 `_TEACHING_PHRASES_*` / `_ADVERSARIAL_PHRASES_*` 加 phrase；priority 是 ADVERSARIAL > TEACHING > NORMAL_DEV。
+- **替換 SemanticComparator**：實作 `aegis.semantic.comparator.SemanticComparator` Protocol（`compare(a, b, *, context) -> SemanticResult`），即可同時供 IntentBypassDetector 與 ToolCallValidator Tier-2 共用。
+- **新增 eval scenario**：在 `aegis/eval/scenarios.py` 加入 `Scenario(...)`，標 `expected_events`；GAP scenario 必須帶 ≥ 40 字元的 `note` 解釋未來哪一層該介入。Tier-2 / IntentBypass 場景可注入 `toolcall_comparator` / `intent_bypass_comparator` + `stub_execution_result` 來模擬 Executor 行為。
 
 ---
 
