@@ -222,13 +222,19 @@ def scenario_list():
 
 @scenario_group.command('run')
 @click.argument('name')
-@click.option('--model', default='gemma-4-31b-it', show_default=True,
-              help='Model id passed to GeminiProvider. '
-                   'gemma-4-31b-it tends to exercise more of the control plane '
-                   'than gemini-flash because it hallucinates writes more readily.')
+@click.option('--provider', 'provider_name',
+              type=click.Choice(['gemini', 'openrouter'], case_sensitive=False),
+              default='gemini', show_default=True,
+              help='Which provider to drive the pipeline with. '
+                   'gemini → google-genai (needs GEMINI_API_KEY or GOOGLE_API_KEY). '
+                   'openrouter → OpenAI-compatible gateway over many backends '
+                   '(needs OPENROUTER_API_KEY).')
+@click.option('--model', default=None,
+              help='Model id. Defaults: gemini→gemma-4-31b-it, '
+                   'openrouter→inclusionai/ling-2.6-1t:free.')
 @click.option('--no-save', is_flag=True, default=False,
               help='Do not write a JSON snapshot to tests/scenarios/<name>/runs/.')
-def scenario_run(name, model, no_save):
+def scenario_run(name, provider_name, model, no_save):
     """Run NAME (e.g. lod_refactor) end-to-end and print the trajectory.
 
     Prints a labelled block per iteration — Plan / Strategy /
@@ -236,6 +242,10 @@ def scenario_run(name, model, no_save):
     is readable at a glance. JSON snapshot is written under
     tests/scenarios/<name>/runs/ for run-to-run comparison unless
     --no-save is passed.
+
+    Use --provider openrouter to drive the same scenario against any
+    OpenRouter-hosted model — this is the path for V1 charter L5
+    (cross-model validation): same scenario, different model family.
     """
     import importlib
     import time
@@ -252,19 +262,36 @@ def scenario_run(name, model, no_save):
         click.echo(f"tests/scenarios/{name}/scenario.py must export SCENARIO", err=True)
         raise SystemExit(2)
 
-    provider = GeminiProvider(model_name=model)
-    result = run_scenario(module.SCENARIO, provider, model_label=model)
+    provider, resolved_model = _build_provider(provider_name.lower(), model)
+    label = f"{provider_name.lower()}/{resolved_model}"
+    result = run_scenario(module.SCENARIO, provider, model_label=label)
     print_trajectory(result)
 
     if not no_save:
         runs_dir = Path(__file__).parent.parent / "tests" / "scenarios" / name / "runs"
         timestamp = time.strftime("%Y%m%dT%H%M%S")
-        target = runs_dir / f"{timestamp}__{model}.json"
+        # Slug the model so slashes in OpenRouter ids don't escape the
+        # runs/ directory (e.g. inclusionai/ling-2.6-1t:free).
+        safe_model = resolved_model.replace("/", "_").replace(":", "_")
+        target = runs_dir / f"{timestamp}__{provider_name.lower()}__{safe_model}.json"
         dump_run(result, target)
         click.echo(f"Snapshot:  {target}")
 
     if not result.pipeline_success:
         raise SystemExit(1)
+
+
+def _build_provider(provider_name: str, model: str | None):
+    """Resolve (provider_name, optional model override) into an
+    LLMProvider instance plus the model id actually used."""
+    if provider_name == 'gemini':
+        chosen = model or 'gemma-4-31b-it'
+        return GeminiProvider(model_name=chosen), chosen
+    if provider_name == 'openrouter':
+        from aegis.agents.openrouter import DEFAULT_MODEL, OpenRouterProvider
+        chosen = model or DEFAULT_MODEL
+        return OpenRouterProvider(model_name=chosen), chosen
+    raise click.UsageError(f"unknown provider {provider_name!r}")
 
 
 @cli.command('eval')
