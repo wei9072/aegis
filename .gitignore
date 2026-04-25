@@ -31,6 +31,14 @@ Thumbs.db
 .aegis/
 .aegis/backups/
 
+# --- Multi-turn scenario runs (reproducible LLM output) ---
+# Each `scripts/run_scenario.py` invocation drops a JSON snapshot
+# under tests/scenarios/<name>/runs/. These are throwaway evidence
+# files: every run produces a new timestamped one and they would
+# pollute git history. Findings worth keeping go into project memory
+# or commit messages, not into the repo as data.
+tests/scenarios/*/runs/
+
 # --- Agent tooling / local state ---
 .claude/
 .claw/

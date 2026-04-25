@@ -13,7 +13,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections import Counter
 from dataclasses import dataclass, field
+from typing import Any, Callable
 from pathlib import Path
 
 from aegis.agents.llm_adapter import LLMProvider
@@ -24,6 +26,50 @@ from aegis.graph.service import GraphService
 from aegis.ir.patch import PatchPlan, plan_to_dict
 from aegis.runtime.executor import ExecutionResult, Executor
 from aegis.runtime.validator import PlanValidator, ValidationError
+
+
+@dataclass(frozen=True)
+class IterationEvent:
+    """One iteration's outcome, in a shape stable enough for JSON
+    serialisation and run-to-run diffing.
+
+    Captures *what the pipeline decided this turn*, not the full plan
+    content (kept out for compactness — `plan_id` lets two runs be
+    compared without storing every patch). Multi-turn scenario runners
+    consume these to render trajectories and to assert convergence.
+    """
+
+    iteration: int
+    plan_id: str                 # 8-char prefix of plan hash; stable across runs of identical plans
+    plan_done: bool              # planner declared "task complete"
+    plan_patches: int            # number of patches in the plan
+    validation_passed: bool
+    validation_errors: list[str] = field(default_factory=list)
+    applied: bool = False        # executor ran and succeeded
+    rolled_back: bool = False    # executor ran but rolled back (regression or failure)
+    regressed: bool = False      # post-apply signal count > pre-apply
+    signals_total: int = 0
+    signals_by_kind: dict[str, int] = field(default_factory=dict)
+    signal_delta_vs_prev: dict[str, int] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "iteration": self.iteration,
+            "plan_id": self.plan_id,
+            "plan_done": self.plan_done,
+            "plan_patches": self.plan_patches,
+            "validation_passed": self.validation_passed,
+            "validation_errors": list(self.validation_errors),
+            "applied": self.applied,
+            "rolled_back": self.rolled_back,
+            "regressed": self.regressed,
+            "signals_total": self.signals_total,
+            "signals_by_kind": dict(self.signals_by_kind),
+            "signal_delta_vs_prev": dict(self.signal_delta_vs_prev),
+        }
+
+
+IterationCallback = Callable[[IterationEvent], None]
 
 
 @dataclass
@@ -45,6 +91,7 @@ def run(
     scope: list[str] | None = None,
     max_iters: int = 3,
     include_file_snippets: bool = True,
+    on_iteration: IterationCallback | None = None,
 ) -> PipelineResult:
     root_abs = str(Path(root).resolve())
     planner = LLMPlanner(provider)
@@ -53,6 +100,7 @@ def run(
 
     ctx = _build_context(task, root_abs, scope, include_file_snippets)
     signals_before = ctx.signals
+    prev_kind_counts = _kind_counts(ctx.signals)
 
     last_plan_hash: str | None = None
     last_plan: PatchPlan | None = None
@@ -80,7 +128,20 @@ def run(
         plan.iteration = i
 
         plan_hash = _hash_plan(plan)
+        plan_id = plan_hash[:8]
         if last_plan_hash is not None and plan_hash == last_plan_hash and not plan.done:
+            _emit_iteration(
+                on_iteration,
+                iteration=i,
+                plan=plan,
+                plan_id=plan_id,
+                validation_errors=[],
+                applied=False,
+                rolled_back=False,
+                regressed=False,
+                ctx_signals=ctx.signals,
+                prev_kind_counts=prev_kind_counts,
+            )
             return PipelineResult(
                 success=False,
                 iterations=i + 1,
@@ -92,6 +153,18 @@ def run(
         last_plan_hash = plan_hash
 
         if plan.done and not plan.patches:
+            _emit_iteration(
+                on_iteration,
+                iteration=i,
+                plan=plan,
+                plan_id=plan_id,
+                validation_errors=[],
+                applied=False,
+                rolled_back=False,
+                regressed=False,
+                ctx_signals=ctx.signals,
+                prev_kind_counts=prev_kind_counts,
+            )
             return PipelineResult(
                 success=True,
                 iterations=i + 1,
@@ -102,11 +175,35 @@ def run(
 
         errors = validator.validate(plan)
         if errors:
+            _emit_iteration(
+                on_iteration,
+                iteration=i,
+                plan=plan,
+                plan_id=plan_id,
+                validation_errors=[str(e) for e in errors],
+                applied=False,
+                rolled_back=False,
+                regressed=False,
+                ctx_signals=ctx.signals,
+                prev_kind_counts=prev_kind_counts,
+            )
             last_plan, last_errors, last_result, last_regressed = plan, errors, None, False
             continue
 
         result = executor.apply(plan)
         if not result.success:
+            _emit_iteration(
+                on_iteration,
+                iteration=i,
+                plan=plan,
+                plan_id=plan_id,
+                validation_errors=[],
+                applied=False,
+                rolled_back=True,  # executor returned failure, state restored
+                regressed=False,
+                ctx_signals=ctx.signals,
+                prev_kind_counts=prev_kind_counts,
+            )
             last_plan, last_errors, last_result, last_regressed = plan, [], result, False
             continue
 
@@ -114,10 +211,35 @@ def run(
         if _regressed(ctx.signals, new_ctx.signals):
             executor.rollback_result(result)
             result.rolled_back = True
+            _emit_iteration(
+                on_iteration,
+                iteration=i,
+                plan=plan,
+                plan_id=plan_id,
+                validation_errors=[],
+                applied=True,
+                rolled_back=True,
+                regressed=True,
+                ctx_signals=ctx.signals,  # post-rollback, same as before
+                prev_kind_counts=prev_kind_counts,
+            )
             last_plan, last_errors, last_result, last_regressed = plan, [], result, True
             continue
 
         ctx = new_ctx
+        _emit_iteration(
+            on_iteration,
+            iteration=i,
+            plan=plan,
+            plan_id=plan_id,
+            validation_errors=[],
+            applied=True,
+            rolled_back=False,
+            regressed=False,
+            ctx_signals=ctx.signals,
+            prev_kind_counts=prev_kind_counts,
+        )
+        prev_kind_counts = _kind_counts(ctx.signals)
         last_plan, last_errors, last_result, last_regressed = plan, [], result, False
 
         if plan.done:
@@ -140,6 +262,50 @@ def run(
         validation_errors=last_errors,
         error="max iterations reached without planner declaring done",
     )
+
+
+def _emit_iteration(
+    cb: IterationCallback | None,
+    *,
+    iteration: int,
+    plan: PatchPlan,
+    plan_id: str,
+    validation_errors: list[str],
+    applied: bool,
+    rolled_back: bool,
+    regressed: bool,
+    ctx_signals: dict[str, list[Signal]],
+    prev_kind_counts: dict[str, int],
+) -> None:
+    if cb is None:
+        return
+    kind_counts = _kind_counts(ctx_signals)
+    delta = {
+        k: kind_counts.get(k, 0) - prev_kind_counts.get(k, 0)
+        for k in set(kind_counts) | set(prev_kind_counts)
+    }
+    cb(IterationEvent(
+        iteration=iteration,
+        plan_id=plan_id,
+        plan_done=bool(plan.done),
+        plan_patches=len(plan.patches),
+        validation_passed=not validation_errors,
+        validation_errors=list(validation_errors),
+        applied=applied,
+        rolled_back=rolled_back,
+        regressed=regressed,
+        signals_total=sum(len(v) for v in ctx_signals.values()),
+        signals_by_kind=kind_counts,
+        signal_delta_vs_prev=delta,
+    ))
+
+
+def _kind_counts(signals: dict[str, list[Signal]]) -> dict[str, int]:
+    counter: Counter[str] = Counter()
+    for sig_list in signals.values():
+        for sig in sig_list:
+            counter[sig.name] += 1
+    return dict(counter)
 
 
 def _build_context(
