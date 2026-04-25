@@ -37,6 +37,16 @@ class IterationEvent:
     content (kept out for compactness — `plan_id` lets two runs be
     compared without storing every patch). Multi-turn scenario runners
     consume these to render trajectories and to assert convergence.
+
+    Two parallel signal views, intentionally redundant:
+      - `signals_by_kind` / `signal_delta_vs_prev`: how many *instances*
+        of each signal kind exist (≈ how many files carry that signal).
+        Useful for "did a new file pick up an issue?" questions.
+      - `signal_value_totals` / `signal_value_delta_vs_prev`: the
+        summed *values* across files (a file with `fan_out=15` and a
+        file with `fan_out=8` give a fan_out total of 23). This is
+        what answers "did the pipeline make the metric better or
+        worse?", which the instance-count view alone cannot.
     """
 
     iteration: int
@@ -51,6 +61,8 @@ class IterationEvent:
     signals_total: int = 0
     signals_by_kind: dict[str, int] = field(default_factory=dict)
     signal_delta_vs_prev: dict[str, int] = field(default_factory=dict)
+    signal_value_totals: dict[str, float] = field(default_factory=dict)
+    signal_value_delta_vs_prev: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -66,6 +78,8 @@ class IterationEvent:
             "signals_total": self.signals_total,
             "signals_by_kind": dict(self.signals_by_kind),
             "signal_delta_vs_prev": dict(self.signal_delta_vs_prev),
+            "signal_value_totals": dict(self.signal_value_totals),
+            "signal_value_delta_vs_prev": dict(self.signal_value_delta_vs_prev),
         }
 
 
@@ -101,6 +115,7 @@ def run(
     ctx = _build_context(task, root_abs, scope, include_file_snippets)
     signals_before = ctx.signals
     prev_kind_counts = _kind_counts(ctx.signals)
+    prev_value_totals = _kind_value_totals(ctx.signals)
 
     last_plan_hash: str | None = None
     last_plan: PatchPlan | None = None
@@ -141,6 +156,7 @@ def run(
                 regressed=False,
                 ctx_signals=ctx.signals,
                 prev_kind_counts=prev_kind_counts,
+                prev_value_totals=prev_value_totals,
             )
             return PipelineResult(
                 success=False,
@@ -164,6 +180,7 @@ def run(
                 regressed=False,
                 ctx_signals=ctx.signals,
                 prev_kind_counts=prev_kind_counts,
+                prev_value_totals=prev_value_totals,
             )
             return PipelineResult(
                 success=True,
@@ -186,6 +203,7 @@ def run(
                 regressed=False,
                 ctx_signals=ctx.signals,
                 prev_kind_counts=prev_kind_counts,
+                prev_value_totals=prev_value_totals,
             )
             last_plan, last_errors, last_result, last_regressed = plan, errors, None, False
             continue
@@ -203,6 +221,7 @@ def run(
                 regressed=False,
                 ctx_signals=ctx.signals,
                 prev_kind_counts=prev_kind_counts,
+                prev_value_totals=prev_value_totals,
             )
             last_plan, last_errors, last_result, last_regressed = plan, [], result, False
             continue
@@ -222,6 +241,7 @@ def run(
                 regressed=True,
                 ctx_signals=ctx.signals,  # post-rollback, same as before
                 prev_kind_counts=prev_kind_counts,
+                prev_value_totals=prev_value_totals,
             )
             last_plan, last_errors, last_result, last_regressed = plan, [], result, True
             continue
@@ -238,8 +258,10 @@ def run(
             regressed=False,
             ctx_signals=ctx.signals,
             prev_kind_counts=prev_kind_counts,
+            prev_value_totals=prev_value_totals,
         )
         prev_kind_counts = _kind_counts(ctx.signals)
+        prev_value_totals = _kind_value_totals(ctx.signals)
         last_plan, last_errors, last_result, last_regressed = plan, [], result, False
 
         if plan.done:
@@ -276,13 +298,19 @@ def _emit_iteration(
     regressed: bool,
     ctx_signals: dict[str, list[Signal]],
     prev_kind_counts: dict[str, int],
+    prev_value_totals: dict[str, float],
 ) -> None:
     if cb is None:
         return
     kind_counts = _kind_counts(ctx_signals)
-    delta = {
+    value_totals = _kind_value_totals(ctx_signals)
+    count_delta = {
         k: kind_counts.get(k, 0) - prev_kind_counts.get(k, 0)
         for k in set(kind_counts) | set(prev_kind_counts)
+    }
+    value_delta = {
+        k: round(value_totals.get(k, 0.0) - prev_value_totals.get(k, 0.0), 4)
+        for k in set(value_totals) | set(prev_value_totals)
     }
     cb(IterationEvent(
         iteration=iteration,
@@ -296,7 +324,9 @@ def _emit_iteration(
         regressed=regressed,
         signals_total=sum(len(v) for v in ctx_signals.values()),
         signals_by_kind=kind_counts,
-        signal_delta_vs_prev=delta,
+        signal_delta_vs_prev=count_delta,
+        signal_value_totals=value_totals,
+        signal_value_delta_vs_prev=value_delta,
     ))
 
 
@@ -306,6 +336,21 @@ def _kind_counts(signals: dict[str, list[Signal]]) -> dict[str, int]:
         for sig in sig_list:
             counter[sig.name] += 1
     return dict(counter)
+
+
+def _kind_value_totals(signals: dict[str, list[Signal]]) -> dict[str, float]:
+    """Sum each signal kind's value across every file.
+
+    Two files with `fan_out=15` and `fan_out=8` produce a fan_out
+    total of 23. This is the metric scenario runners need to track —
+    instance counts alone (a file either carries fan_out or not)
+    cannot reflect "fan_out dropped from 15 to 2".
+    """
+    totals: dict[str, float] = {}
+    for sig_list in signals.values():
+        for sig in sig_list:
+            totals[sig.name] = totals.get(sig.name, 0.0) + float(sig.value)
+    return totals
 
 
 def _build_context(

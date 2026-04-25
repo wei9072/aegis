@@ -187,12 +187,21 @@ def print_trajectory(result: MultiTurnResult) -> None:
         if not ev.validation_passed:
             flags.append(f"validation_failed({len(ev.validation_errors)})")
         flag_str = " ".join(flags) or "no-op"
+        # Show value-deltas (e.g. fan_out:-13) — instance-count deltas
+        # alone hide the metric movement we actually care about.
         delta_str = ", ".join(
-            f"{k}{v:+d}" for k, v in sorted(ev.signal_delta_vs_prev.items()) if v != 0
+            f"{k}{v:+g}"
+            for k, v in sorted(ev.signal_value_delta_vs_prev.items())
+            if v != 0
+        ) or "—"
+        # Compact totals: fan_out=2, max_chain_depth=1
+        totals_str = ", ".join(
+            f"{k}={v:g}"
+            for k, v in sorted(ev.signal_value_totals.items())
         ) or "—"
         print(
             f"  iter {ev.iteration}  plan={ev.plan_id}  patches={ev.plan_patches}  "
-            f"signals={ev.signals_total}  Δ={delta_str}  {flag_str}"
+            f"totals[{totals_str}]  Δ={delta_str}  {flag_str}"
         )
         if ev.validation_errors:
             for err in ev.validation_errors[:3]:
