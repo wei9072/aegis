@@ -157,58 +157,152 @@ def run_scenario(
 # ---------- Reporting ----------
 
 def print_trajectory(result: MultiTurnResult) -> None:
-    """Human-readable single-block summary of one run."""
+    """Narrative renderer of one multi-turn run.
+
+    Each iteration becomes a labelled block — Plan / Strategy /
+    Validation / Apply / Signals / Decision — so a reader can follow
+    the system's reasoning without parsing the JSON snapshot.
+    Compact one-line per-iter summaries lose the per-step structure
+    that's the whole reason multi-turn exists.
+    """
     print("=" * 78)
-    print(f"scenario: {result.scenario_name}   model: {result.model}")
-    print(
-        f"duration: {result.duration_seconds:.2f}s   "
-        f"iterations: {result.iterations_run}   "
-        f"pipeline_success: {result.pipeline_success}"
-    )
-    if result.pipeline_error:
-        print(f"pipeline_error: {result.pipeline_error}")
-    print(f"workspace: {result.workspace}")
-    print("-" * 78)
+    print(f"Aegis scenario: {result.scenario_name}")
+    print(f"Model:          {result.model}")
+    if result.events and result.events[0].plan_goal:
+        print(f"Goal:           {result.events[0].plan_goal}")
+    print("=" * 78)
 
     if not result.events:
         print("(no iteration events captured)")
-        return
+    else:
+        for ev in result.events:
+            print()
+            _render_iteration(ev)
 
-    for ev in result.events:
-        flags = []
-        if ev.plan_done:
-            flags.append("done")
-        if ev.applied:
-            flags.append("applied")
-        if ev.rolled_back:
-            flags.append("rolled_back")
-        if ev.regressed:
-            flags.append("regressed")
-        if not ev.validation_passed:
-            flags.append(f"validation_failed({len(ev.validation_errors)})")
-        flag_str = " ".join(flags) or "no-op"
-        # Show value-deltas (e.g. fan_out:-13) — instance-count deltas
-        # alone hide the metric movement we actually care about.
-        delta_str = ", ".join(
-            f"{k}{v:+g}"
-            for k, v in sorted(ev.signal_value_delta_vs_prev.items())
-            if v != 0
-        ) or "—"
-        # Compact totals: fan_out=2, max_chain_depth=1
-        totals_str = ", ".join(
-            f"{k}={v:g}"
-            for k, v in sorted(ev.signal_value_totals.items())
-        ) or "—"
-        print(
-            f"  iter {ev.iteration}  plan={ev.plan_id}  patches={ev.plan_patches}  "
-            f"totals[{totals_str}]  Δ={delta_str}  {flag_str}"
+    print()
+    print("─" * 78)
+    _render_summary(result)
+    print()
+
+
+def _render_iteration(ev) -> None:
+    print(f"▶ Iteration {ev.iteration}")
+    print(f"  Plan          {ev.plan_id}  ({ev.plan_patches} patch{'es' if ev.plan_patches != 1 else ''})")
+    if ev.plan_strategy:
+        print(f"  Strategy      {ev.plan_strategy}")
+
+    if not ev.validation_passed:
+        n = len(ev.validation_errors)
+        print(f"  Validation    failed ({n} error{'s' if n != 1 else ''})")
+        for err in ev.validation_errors[:3]:
+            print(f"                · {_short_error(err)}")
+        if n > 3:
+            print(f"                · ... +{n - 3} more")
+    else:
+        print("  Validation    passed")
+
+    if ev.rolled_back and ev.regressed:
+        print("  Apply         applied → rolled back (signals regressed)")
+    elif ev.rolled_back:
+        print("  Apply         applied → rolled back (executor failed)")
+    elif ev.applied:
+        print("  Apply         applied")
+    elif ev.validation_passed:
+        print("  Apply         skipped (planner declared done with no patches)")
+    else:
+        print("  Apply         skipped (validation failed)")
+
+    deltas = [
+        (k, v) for k, v in sorted(ev.signal_value_delta_vs_prev.items()) if v != 0
+    ]
+    if deltas:
+        print("  Signals       " + _format_signal_changes(ev.signal_value_totals, deltas))
+    else:
+        if ev.signal_value_totals:
+            unchanged = ", ".join(
+                f"{k}={v:g}" for k, v in sorted(ev.signal_value_totals.items())
+            )
+            print(f"  Signals       unchanged ({unchanged})")
+        else:
+            print("  Signals       —")
+
+    decision = _decision_summary(ev)
+    if decision:
+        print(f"  Decision      {decision}")
+
+
+def _format_signal_changes(totals: dict, deltas: list[tuple[str, float]]) -> str:
+    """e.g. 'max_chain_depth 4 → 2 ⬇ -2'."""
+    lines = []
+    for kind, delta in deltas:
+        new_val = totals.get(kind, 0)
+        old_val = new_val - delta
+        arrow = "⬇" if delta < 0 else "⬆"
+        lines.append(f"{kind} {old_val:g} → {new_val:g}  {arrow} {delta:+g}")
+    return ("\n" + " " * 16).join(lines)
+
+
+def _decision_summary(ev) -> str:
+    """One sentence describing what the loop decided this turn."""
+    if ev.silent_done_contradiction:
+        return (
+            "validator vetoed plan_done=true (patches present but "
+            "anchors did not match) — pipeline replans next iteration"
         )
-        if ev.validation_errors:
-            for err in ev.validation_errors[:3]:
-                print(f"      - {err}")
-            if len(ev.validation_errors) > 3:
-                print(f"      ... +{len(ev.validation_errors) - 3} more")
-    print("=" * 78)
+    if ev.rolled_back and ev.regressed:
+        return "patch applied but signals worsened; rolled back to retry"
+    if ev.rolled_back:
+        return "executor failure rolled back; retrying"
+    if not ev.validation_passed:
+        return "validator vetoed; planner replans next iteration"
+    if ev.applied and ev.plan_done:
+        return "applied and planner declared done — task complete"
+    if ev.applied:
+        return "applied; planner continues to next iteration"
+    if ev.plan_done:
+        return "planner declared done with no patches needed"
+    return ""
+
+
+def _short_error(err: str) -> str:
+    """`ValidationError(kind=..., message='...', ...)` → just the message."""
+    if "message='" in err:
+        start = err.index("message='") + len("message='")
+        end = err.find("'", start)
+        if end != -1:
+            kind = ""
+            if "kind='" in err:
+                ks = err.index("kind='") + len("kind='")
+                ke = err.find("'", ks)
+                if ke != -1:
+                    kind = err[ks:ke]
+            msg = err[start:end]
+            return f"{kind}: {msg}" if kind else msg
+    return err
+
+
+def _render_summary(result: MultiTurnResult) -> None:
+    if result.pipeline_success:
+        marker = "✓ Converged"
+    else:
+        marker = "✗ Did not converge"
+    print(
+        f"{marker} after {result.iterations_run} iteration"
+        f"{'s' if result.iterations_run != 1 else ''}, "
+        f"{result.duration_seconds:.1f}s total"
+    )
+    if result.pipeline_error:
+        print(f"  Reason: {result.pipeline_error}")
+
+    if result.events:
+        last = result.events[-1]
+        if last.signal_value_totals:
+            totals = ", ".join(
+                f"{k}={v:g}" for k, v in sorted(last.signal_value_totals.items())
+            )
+            print(f"  Final signals: {totals}")
+
+    print(f"  Workspace:  {result.workspace}")
 
 
 def dump_run(result: MultiTurnResult, target: Path) -> Path:

@@ -175,6 +175,98 @@ def chat(model):
         raise SystemExit(1)
 
 
+@cli.group('scenario')
+def scenario_group():
+    """Drive multi-turn refactor scenarios against a real LLM and print
+    the per-iteration decision narrative.
+
+    Distinct from `aegis eval`: that one runs deterministic single-turn
+    scenarios with fake providers (CI-grade, free). This one runs
+    real-LLM multi-turn scenarios from `tests/scenarios/<name>/` and
+    costs tokens — its purpose is to make the iteration loop's
+    decisions visible to a human reader, not to gate CI.
+    """
+    pass
+
+
+@scenario_group.command('list')
+def scenario_list():
+    """List the multi-turn scenarios available under tests/scenarios/."""
+    import importlib
+    from pathlib import Path
+
+    root = Path(__file__).parent.parent / "tests" / "scenarios"
+    if not root.is_dir():
+        click.echo("No scenarios directory found.", err=True)
+        raise SystemExit(1)
+
+    names = sorted(
+        d.name for d in root.iterdir()
+        if d.is_dir() and (d / "scenario.py").exists()
+    )
+    if not names:
+        click.echo("(no scenarios installed)")
+        return
+
+    click.echo("Available scenarios:")
+    for n in names:
+        try:
+            mod = importlib.import_module(f"tests.scenarios.{n}.scenario")
+            desc = getattr(mod, "SCENARIO", None)
+            full = " ".join((desc.description if desc else "").split())
+            summary = full[:90] + ("…" if len(full) > 90 else "")
+        except Exception:
+            summary = "(could not load scenario module)"
+        click.echo(f"  {n:<22}  {summary}")
+
+
+@scenario_group.command('run')
+@click.argument('name')
+@click.option('--model', default='gemma-4-31b-it', show_default=True,
+              help='Model id passed to GeminiProvider. '
+                   'gemma-4-31b-it tends to exercise more of the control plane '
+                   'than gemini-flash because it hallucinates writes more readily.')
+@click.option('--no-save', is_flag=True, default=False,
+              help='Do not write a JSON snapshot to tests/scenarios/<name>/runs/.')
+def scenario_run(name, model, no_save):
+    """Run NAME (e.g. lod_refactor) end-to-end and print the trajectory.
+
+    Prints a labelled block per iteration — Plan / Strategy /
+    Validation / Apply / Signals / Decision — so the reasoning loop
+    is readable at a glance. JSON snapshot is written under
+    tests/scenarios/<name>/runs/ for run-to-run comparison unless
+    --no-save is passed.
+    """
+    import importlib
+    import time
+    from pathlib import Path
+    from tests.scenarios._runner import dump_run, print_trajectory, run_scenario
+
+    try:
+        module = importlib.import_module(f"tests.scenarios.{name}.scenario")
+    except ImportError as e:
+        click.echo(f"scenario {name!r} not found: {e}", err=True)
+        raise SystemExit(2)
+
+    if not hasattr(module, "SCENARIO"):
+        click.echo(f"tests/scenarios/{name}/scenario.py must export SCENARIO", err=True)
+        raise SystemExit(2)
+
+    provider = GeminiProvider(model_name=model)
+    result = run_scenario(module.SCENARIO, provider, model_label=model)
+    print_trajectory(result)
+
+    if not no_save:
+        runs_dir = Path(__file__).parent.parent / "tests" / "scenarios" / name / "runs"
+        timestamp = time.strftime("%Y%m%dT%H%M%S")
+        target = runs_dir / f"{timestamp}__{model}.json"
+        dump_run(result, target)
+        click.echo(f"Snapshot:  {target}")
+
+    if not result.pipeline_success:
+        raise SystemExit(1)
+
+
 @cli.command('eval')
 @click.option('--verbose', '-v', is_flag=True, default=False,
               help='Show extra detail (raised exceptions, event counts) per scenario.')

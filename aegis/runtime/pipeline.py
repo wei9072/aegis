@@ -51,9 +51,11 @@ class IterationEvent:
 
     iteration: int
     plan_id: str                 # 8-char prefix of plan hash; stable across runs of identical plans
-    plan_done: bool              # planner declared "task complete"
-    plan_patches: int            # number of patches in the plan
-    validation_passed: bool
+    plan_goal: str = ""          # planner's restatement of the task
+    plan_strategy: str = ""      # planner's approach for this iteration
+    plan_done: bool = False      # planner declared "task complete"
+    plan_patches: int = 0        # number of patches in the plan
+    validation_passed: bool = False
     validation_errors: list[str] = field(default_factory=list)
     applied: bool = False        # executor ran and succeeded
     rolled_back: bool = False    # executor ran but rolled back (regression or failure)
@@ -64,10 +66,19 @@ class IterationEvent:
     signal_value_totals: dict[str, float] = field(default_factory=dict)
     signal_value_delta_vs_prev: dict[str, float] = field(default_factory=dict)
 
+    @property
+    def silent_done_contradiction(self) -> bool:
+        """The Planner declared done but the patch never made it to disk.
+        Pipeline correctly ignored the flag, but a downstream observer
+        (CLI / report) wants to surface this loudly."""
+        return self.plan_done and not self.applied and self.plan_patches > 0
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "iteration": self.iteration,
             "plan_id": self.plan_id,
+            "plan_goal": self.plan_goal,
+            "plan_strategy": self.plan_strategy,
             "plan_done": self.plan_done,
             "plan_patches": self.plan_patches,
             "validation_passed": self.validation_passed,
@@ -80,6 +91,7 @@ class IterationEvent:
             "signal_delta_vs_prev": dict(self.signal_delta_vs_prev),
             "signal_value_totals": dict(self.signal_value_totals),
             "signal_value_delta_vs_prev": dict(self.signal_value_delta_vs_prev),
+            "silent_done_contradiction": self.silent_done_contradiction,
         }
 
 
@@ -315,6 +327,8 @@ def _emit_iteration(
     cb(IterationEvent(
         iteration=iteration,
         plan_id=plan_id,
+        plan_goal=_truncate(getattr(plan, "goal", "") or "", 200),
+        plan_strategy=_truncate(getattr(plan, "strategy", "") or "", 240),
         plan_done=bool(plan.done),
         plan_patches=len(plan.patches),
         validation_passed=not validation_errors,
@@ -328,6 +342,15 @@ def _emit_iteration(
         signal_value_totals=value_totals,
         signal_value_delta_vs_prev=value_delta,
     ))
+
+
+def _truncate(text: str, max_len: int) -> str:
+    """One-line, length-bounded summary for trace narrative output.
+    Newlines collapse to spaces so the rendered trace stays tabular."""
+    flat = " ".join(text.split())
+    if len(flat) <= max_len:
+        return flat
+    return flat[: max_len - 1] + "…"
 
 
 def _kind_counts(signals: dict[str, list[Signal]]) -> dict[str, int]:
