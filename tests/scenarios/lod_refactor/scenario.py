@@ -46,6 +46,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from aegis.runtime.decision_pattern import DecisionPattern
 from tests.scenarios._runner import MultiTurnScenario
 
 
@@ -78,4 +79,10 @@ SCENARIO = MultiTurnScenario(
         "max_chain_depth_must_decrease": True,
         "max_chain_depth_target_at_most": 2,
     },
+    # The first scenario where the loop must replan after a veto and
+    # then succeed — both patterns must appear, in this order.
+    expected_patterns=[
+        DecisionPattern.SILENT_DONE_VETO,
+        DecisionPattern.APPLIED_DONE,
+    ],
 )

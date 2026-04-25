@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from aegis.runtime.decision_pattern import DecisionPattern
 from tests.scenarios._runner import MultiTurnScenario
 
 
@@ -46,7 +47,7 @@ SCENARIO = MultiTurnScenario(
     expectations={
         "must_converge_within": 2,
         "final_pipeline_success": True,
-        # signal count is non-decreasing on a fix-only refactor; equal is fine.
         "no_signal_regression": True,
     },
+    expected_patterns=[DecisionPattern.APPLIED_DONE],
 )

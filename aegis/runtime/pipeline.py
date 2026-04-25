@@ -24,6 +24,7 @@ from aegis.analysis.signals import SignalLayer
 from aegis.core.bindings import Signal, get_imports
 from aegis.graph.service import GraphService
 from aegis.ir.patch import PatchPlan, plan_to_dict
+from aegis.runtime.decision_pattern import DecisionPattern, derive_pattern
 from aegis.runtime.executor import ExecutionResult, Executor
 from aegis.runtime.validator import PlanValidator, ValidationError
 
@@ -73,6 +74,14 @@ class IterationEvent:
         (CLI / report) wants to surface this loudly."""
         return self.plan_done and not self.applied and self.plan_patches > 0
 
+    @property
+    def decision_pattern(self) -> DecisionPattern:
+        """Which named shape this iteration's outcome falls into.
+        Derived purely from the boolean flags above — see
+        `aegis.runtime.decision_pattern.derive_pattern` for the logic.
+        Scenario expectations and trace summaries consume this."""
+        return derive_pattern(self)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "iteration": self.iteration,
@@ -92,6 +101,7 @@ class IterationEvent:
             "signal_value_totals": dict(self.signal_value_totals),
             "signal_value_delta_vs_prev": dict(self.signal_value_delta_vs_prev),
             "silent_done_contradiction": self.silent_done_contradiction,
+            "decision_pattern": self.decision_pattern.value,
         }
 
 

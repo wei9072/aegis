@@ -45,6 +45,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from aegis.runtime.decision_pattern import DecisionPattern
 from tests.scenarios._runner import MultiTurnScenario
 
 
@@ -68,7 +69,15 @@ SCENARIO = MultiTurnScenario(
     max_iterations=3,
     expectations={
         "must_converge_within": 3,
-        "rollback_path_exercised": True,  # iter 0 should rollback
-        "post_rollback_strategy_change": True,  # iter 1 should change tactic
+        "rollback_path_exercised": True,
+        "post_rollback_strategy_change": True,
     },
+    # The defining scenario for this pattern: at least one
+    # REGRESSION_ROLLBACK must appear, otherwise the rollback path
+    # was never exercised and the scenario is silently broken.
+    # Convergence (APPLIED_DONE) is desired but not asserted yet —
+    # current `_regressed()` is instance-count strict and frequently
+    # blocks legitimate file splits, so demanding convergence here
+    # would assert a system limitation, not a scenario contract.
+    expected_patterns=[DecisionPattern.REGRESSION_ROLLBACK],
 )

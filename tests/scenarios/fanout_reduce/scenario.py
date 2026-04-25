@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from aegis.runtime.decision_pattern import DecisionPattern
 from tests.scenarios._runner import MultiTurnScenario
 
 
@@ -58,4 +59,5 @@ SCENARIO = MultiTurnScenario(
         "fan_out_must_decrease": True,
         "fan_out_target_at_most": 5,  # generous; ideal would be 2
     },
+    expected_patterns=[DecisionPattern.APPLIED_DONE],
 )

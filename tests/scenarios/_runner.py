@@ -28,6 +28,7 @@ from typing import Any
 
 from aegis.agents.llm_adapter import LLMProvider
 from aegis.runtime import pipeline as pipeline_mod
+from aegis.runtime.decision_pattern import DecisionPattern
 from aegis.runtime.pipeline import IterationEvent, PipelineResult
 
 
@@ -53,6 +54,10 @@ class MultiTurnScenario:
     max_iterations: int = 3
     scope: list[str] | None = None
     expectations: dict[str, Any] = field(default_factory=dict)
+    # Optional decision-path assertion. Each pattern listed must
+    # appear at least once in the produced trajectory, in any order.
+    # Set to None / empty to skip assertion (informational run only).
+    expected_patterns: list[DecisionPattern] = field(default_factory=list)
 
 
 @dataclass
@@ -65,8 +70,25 @@ class MultiTurnResult:
     iterations_run: int
     events: list[IterationEvent] = field(default_factory=list)
     expectations: dict[str, Any] = field(default_factory=dict)
+    expected_patterns: list[DecisionPattern] = field(default_factory=list)
     workspace: str = ""
     started_at: str = ""
+
+    @property
+    def observed_patterns(self) -> list[DecisionPattern]:
+        return [e.decision_pattern for e in self.events]
+
+    @property
+    def missing_patterns(self) -> list[DecisionPattern]:
+        observed = set(self.observed_patterns)
+        return [p for p in self.expected_patterns if p not in observed]
+
+    @property
+    def patterns_match(self) -> bool | None:
+        """True/False if expectations were declared, None otherwise."""
+        if not self.expected_patterns:
+            return None
+        return not self.missing_patterns
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +101,10 @@ class MultiTurnResult:
             "iterations_run": self.iterations_run,
             "events": [e.to_dict() for e in self.events],
             "expectations": dict(self.expectations),
+            "expected_patterns": [p.value for p in self.expected_patterns],
+            "observed_patterns": [p.value for p in self.observed_patterns],
+            "missing_patterns": [p.value for p in self.missing_patterns],
+            "patterns_match": self.patterns_match,
             "workspace": self.workspace,
         }
 
@@ -149,6 +175,7 @@ def run_scenario(
         iterations_run=pipeline_result.iterations,
         events=events,
         expectations=dict(scenario.expectations),
+        expected_patterns=list(scenario.expected_patterns),
         workspace=str(workspace),
         started_at=time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(started)),
     )
@@ -242,26 +269,38 @@ def _format_signal_changes(totals: dict, deltas: list[tuple[str, float]]) -> str
     return ("\n" + " " * 16).join(lines)
 
 
+_PATTERN_SENTENCE: dict = {
+    DecisionPattern.APPLIED_DONE:
+        "applied and planner declared done — task complete",
+    DecisionPattern.APPLIED_CONTINUING:
+        "applied; planner continues to next iteration",
+    DecisionPattern.REGRESSION_ROLLBACK:
+        "patch applied but signals worsened; rolled back to retry",
+    DecisionPattern.EXECUTOR_FAILURE:
+        "executor failed mid-apply; state restored, retrying",
+    DecisionPattern.SILENT_DONE_VETO:
+        "validator vetoed plan_done=true (patches present but anchors "
+        "did not match) — pipeline replans next iteration",
+    DecisionPattern.VALIDATION_VETO:
+        "validator vetoed; planner replans next iteration",
+    DecisionPattern.NOOP_DONE:
+        "planner declared done with no patches needed",
+    DecisionPattern.UNKNOWN:
+        "unrecognised decision shape (deriver may need a new branch)",
+}
+
+
 def _decision_summary(ev) -> str:
-    """One sentence describing what the loop decided this turn."""
-    if ev.silent_done_contradiction:
-        return (
-            "validator vetoed plan_done=true (patches present but "
-            "anchors did not match) — pipeline replans next iteration"
-        )
-    if ev.rolled_back and ev.regressed:
-        return "patch applied but signals worsened; rolled back to retry"
-    if ev.rolled_back:
-        return "executor failure rolled back; retrying"
-    if not ev.validation_passed:
-        return "validator vetoed; planner replans next iteration"
-    if ev.applied and ev.plan_done:
-        return "applied and planner declared done — task complete"
-    if ev.applied:
-        return "applied; planner continues to next iteration"
-    if ev.plan_done:
-        return "planner declared done with no patches needed"
-    return ""
+    """One sentence describing what the loop decided this turn.
+
+    Indirected through DecisionPattern: rather than re-deriving the
+    sentence from boolean flags, the pattern derivation in
+    `decision_pattern.py` is the single source of truth for "what
+    shape was this iteration", and this map adds a human label per
+    shape. Adding a new pattern requires touching both files —
+    intentional, so the gap is visible.
+    """
+    return _PATTERN_SENTENCE.get(ev.decision_pattern, "")
 
 
 def _short_error(err: str) -> str:
@@ -293,6 +332,18 @@ def _render_summary(result: MultiTurnResult) -> None:
     )
     if result.pipeline_error:
         print(f"  Reason: {result.pipeline_error}")
+
+    if result.observed_patterns:
+        path = " → ".join(p.value for p in result.observed_patterns)
+        print(f"  Decision path: {path}")
+
+    match = result.patterns_match
+    if match is True:
+        expected = ", ".join(p.value for p in result.expected_patterns)
+        print(f"  Expected patterns met: {expected}")
+    elif match is False:
+        missing = ", ".join(p.value for p in result.missing_patterns)
+        print(f"  ⚠ Missing expected patterns: {missing}")
 
     if result.events:
         last = result.events[-1]
