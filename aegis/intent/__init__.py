@@ -11,6 +11,12 @@ Tier-1 (this module) is deterministic keyword/phrase matching — 0
 token, fail-open to NORMAL_DEV when uncertain. A future Tier-2 may
 add an LLM classifier; the public API will stay the same.
 """
+from aegis.intent.bypass import BypassVerdict, IntentBypassDetector
 from aegis.intent.classifier import Intent, IntentClassifier
 
-__all__ = ["Intent", "IntentClassifier"]
+__all__ = [
+    "BypassVerdict",
+    "Intent",
+    "IntentBypassDetector",
+    "IntentClassifier",
+]

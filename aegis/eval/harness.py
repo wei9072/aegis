@@ -22,7 +22,9 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from aegis.agents.llm_adapter import LLMGateway
+from aegis.intent.bypass import IntentBypassDetector
 from aegis.runtime.trace import DecisionEvent
+from aegis.semantic.comparator import SemanticComparator
 
 
 # ---------- Scenario LLM stub ----------
@@ -101,10 +103,25 @@ class Scenario:
     max_retries: int = 3
     expects_raise: bool = False
     note: str = ""
+    # Optional Phase-3 dependency. When set, the harness wires an
+    # IntentBypassDetector into the gateway with this comparator. When
+    # None, the gateway has no bypass detector at all and Phase-3
+    # events are absent — exactly the situation today's scenarios
+    # 01-08, 11, 12 want.
+    intent_bypass_comparator: SemanticComparator | None = None
+    intent_bypass_threshold: float = 0.7
 
     def run(self) -> ScenarioResult:
         provider = _ScenarioProvider(self.llm_responses)
-        gateway = LLMGateway(llm_provider=provider)
+        bypass = (
+            IntentBypassDetector(
+                comparator=self.intent_bypass_comparator,
+                threshold=self.intent_bypass_threshold,
+            )
+            if self.intent_bypass_comparator is not None
+            else None
+        )
+        gateway = LLMGateway(llm_provider=provider, intent_bypass=bypass)
         raised: str | None = None
         try:
             gateway.generate_and_validate(

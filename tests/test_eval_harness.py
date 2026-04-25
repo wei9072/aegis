@@ -218,9 +218,9 @@ def test_all_builtin_scenarios_pass_on_current_code():
 
 def test_builtin_scenarios_count_matches_documented():
     """Pinned to current count so adding/removing a scenario is a
-    deliberate edit. Original 10 + 2 from Phase 2.5 (IntentClassifier:
-    adversarial label + teaching-does-not-soften-policy invariant)."""
-    assert len(SCENARIOS) == 12
+    deliberate edit. Original 10 + 2 from Phase 2.5 (intent labels) +
+    1 from Phase 3 (intent-bypass negative coverage) = 13."""
+    assert len(SCENARIOS) == 13
 
 
 def test_builtin_scenario_names_unique():
@@ -229,12 +229,11 @@ def test_builtin_scenario_names_unique():
 
 
 def test_gap_scenarios_carry_explanatory_notes():
-    """Any scenario that documents a known gap must explain why so the
-    note can be converted into a real assertion when the relevant layer
-    ships. If no GAP-marker exists the harness can't tell future
-    contributors what to tighten."""
+    """Any scenario marked GAP must explain why so the note can be
+    converted into a real assertion when the relevant layer ships. A
+    GAP-free harness is the design goal — zero is acceptable; absence
+    of explanation is not."""
     gap_scenarios = [s for s in SCENARIOS if "GAP" in s.note]
-    assert gap_scenarios, "harness should encode at least one known gap"
     for s in gap_scenarios:
         assert len(s.note) > 40, (
             f"scenario {s.name} marks a GAP but the note is too short "

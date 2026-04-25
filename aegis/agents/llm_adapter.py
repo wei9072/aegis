@@ -9,6 +9,7 @@ import re
 import aegis_core_rs
 from aegis.analysis.signals import SignalLayer
 from aegis.delivery.renderer import DeliveryRenderer
+from aegis.intent.bypass import IntentBypassDetector
 from aegis.intent.classifier import IntentClassifier
 from aegis.policy.engine import PolicyEngine
 from aegis.runtime.executor import ExecutionResult
@@ -144,6 +145,7 @@ class LLMGateway:
         toolcall: Optional[ToolCallValidator] = None,
         executor_recorder: Optional[ExecutionRecorder] = None,
         intent: Optional[IntentClassifier] = None,
+        intent_bypass: Optional[IntentBypassDetector] = None,
     ) -> None:
         self.llm_provider = llm_provider
         self.validator = validator or Ring0Validator()
@@ -153,6 +155,9 @@ class LLMGateway:
         self.toolcall = toolcall or ToolCallValidator()
         self.executor_recorder = executor_recorder
         self.intent = intent or IntentClassifier()
+        # No default IntentBypassDetector — it requires a SemanticComparator
+        # which usually means an LLM call. Wire one in explicitly when needed.
+        self.intent_bypass = intent_bypass
         # Most recent request's DecisionTrace; eval harness reads this after
         # generate_and_validate() returns. Reset on every call.
         self.last_trace: Optional[DecisionTrace] = None
@@ -245,6 +250,36 @@ class LLMGateway:
                     )
 
                 view = self.delivery.render(code, verdict, trace=trace)
+
+                # Intent-bypass (Phase 3, post-response): the most
+                # expensive layer, so it runs only after every cheaper
+                # gate has passed. Compares prompt rejection-target
+                # against response semantics via SemanticComparator.
+                if self.intent_bypass is not None:
+                    bv = self.intent_bypass.detect(
+                        prompt=prompt,
+                        response=code,
+                        intent=intent_label,
+                        trace=trace,
+                    )
+                    if bv.has_block():
+                        block_reasons = [
+                            e.reason for e in bv.events if e.decision == BLOCK
+                        ]
+                        trace.emit(
+                            layer="gateway",
+                            decision=BLOCK,
+                            reason="intent_bypass_block",
+                            metadata={
+                                "attempt": attempt + 1,
+                                "intent_bypass_reasons": block_reasons,
+                            },
+                        )
+                        raise RuntimeError(
+                            "Intent-bypass detector blocked the response: "
+                            + ", ".join(block_reasons)
+                        )
+
                 trace.emit(
                     layer="gateway",
                     decision=PASS,
