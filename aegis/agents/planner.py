@@ -32,6 +32,12 @@ class PlanContext:
     previous_errors: list[ValidationError] = field(default_factory=list)
     previous_result: ExecutionResult | None = None
     previous_regressed: bool = False
+    # Per-kind cost growth that caused the previous rollback. Empty
+    # dict (default) means "no rollback last turn" or "rollback but
+    # cost-detail not available". Planner prompt cites these specific
+    # values so the LLM addresses the cost that actually grew, not
+    # just retries blindly.
+    previous_regression_detail: dict[str, float] = field(default_factory=dict)
 
 
 _PLAN_SCHEMA_HINT = """\
@@ -141,9 +147,19 @@ class LLMPlanner:
                     parts.append(f"- [{err.kind}] {loc}: {err.message}")
             if ctx.previous_regressed:
                 parts.append(
-                    "Previous plan APPLIED but was reverted because it increased "
-                    "the total signal count (regression). Try a different approach "
-                    "that does not add new structural issues."
+                    "Previous plan APPLIED but was reverted because the "
+                    "post-apply total cost rose (regression). Specifically:"
+                )
+                if ctx.previous_regression_detail:
+                    for kind, delta in sorted(ctx.previous_regression_detail.items()):
+                        parts.append(f"  - {kind} value increased by +{delta:g}")
+                else:
+                    parts.append("  - (per-kind detail unavailable)")
+                parts.append(
+                    "Try a different approach that keeps these costs "
+                    "non-increasing. Note: adding a new file with all-zero "
+                    "signals does NOT count as regression — only growth in "
+                    "actual signal values does."
                 )
             elif ctx.previous_result is not None and not ctx.previous_result.success:
                 parts.append("Execution failures:")

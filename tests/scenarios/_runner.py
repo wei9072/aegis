@@ -230,6 +230,9 @@ def _render_iteration(ev) -> None:
 
     if ev.rolled_back and ev.regressed:
         print("  Apply         applied → rolled back (signals regressed)")
+        if ev.regression_detail:
+            for kind, delta in sorted(ev.regression_detail.items()):
+                print(f"                · {kind} +{delta:g}")
     elif ev.rolled_back:
         print("  Apply         applied → rolled back (executor failed)")
     elif ev.applied:

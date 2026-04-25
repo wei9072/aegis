@@ -66,6 +66,11 @@ class IterationEvent:
     signal_delta_vs_prev: dict[str, int] = field(default_factory=dict)
     signal_value_totals: dict[str, float] = field(default_factory=dict)
     signal_value_delta_vs_prev: dict[str, float] = field(default_factory=dict)
+    # Per-kind cost growth that triggered rollback this iteration, if
+    # any. Empty dict on iterations that didn't regress. Captured here
+    # (not just on the next ctx.previous_regression_detail) so the
+    # JSON snapshot records *which* cost grew on the rolled-back step.
+    regression_detail: dict[str, float] = field(default_factory=dict)
 
     @property
     def silent_done_contradiction(self) -> bool:
@@ -100,6 +105,7 @@ class IterationEvent:
             "signal_delta_vs_prev": dict(self.signal_delta_vs_prev),
             "signal_value_totals": dict(self.signal_value_totals),
             "signal_value_delta_vs_prev": dict(self.signal_value_delta_vs_prev),
+            "regression_detail": dict(self.regression_detail),
             "silent_done_contradiction": self.silent_done_contradiction,
             "decision_pattern": self.decision_pattern.value,
         }
@@ -144,12 +150,14 @@ def run(
     last_result: ExecutionResult | None = None
     last_errors: list[ValidationError] = []
     last_regressed = False
+    last_regression_detail: dict[str, float] = {}
 
     for i in range(max_iters):
         ctx.previous_plan = last_plan
         ctx.previous_errors = last_errors
         ctx.previous_result = last_result
         ctx.previous_regressed = last_regressed
+        ctx.previous_regression_detail = dict(last_regression_detail)
 
         try:
             plan = planner.plan(ctx)
@@ -250,6 +258,7 @@ def run(
 
         new_ctx = _build_context(task, root_abs, scope, include_file_snippets)
         if _regressed(ctx.signals, new_ctx.signals):
+            detail = _regression_detail(ctx.signals, new_ctx.signals)
             executor.rollback_result(result)
             result.rolled_back = True
             _emit_iteration(
@@ -264,8 +273,10 @@ def run(
                 ctx_signals=ctx.signals,  # post-rollback, same as before
                 prev_kind_counts=prev_kind_counts,
                 prev_value_totals=prev_value_totals,
+                regression_detail=detail,
             )
             last_plan, last_errors, last_result, last_regressed = plan, [], result, True
+            last_regression_detail = detail
             continue
 
         ctx = new_ctx
@@ -285,6 +296,7 @@ def run(
         prev_kind_counts = _kind_counts(ctx.signals)
         prev_value_totals = _kind_value_totals(ctx.signals)
         last_plan, last_errors, last_result, last_regressed = plan, [], result, False
+        last_regression_detail = {}
 
         if plan.done:
             return PipelineResult(
@@ -321,6 +333,7 @@ def _emit_iteration(
     ctx_signals: dict[str, list[Signal]],
     prev_kind_counts: dict[str, int],
     prev_value_totals: dict[str, float],
+    regression_detail: dict[str, float] | None = None,
 ) -> None:
     if cb is None:
         return
@@ -351,6 +364,7 @@ def _emit_iteration(
         signal_delta_vs_prev=count_delta,
         signal_value_totals=value_totals,
         signal_value_delta_vs_prev=value_delta,
+        regression_detail=dict(regression_detail or {}),
     ))
 
 
@@ -476,6 +490,46 @@ def _hash_plan(plan: PatchPlan) -> str:
 def _regressed(
     before: dict[str, list[Signal]], after: dict[str, list[Signal]]
 ) -> bool:
-    def total(d: dict[str, list[Signal]]) -> int:
-        return sum(len(v) for v in d.values())
-    return total(after) > total(before)
+    """Did the patch make the codebase worse?
+
+    Uses total signal *cost* (sum of values across files), not
+    instance count. The instance-count strategy used previously
+    false-positive'd legitimate refactors that produced new files —
+    every new file picks up zero-valued signals (fan_out=0,
+    max_chain_depth=0) which raised the count without raising any
+    actual cost. cost-based comparison answers the question the
+    pipeline is actually asking: "did this change degrade the
+    codebase's structural quality?".
+    """
+    return _total_cost(after) > _total_cost(before)
+
+
+def _total_cost(signals: dict[str, list[Signal]]) -> float:
+    """Sum every signal value across every file. New files with
+    all-zero signals contribute 0 — by design, so a benign split
+    doesn't look like regression."""
+    return sum(
+        float(sig.value)
+        for sig_list in signals.values()
+        for sig in sig_list
+    )
+
+
+def _regression_detail(
+    before: dict[str, list[Signal]], after: dict[str, list[Signal]]
+) -> dict[str, float]:
+    """Per-kind cost deltas, restricted to kinds whose cost actually rose.
+
+    Returns the LLM-facing version of "why was this rolled back".
+    Empty dict means "no regression". Used to populate
+    `PlanContext.previous_regression_detail` so the next planner turn
+    can address the specific cost that grew, not just retry blindly.
+    """
+    before_totals = _kind_value_totals(before)
+    after_totals = _kind_value_totals(after)
+    detail: dict[str, float] = {}
+    for kind in set(before_totals) | set(after_totals):
+        delta = after_totals.get(kind, 0.0) - before_totals.get(kind, 0.0)
+        if delta > 0:
+            detail[kind] = round(delta, 4)
+    return detail
