@@ -79,34 +79,45 @@ SCENARIOS: list[Scenario] = [
 
     # ---------- Ring 0.5 observations ----------
     Scenario(
-        name="04-high-fan-out-observed-not-blocked",
-        description="15 imports — Ring 0.5 observes fan_out; nothing blocks.",
+        name="04-high-fan-out-observed-warned",
+        description=(
+            "15 imports — Ring 0.5 observes fan_out, policy escalates to "
+            "warn, delivery surfaces a banner before the code."
+        ),
         prompt="lots of imports",
         llm_responses=[_CODE_HEAVY_IMPORTS],
         expected_events=[
             _E("ring0", "pass", "syntax_valid"),
             _E("ring0_5", "observe", "fan_out"),
+            _E("policy", "warn", "high_fan_out_advisory"),
+            _E("delivery", "observe", "warning_surfaced"),
             _E("gateway", "pass", "response_accepted"),
         ],
         note=(
-            "GAP: Ring 0.5 only observes. Future policy layer should "
-            "emit `policy:warn` (or `policy:contextual_allow`) when "
-            "fan_out >= 15."
+            "Phase 1 closed: signal → policy → decision → action → trace. "
+            "fan_out >= 10 triggers `policy:warn` and the delivery layer "
+            "surfaces a banner before the code block (LLM-bound channel "
+            "stays clean)."
         ),
     ),
     Scenario(
-        name="05-deep-chain-observed-not-blocked",
-        description="Method chain depth 5 — Ring 0.5 observes max_chain_depth.",
+        name="05-deep-chain-observed-warned",
+        description=(
+            "Method chain depth 5 — Ring 0.5 observes max_chain_depth, "
+            "policy escalates to a Demeter advisory."
+        ),
         prompt="deep chain",
         llm_responses=[_CODE_DEEP_CHAIN],
         expected_events=[
             _E("ring0", "pass", "syntax_valid"),
             _E("ring0_5", "observe", "max_chain_depth"),
+            _E("policy", "warn", "demeter_violation_advisory"),
+            _E("delivery", "observe", "warning_surfaced"),
             _E("gateway", "pass", "response_accepted"),
         ],
         note=(
-            "GAP: chain depth is observed only. Future policy layer "
-            "should warn at depth >= 4 (Law of Demeter)."
+            "Phase 1 closed: max_chain_depth >= 5 triggers the Demeter "
+            "advisory and the delivery layer surfaces it."
         ),
     ),
 

@@ -8,6 +8,8 @@ import tempfile
 import re
 import aegis_core_rs
 from aegis.analysis.signals import SignalLayer
+from aegis.delivery.renderer import DeliveryRenderer
+from aegis.policy.engine import PolicyEngine
 from aegis.runtime.trace import BLOCK, OBSERVE, PASS, DecisionTrace
 
 
@@ -122,10 +124,14 @@ class LLMGateway:
         llm_provider: LLMProvider,
         validator: Optional[Ring0Validator] = None,
         signal_builder: Optional[SignalContextBuilder] = None,
+        policy: Optional[PolicyEngine] = None,
+        delivery: Optional[DeliveryRenderer] = None,
     ) -> None:
         self.llm_provider = llm_provider
         self.validator = validator or Ring0Validator()
         self.signal_builder = signal_builder or SignalContextBuilder()
+        self.policy = policy or PolicyEngine()
+        self.delivery = delivery or DeliveryRenderer()
         # Most recent request's DecisionTrace; eval harness reads this after
         # generate_and_validate() returns. Reset on every call.
         self.last_trace: Optional[DecisionTrace] = None
@@ -155,16 +161,50 @@ class LLMGateway:
 
             if not violations:
                 signal_ctx = self.signal_builder.build_context(code, trace=trace)
+
+                # signal → policy → decision → action → trace.
+                # PolicyEngine reads ring0_5 observations the signal_builder
+                # just emitted and decides whether to escalate.
+                verdict = self.policy.evaluate(trace)
+                if verdict.has_block():
+                    block_reasons = [
+                        e.reason for e in verdict.events if e.decision == BLOCK
+                    ]
+                    trace.emit(
+                        layer="gateway",
+                        decision=BLOCK,
+                        reason="policy_block",
+                        metadata={
+                            "attempt": attempt + 1,
+                            "policy_reasons": block_reasons,
+                        },
+                    )
+                    raise RuntimeError(
+                        "Policy blocked the response: " + ", ".join(block_reasons)
+                    )
+
+                view = self.delivery.render(code, verdict, trace=trace)
                 trace.emit(
                     layer="gateway",
                     decision=PASS,
                     reason="response_accepted",
-                    metadata={"attempt": attempt + 1, "has_signals": bool(signal_ctx)},
+                    metadata={
+                        "attempt": attempt + 1,
+                        "has_signals": bool(signal_ctx),
+                        "policy_warned": bool(verdict.warnings()),
+                        "delivery_surfaced": view.surfaced,
+                    },
                 )
+
+                output = view.human
                 if signal_ctx:
                     sep = "\n# "
-                    return code + "\n\n# --- Aegis Signals ---\n# " + signal_ctx.replace("\n", sep)
-                return code
+                    output = (
+                        output
+                        + "\n\n# --- Aegis Signals ---\n# "
+                        + signal_ctx.replace("\n", sep)
+                    )
+                return output
 
             current_prompt = PromptFormatter.format_retry(current_prompt, violations)
             last_violations = violations
