@@ -10,7 +10,9 @@ import aegis_core_rs
 from aegis.analysis.signals import SignalLayer
 from aegis.delivery.renderer import DeliveryRenderer
 from aegis.policy.engine import PolicyEngine
+from aegis.runtime.executor import ExecutionResult
 from aegis.runtime.trace import BLOCK, OBSERVE, PASS, DecisionTrace
+from aegis.toolcall.validator import ToolCallValidator
 
 
 class LLMProvider(Protocol):
@@ -22,6 +24,18 @@ class LLMProvider(Protocol):
     """
 
     def generate(self, prompt: str, tools: tuple | None = None) -> str: ...
+
+
+class ExecutionRecorder(Protocol):
+    """Snapshot oracle for the per-turn ExecutionResult.
+
+    LLMGateway calls `snapshot()` once per attempt to learn what the
+    Executor actually did during this turn. When no recorder is wired
+    in, the gateway treats the turn as having performed no writes — so
+    any natural-language write claim is, by construction, hallucinated.
+    """
+
+    def snapshot(self) -> ExecutionResult: ...
 
 
 class Ring0Validator:
@@ -126,12 +140,16 @@ class LLMGateway:
         signal_builder: Optional[SignalContextBuilder] = None,
         policy: Optional[PolicyEngine] = None,
         delivery: Optional[DeliveryRenderer] = None,
+        toolcall: Optional[ToolCallValidator] = None,
+        executor_recorder: Optional[ExecutionRecorder] = None,
     ) -> None:
         self.llm_provider = llm_provider
         self.validator = validator or Ring0Validator()
         self.signal_builder = signal_builder or SignalContextBuilder()
         self.policy = policy or PolicyEngine()
         self.delivery = delivery or DeliveryRenderer()
+        self.toolcall = toolcall or ToolCallValidator()
+        self.executor_recorder = executor_recorder
         # Most recent request's DecisionTrace; eval harness reads this after
         # generate_and_validate() returns. Reset on every call.
         self.last_trace: Optional[DecisionTrace] = None
@@ -160,6 +178,35 @@ class LLMGateway:
             violations = self.validator.validate(code, trace=trace)
 
             if not violations:
+                # ToolCallValidator (Tier-1, deterministic): catch
+                # hallucinated side-effect claims before spending any
+                # signal/policy work on a response we'd reject anyway.
+                executor_result = (
+                    self.executor_recorder.snapshot()
+                    if self.executor_recorder is not None
+                    else None
+                )
+                tc_verdict = self.toolcall.validate(
+                    code, executor_result, trace=trace,
+                )
+                if tc_verdict.has_block():
+                    block_reasons = [
+                        e.reason for e in tc_verdict.events if e.decision == BLOCK
+                    ]
+                    trace.emit(
+                        layer="gateway",
+                        decision=BLOCK,
+                        reason="toolcall_block",
+                        metadata={
+                            "attempt": attempt + 1,
+                            "toolcall_reasons": block_reasons,
+                        },
+                    )
+                    raise RuntimeError(
+                        "ToolCall validation blocked the response: "
+                        + ", ".join(block_reasons)
+                    )
+
                 signal_ctx = self.signal_builder.build_context(code, trace=trace)
 
                 # signal → policy → decision → action → trace.
