@@ -121,3 +121,55 @@ def test_is_ok_helper():
     assert is_ok(PatchStatus.ALREADY_APPLIED)
     assert not is_ok(PatchStatus.NOT_FOUND)
     assert not is_ok(PatchStatus.AMBIGUOUS)
+
+
+def test_line_level_anchor_without_explicit_newlines_matches():
+    """Regression for the syntax_fix scenario: gemma-4-31b-it emitted
+    `context_after="    return a + b"` (no leading newline) for a
+    `def add(a, b)` line, but the file contains a newline between the
+    two lines. Pure byte-concat would NOT_FOUND a perfectly correct
+    plan; the matcher's newline-aware fallback must rescue it."""
+    content = "def add(a, b)\n    return a + b\n\n\ndef multiply(a, b):\n    return a * b\n"
+    edit = Edit(
+        old_string="def add(a, b)",
+        new_string="def add(a, b):",
+        context_before="",
+        context_after="    return a + b",  # bare line, no \n
+    )
+    new, result = apply_edit(content, edit)
+    assert result.status == PatchStatus.APPLIED
+    assert result.matches == 1
+    assert "def add(a, b):\n    return a + b" in new
+    # The other function must be untouched.
+    assert "def multiply(a, b):\n    return a * b" in new
+
+
+def test_line_level_anchor_already_applied_via_newline_form():
+    """If the line-level anchor's NEW form (post-fix) is what's on
+    disk, ALREADY_APPLIED still fires through the same fallback."""
+    content = "def add(a, b):\n    return a + b\n"
+    edit = Edit(
+        old_string="def add(a, b)",
+        new_string="def add(a, b):",
+        context_before="",
+        context_after="    return a + b",
+    )
+    new, result = apply_edit(content, edit)
+    assert result.status == PatchStatus.ALREADY_APPLIED
+    assert new == content
+
+
+def test_inline_anchor_still_uses_raw_join():
+    """An anchor with an explicit trailing `\\n` must keep its inline
+    semantics — the newline-aware fallback must NOT double-add a
+    newline and break previously-working inline edits."""
+    content = "x = 1\n"
+    edit = Edit(
+        old_string="x = 1",
+        new_string="x = 10",
+        context_before="",
+        context_after="\n",
+    )
+    new, result = apply_edit(content, edit)
+    assert result.status == PatchStatus.APPLIED
+    assert new == "x = 10\n"
