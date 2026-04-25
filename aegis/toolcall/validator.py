@@ -26,14 +26,18 @@ import re
 from dataclasses import dataclass, field
 
 from aegis.runtime.executor import ExecutionResult
-from aegis.runtime.trace import BLOCK, DecisionEvent, DecisionTrace
+from aegis.runtime.trace import BLOCK, PASS, DecisionEvent, DecisionTrace
+from aegis.semantic.comparator import SemanticComparator
 
 
 # Verbs that signal "I performed a side effect on the filesystem".
 # Ordered loosely by frequency in real LLM output; order is irrelevant
 # at runtime since we use `any(... in text)`.
 _WRITE_VERBS_ZH: tuple[str, ...] = (
-    "創建", "建立", "新建", "建造", "寫入", "儲存", "存入", "生成", "產生",
+    # Order doesn't matter at runtime, but "寫" must stay in the list
+    # for narrations like "我為你寫了 X.py" — narrower verbs ("寫入"
+    # alone) miss the bare-write phrasing that real LLMs prefer.
+    "寫", "創建", "建立", "新建", "建造", "儲存", "存入", "生成", "產生",
 )
 _WRITE_VERBS_EN: tuple[str, ...] = (
     "created", "wrote", "saved", "generated", "added", "produced", "made",
@@ -91,6 +95,19 @@ class ToolCallVerdict:
 
 
 class ToolCallValidator:
+    def __init__(
+        self,
+        comparator: SemanticComparator | None = None,
+        *,
+        threshold: float = 0.7,
+    ) -> None:
+        # When `comparator` is None, only Tier-1 (deterministic
+        # path-existence checks) runs. Wiring a comparator turns on
+        # Tier-2 (semantic claim/content comparison) — one extra LLM
+        # call per turn that survives Tier-1 with executor activity.
+        self.comparator = comparator
+        self.threshold = threshold
+
     def validate(
         self,
         response_text: str,
@@ -99,10 +116,15 @@ class ToolCallValidator:
     ) -> ToolCallVerdict:
         """Compare narrated claims against actual executor activity.
 
+        Two-tier shape (ROADMAP §3.1 / §4.1):
+          - Tier-1: deterministic, no LLM. Always runs. Catches the
+            common hallucination shapes.
+          - Tier-2: semantic, one LLM call. Runs only when Tier-1
+            cleared, executor wrote *something*, and a comparator was
+            wired in. Compares LLM narration against actual content.
+
         `executor_result=None` is treated as "no executor was wired in
-        for this turn" — equivalent to an empty ExecutionResult. A
-        missing executor is itself evidence the LLM cannot have written
-        anything, so claims still get blocked.
+        for this turn" — equivalent to an empty ExecutionResult.
         """
         verdict = ToolCallVerdict()
         claimed, paths = claim_implies_write(response_text)
@@ -110,9 +132,9 @@ class ToolCallValidator:
             return verdict
 
         touched = self._touched_paths(executor_result)
-        # Hallucination shape #1: claimed paths but executor recorded
-        # zero writes. Catches scenario 10 (pure-text claim, no tool
-        # call attempted at all).
+        # Tier-1 shape #1: claimed paths but executor recorded zero
+        # writes. Catches scenario 10 (pure-text claim, no tool call
+        # attempted at all).
         if not touched:
             event = self._emit_block(
                 trace,
@@ -126,9 +148,9 @@ class ToolCallValidator:
                 verdict.events.append(event)
             return verdict
 
-        # Hallucination shape #2: executor wrote *something* but none of
-        # the claimed paths match. The mismatch is still deterministic
-        # at Tier-1 — exact path comparison, no semantics.
+        # Tier-1 shape #2: executor wrote *something* but none of the
+        # claimed paths match. The mismatch is still deterministic —
+        # exact path comparison, no semantics.
         unmatched = [p for p in paths if not self._path_matches_any(p, touched)]
         if unmatched:
             event = self._emit_block(
@@ -142,7 +164,80 @@ class ToolCallValidator:
             )
             if event is not None:
                 verdict.events.append(event)
+            return verdict
+
+        # Tier-1 cleared. Run Tier-2 if a comparator is wired in and
+        # we actually have content to compare against.
+        if self.comparator is None or executor_result is None:
+            return verdict
+
+        matched_contents = self._collect_matched_contents(
+            paths, touched, executor_result.path_contents,
+        )
+        if not matched_contents:
+            return verdict
+
+        event = self._tier2_compare(response_text, matched_contents, trace)
+        if event is not None:
+            verdict.events.append(event)
         return verdict
+
+    def _tier2_compare(
+        self,
+        response_text: str,
+        matched_contents: list[tuple[str, str]],
+        trace: DecisionTrace | None,
+    ) -> DecisionEvent | None:
+        # One comparison call per turn: concatenate every matched
+        # path's actual content and compare against the LLM narration
+        # in a single round-trip. Multiple per-path calls would
+        # multiply LLM cost without proportionally better signal.
+        combined = "\n\n".join(f"--- {p} ---\n{c}" for p, c in matched_contents)
+        context = (
+            "tool_call_tier2: A is the LLM's natural-language narration "
+            "of what it just wrote. B is the actual file content the "
+            "executor produced. overlap=1.0 means narration faithfully "
+            "describes content; 0.0 means they describe different things "
+            "(hallucinated description of an unrelated write)."
+        )
+        result = self.comparator.compare(response_text, combined, context=context)
+        # Invariant 4: emit on every executed run, block or pass alike.
+        if trace is None:
+            return None
+        block = result.overlap < self.threshold
+        return trace.emit(
+            layer="toolcall",
+            decision=BLOCK if block else PASS,
+            reason="claim_content_mismatch" if block else "claim_content_matches",
+            metadata={
+                "matched_paths": [p for p, _ in matched_contents],
+                "overlap": result.overlap,
+                "threshold": self.threshold,
+                "rationale": result.rationale,
+            },
+        )
+
+    @staticmethod
+    def _collect_matched_contents(
+        claimed_paths: list[str],
+        touched: list[str],
+        path_contents: dict[str, str],
+    ) -> list[tuple[str, str]]:
+        """Pick (touched_path, content) pairs that match any claimed path.
+
+        Reuses the same suffix-tolerant comparison Tier-1 uses, so
+        there is exactly one notion of "this claim refers to that
+        write" across both tiers.
+        """
+        out: list[tuple[str, str]] = []
+        for t in touched:
+            if t not in path_contents:
+                continue
+            for c in claimed_paths:
+                if ToolCallValidator._path_matches_any(c, [t]):
+                    out.append((t, path_contents[t]))
+                    break
+        return out
 
     @staticmethod
     def _touched_paths(executor_result: ExecutionResult | None) -> list[str]:

@@ -218,9 +218,9 @@ def test_all_builtin_scenarios_pass_on_current_code():
 
 def test_builtin_scenarios_count_matches_documented():
     """Pinned to current count so adding/removing a scenario is a
-    deliberate edit. Original 10 + 2 from Phase 2.5 (intent labels) +
-    1 from Phase 3 (intent-bypass negative coverage) = 13."""
-    assert len(SCENARIOS) == 13
+    deliberate edit. 10 original + 2 intent labels (Phase 2.5) +
+    1 intent-bypass negative + 2 toolcall Tier-2 (Phase 3b) = 15."""
+    assert len(SCENARIOS) == 15
 
 
 def test_builtin_scenario_names_unique():

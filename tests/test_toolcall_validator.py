@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from aegis.runtime.executor import ExecutionResult
 from aegis.runtime.trace import BLOCK, DecisionTrace
+from aegis.semantic.comparator import StubSemanticComparator
 from aegis.toolcall.validator import (
     ToolCallValidator,
     claim_implies_write,
@@ -151,3 +152,135 @@ def test_validate_without_trace_still_returns_verdict():
     # No trace means nothing to emit into; verdict.events stays empty
     # because `_emit_block` returns None when trace is None.
     assert verdict.events == []
+
+
+# ---------- Tier-2 (semantic claim/content comparison) ----------
+
+_QUICKSORT_NARRATION = (
+    "我為你寫了一個 quicksort 在 sort.py。\n"
+    "```python\ndef quicksort(arr): ...\n```"
+)
+_FIBONACCI_CONTENT = (
+    "def fibonacci(n):\n    return n if n <= 1 else fibonacci(n-1) + fibonacci(n-2)"
+)
+_QUICKSORT_CONTENT = (
+    "def quicksort(arr):\n"
+    "    if len(arr) <= 1: return arr\n"
+    "    p = arr[0]\n"
+    "    return quicksort([x for x in arr[1:] if x < p]) + [p] + "
+    "quicksort([x for x in arr[1:] if x >= p])"
+)
+
+
+def _matched_result(path: str, content: str) -> ExecutionResult:
+    return ExecutionResult(
+        success=True,
+        touched_paths=[path],
+        created_paths=[path],
+        path_contents={path: content},
+    )
+
+
+def test_tier2_skipped_when_no_comparator_wired():
+    """Tier-1 cleared, no comparator → no toolcall events at all."""
+    trace = DecisionTrace()
+    verdict = ToolCallValidator(comparator=None).validate(
+        _QUICKSORT_NARRATION,
+        _matched_result("sort.py", _QUICKSORT_CONTENT),
+        trace=trace,
+    )
+    assert verdict.events == []
+    assert trace.by_layer("toolcall") == []
+
+
+def test_tier2_blocks_on_low_overlap():
+    """Path matches, content does NOT match narration → block."""
+    trace = DecisionTrace()
+    cmp = StubSemanticComparator(overlap=0.12, rationale="quicksort vs fibonacci")
+    verdict = ToolCallValidator(comparator=cmp, threshold=0.7).validate(
+        _QUICKSORT_NARRATION,
+        _matched_result("sort.py", _FIBONACCI_CONTENT),
+        trace=trace,
+    )
+    assert verdict.has_block()
+    ev = verdict.events[0]
+    assert ev.decision == BLOCK
+    assert ev.reason == "claim_content_mismatch"
+    assert ev.metadata["matched_paths"] == ["sort.py"]
+    assert ev.metadata["overlap"] == 0.12
+    assert ev.metadata["threshold"] == 0.7
+
+
+def test_tier2_passes_with_emit_on_high_overlap():
+    """Invariant 4: pass case still emits a PASS event so the trace
+    shows Tier-2 ran (and absorbed its LLM cost)."""
+    trace = DecisionTrace()
+    cmp = StubSemanticComparator(overlap=0.93, rationale="match")
+    verdict = ToolCallValidator(comparator=cmp).validate(
+        _QUICKSORT_NARRATION,
+        _matched_result("sort.py", _QUICKSORT_CONTENT),
+        trace=trace,
+    )
+    assert not verdict.has_block()
+    events = trace.by_layer("toolcall")
+    assert len(events) == 1
+    assert events[0].decision == "pass"
+    assert events[0].reason == "claim_content_matches"
+
+
+def test_tier2_does_not_run_when_tier1_blocks():
+    """A Tier-1 block must short-circuit before any comparator call."""
+
+    class _ShouldNotBeCalled:
+        def compare(self, *a, **kw):
+            raise AssertionError("Tier-2 must not run after a Tier-1 block")
+
+    trace = DecisionTrace()
+    verdict = ToolCallValidator(comparator=_ShouldNotBeCalled()).validate(
+        "I created bar.py for you.",
+        # Tier-1 shape #2: claim mentions bar.py; executor wrote foo.py.
+        ExecutionResult(success=True, touched_paths=["foo.py"]),
+        trace=trace,
+    )
+    assert verdict.has_block()
+    assert verdict.events[0].reason == "claimed_paths_not_written"
+
+
+def test_tier2_skipped_when_no_path_content():
+    """Path matched but content map empty → nothing to compare against."""
+    trace = DecisionTrace()
+    cmp = StubSemanticComparator(overlap=0.0)
+    verdict = ToolCallValidator(comparator=cmp).validate(
+        _QUICKSORT_NARRATION,
+        ExecutionResult(success=True, touched_paths=["sort.py"]),  # no contents
+        trace=trace,
+    )
+    assert verdict.events == []
+    assert trace.by_layer("toolcall") == []
+
+
+def test_tier2_concatenates_multiple_matched_paths():
+    """When the LLM claims multiple paths, Tier-2 makes ONE comparator
+    call against the concatenation — keeps cost predictable."""
+    captured: list[tuple[str, str]] = []
+
+    class _Recorder:
+        def compare(self, a, b, *, context=""):
+            captured.append((a, b))
+            return StubSemanticComparator(overlap=0.99).compare(a, b)
+
+    trace = DecisionTrace()
+    result = ExecutionResult(
+        success=True,
+        touched_paths=["a.py", "b.py"],
+        created_paths=["a.py", "b.py"],
+        path_contents={"a.py": "AAA", "b.py": "BBB"},
+    )
+    ToolCallValidator(comparator=_Recorder()).validate(
+        "I wrote a.py and b.py for you.",
+        result,
+        trace=trace,
+    )
+    assert len(captured) == 1, "exactly one comparator call expected"
+    _, combined = captured[0]
+    assert "AAA" in combined and "BBB" in combined

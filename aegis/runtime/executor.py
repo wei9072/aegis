@@ -33,6 +33,11 @@ class ExecutionResult:
     staleness_detected: bool = False  # reserved for future TOCTOU hash check
     created_paths: list[str] = field(default_factory=list)
     touched_paths: list[str] = field(default_factory=list)
+    # Final on-disk content for each touched path. Populated by Executor
+    # so ToolCallValidator Tier-2 can compare LLM narration against what
+    # actually got written without reading live state itself (invariant 6:
+    # the decision phase consumes only the executor-provided snapshot).
+    path_contents: dict[str, str] = field(default_factory=dict)
 
 
 class Executor:
@@ -52,7 +57,7 @@ class Executor:
 
         try:
             self._take_snapshot(plan, snapshot, backup_dir)
-            results, failed = self._apply_patches(plan, snapshot)
+            results, failed, current = self._apply_patches(plan, snapshot)
         except Exception as e:
             self._rollback(snapshot)
             return ExecutionResult(
@@ -75,6 +80,8 @@ class Executor:
 
         created = [p for p, original in snapshot.items() if original is None]
         touched = list(snapshot.keys())
+        # Final content per path — None entries are deletes, skip those.
+        path_contents = {p: c for p, c in current.items() if c is not None}
         self._gc_backups()
         return ExecutionResult(
             success=True,
@@ -82,6 +89,7 @@ class Executor:
             backup_dir=str(backup_dir),
             created_paths=created,
             touched_paths=touched,
+            path_contents=path_contents,
         )
 
     def _make_backup_dir(self) -> Path:
@@ -108,8 +116,10 @@ class Executor:
 
     def _apply_patches(
         self, plan: PatchPlan, snapshot: dict[str, str | None]
-    ) -> tuple[list[PatchResult], bool]:
-        """Returns (results, failed). Stops on first failure."""
+    ) -> tuple[list[PatchResult], bool, dict[str, str | None]]:
+        """Returns (results, failed, current). `current` carries the
+        final post-apply content per path so the caller can build
+        `ExecutionResult.path_contents`. Stops on first failure."""
         current: dict[str, str | None] = dict(snapshot)
         results: list[PatchResult] = []
 
@@ -120,11 +130,11 @@ class Executor:
                 results.append(PatchResult(
                     patch_id=patch.id, status=PatchStatus.NOT_FOUND, error=str(e)
                 ))
-                return results, True
+                return results, True, current
             results.append(result)
             if not is_ok(result.status):
-                return results, True
-        return results, False
+                return results, True, current
+        return results, False, current
 
     def _apply_one(
         self, patch: Patch, current: dict[str, str | None]

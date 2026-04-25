@@ -23,11 +23,28 @@ from typing import Any, Iterable
 
 from aegis.agents.llm_adapter import LLMGateway
 from aegis.intent.bypass import IntentBypassDetector
+from aegis.runtime.executor import ExecutionResult
 from aegis.runtime.trace import DecisionEvent
 from aegis.semantic.comparator import SemanticComparator
+from aegis.toolcall.validator import ToolCallValidator
 
 
 # ---------- Scenario LLM stub ----------
+
+class _StubExecutorRecorder:
+    """ExecutionRecorder stand-in for scenarios.
+
+    Returns the same ExecutionResult on every snapshot. Lets a scenario
+    mock "the Executor wrote these paths with this content" without
+    running a real Executor — Tier-2 then has something to compare the
+    LLM narration against.
+    """
+    def __init__(self, result: ExecutionResult) -> None:
+        self._result = result
+
+    def snapshot(self) -> ExecutionResult:
+        return self._result
+
 
 class _ScenarioProvider:
     """Deterministic LLM stand-in for scenario replay.
@@ -110,6 +127,14 @@ class Scenario:
     # 01-08, 11, 12 want.
     intent_bypass_comparator: SemanticComparator | None = None
     intent_bypass_threshold: float = 0.7
+    # Phase-3 Tier-2 dependencies. When `toolcall_comparator` is set,
+    # the harness wires it into ToolCallValidator (Tier-2 enabled). When
+    # `stub_execution_result` is set, the harness wires a recorder that
+    # returns it on every snapshot() — this is how scenarios mock what
+    # the Executor "did" without running a real Executor.
+    toolcall_comparator: SemanticComparator | None = None
+    toolcall_threshold: float = 0.7
+    stub_execution_result: ExecutionResult | None = None
 
     def run(self) -> ScenarioResult:
         provider = _ScenarioProvider(self.llm_responses)
@@ -121,7 +146,21 @@ class Scenario:
             if self.intent_bypass_comparator is not None
             else None
         )
-        gateway = LLMGateway(llm_provider=provider, intent_bypass=bypass)
+        toolcall = ToolCallValidator(
+            comparator=self.toolcall_comparator,
+            threshold=self.toolcall_threshold,
+        )
+        recorder = (
+            _StubExecutorRecorder(self.stub_execution_result)
+            if self.stub_execution_result is not None
+            else None
+        )
+        gateway = LLMGateway(
+            llm_provider=provider,
+            toolcall=toolcall,
+            executor_recorder=recorder,
+            intent_bypass=bypass,
+        )
         raised: str | None = None
         try:
             gateway.generate_and_validate(
