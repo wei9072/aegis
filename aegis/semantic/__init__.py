@@ -17,4 +17,10 @@ from aegis.semantic.comparator import (
     StubSemanticComparator,
 )
 
+# GeminiSemanticComparator intentionally NOT re-exported here: it
+# depends on aegis.agents.gemini, which depends on
+# aegis.agents.llm_adapter, which depends on aegis.intent.bypass,
+# which depends on this package. Import it explicitly via
+# `from aegis.semantic.gemini_comparator import GeminiSemanticComparator`.
+
 __all__ = ["SemanticComparator", "SemanticResult", "StubSemanticComparator"]

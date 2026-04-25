@@ -62,18 +62,25 @@ def test_teaching_with_high_overlap_blocks():
     assert ev.metadata["rationale"] == "bypass demonstrated"
 
 
-def test_teaching_with_low_overlap_passes():
+def test_teaching_with_low_overlap_passes_with_emit():
+    """Invariant 4: every executed run must emit. A pass case emits a
+    PASS event with `overlap_below_threshold` so the trace shows the
+    detector ran (and absorbed its LLM cost) without blocking."""
     trace = DecisionTrace()
     verdict = IntentBypassDetector(
-        StubSemanticComparator(overlap=0.15),
+        StubSemanticComparator(overlap=0.15, rationale="benign"),
     ).detect(
         prompt="explain list comprehensions",
         response="def f(): pass",
         intent=Intent.TEACHING,
         trace=trace,
     )
-    assert verdict.events == []
-    assert trace.by_layer("intent_bypass") == []
+    assert not verdict.has_block()
+    events = trace.by_layer("intent_bypass")
+    assert len(events) == 1
+    assert events[0].decision == "pass"
+    assert events[0].reason == "overlap_below_threshold"
+    assert events[0].metadata["overlap"] == 0.15
 
 
 def test_adversarial_intent_also_gates():
@@ -116,7 +123,10 @@ def test_custom_threshold_is_respected():
         intent=Intent.TEACHING,
         trace=trace,
     )
-    assert verdict.events == []
+    # 0.5 < 0.9 → no block, but the run still emits a PASS event.
+    assert not verdict.has_block()
+    assert verdict.events[0].decision == "pass"
+    assert verdict.events[0].metadata["threshold"] == 0.9
 
 
 def test_detect_without_trace_still_returns_verdict():

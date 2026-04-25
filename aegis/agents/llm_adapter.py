@@ -291,16 +291,13 @@ class LLMGateway:
                         "delivery_surfaced": view.surfaced,
                     },
                 )
-
-                output = view.human
-                if signal_ctx:
-                    sep = "\n# "
-                    output = (
-                        output
-                        + "\n\n# --- Aegis Signals ---\n# "
-                        + signal_ctx.replace("\n", sep)
-                    )
-                return output
+                # Delivery owns the human channel exclusively; we no
+                # longer append a "# --- Aegis Signals ---" suffix here.
+                # That legacy block surfaced even on fan_out=0 turns
+                # (dogfood-observed noise) and would leak warning text
+                # into the LLM-bound view if the caller reused the
+                # output as next-turn context (invariant 7).
+                return view.human
 
             current_prompt = PromptFormatter.format_retry(current_prompt, violations)
             last_violations = violations

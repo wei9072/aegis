@@ -272,6 +272,7 @@ SCENARIOS: list[Scenario] = [
         expected_events=[
             _E("intent", "observe", "teaching"),
             _E("ring0", "pass", "syntax_valid"),
+            _E("intent_bypass", "pass", "overlap_below_threshold"),
             _E("gateway", "pass", "response_accepted"),
         ],
         intent_bypass_comparator=StubSemanticComparator(
