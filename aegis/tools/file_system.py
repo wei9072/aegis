@@ -9,7 +9,13 @@ def read_file(path: str) -> str:
         return f"Error reading file: {e}"
 
 def write_file(path: str, content: str) -> str:
-    """Writes content to a file."""
+    """
+    Writes content to a file. Internal helper — DO NOT expose to the LLM
+    as a callable tool. All LLM-driven writes must go through
+    aegis.runtime.executor.Executor so that backups, atomic apply, and
+    DecisionTrace events are produced. This function is only safe for
+    test fixtures and Executor's own implementation paths.
+    """
     try:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, 'w', encoding='utf-8') as f:
