@@ -175,5 +175,26 @@ def chat(model):
         raise SystemExit(1)
 
 
+@cli.command('eval')
+@click.option('--verbose', '-v', is_flag=True, default=False,
+              help='Show extra detail (raised exceptions, event counts) per scenario.')
+def run_eval(verbose):
+    """Run the Aegis eval harness over the built-in scenarios.
+
+    Each scenario asserts an ordered subsequence of DecisionTrace events.
+    Exit code is 0 only when every scenario passes; CI should rely on
+    this signal to catch regressions in gate behaviour as new layers
+    (ToolCallValidator, policy, intent) are added.
+    """
+    from aegis.eval import format_results, run_all
+    from aegis.eval.scenarios import SCENARIOS
+
+    results = run_all(SCENARIOS)
+    click.echo(format_results(results, verbose=verbose))
+
+    if any(not r.passed for r in results):
+        raise SystemExit(1)
+
+
 if __name__ == '__main__':
     cli()
