@@ -1,5 +1,13 @@
 import os
 
+
+# Names of callables in this module that mutate filesystem state. Both the
+# structural test (tests/test_side_effect_isolation.py) and the runtime
+# validator inside GeminiProvider read from this set, so adding a new
+# mutating helper here is a single, audited place to update.
+MUTATING_TOOL_NAMES = frozenset({"write_file"})
+
+
 def read_file(path: str) -> str:
     """Reads the content of a file."""
     try:

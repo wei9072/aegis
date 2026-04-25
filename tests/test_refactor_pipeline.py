@@ -234,10 +234,13 @@ def test_executor_rollback_result_restores_previous(workspace: Path):
 # ------------- Pipeline (with fake provider) -------------
 
 class FakeProvider:
+    last_used_tools: tuple = ()
+
     def __init__(self, responses: list[str]):
         self._responses = list(responses)
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, tools: tuple | None = None) -> str:
+        self.last_used_tools = tuple(tools) if tools is not None else ()
         if not self._responses:
             raise RuntimeError("FakeProvider: no more responses")
         return self._responses.pop(0)

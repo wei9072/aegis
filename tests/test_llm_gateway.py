@@ -3,10 +3,13 @@ from aegis.agents.llm_adapter import LLMGateway, LLMProvider, Ring0Validator, Pr
 
 
 class FakeProvider:
+    last_used_tools: tuple = ()
+
     def __init__(self, responses):
         self._responses = iter(responses)
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, tools: tuple | None = None) -> str:
+        self.last_used_tools = tuple(tools) if tools is not None else ()
         return next(self._responses)
 
 
@@ -63,7 +66,7 @@ def test_gateway_conversational_text():
 
 def test_gateway_successful_generation_legacy():
     class ValidClient:
-        def generate(self, prompt): return "def process():\n    return 42\n"
+        def generate(self, prompt, tools=None): return "def process():\n    return 42\n"
 
     gw = LLMGateway(llm_provider=ValidClient())
     result = gw.generate_and_validate("Generate a process function")
@@ -73,7 +76,7 @@ def test_gateway_successful_generation_legacy():
 def test_gateway_retries_on_violation_legacy():
     class FixingClient:
         def __init__(self): self.attempts = 0
-        def generate(self, prompt):
+        def generate(self, prompt, tools=None):
             self.attempts += 1
             return "def broken(\n" if self.attempts == 1 else "def fixed():\n    return 42\n"
 

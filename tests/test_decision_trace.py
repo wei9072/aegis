@@ -148,10 +148,13 @@ def test_signal_layer_no_trace_works(tmp_path):
 # ---------- LLMGateway end-to-end trace ----------
 
 class _FakeProvider:
+    last_used_tools: tuple = ()
+
     def __init__(self, responses):
         self._responses = iter(responses)
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, tools: tuple | None = None) -> str:
+        self.last_used_tools = tuple(tools) if tools is not None else ()
         return next(self._responses)
 
 

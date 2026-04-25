@@ -5,5 +5,7 @@ from aegis.agents.llm_adapter import LLMProvider
 
 
 class OpenAIProvider(LLMProvider):
-    def generate(self, prompt: str) -> str:
+    last_used_tools: tuple = ()
+
+    def generate(self, prompt: str, tools: tuple | None = None) -> str:
         raise NotImplementedError("OpenAI provider — implement with openai SDK")

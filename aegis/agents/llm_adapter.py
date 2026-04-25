@@ -12,7 +12,14 @@ from aegis.runtime.trace import BLOCK, OBSERVE, PASS, DecisionTrace
 
 
 class LLMProvider(Protocol):
-    def generate(self, prompt: str) -> str: ...
+    """LLM backend contract.
+
+    `tools` is the per-request tool surface — None means "let the provider
+    fall back to its declared read-only default". Providers MUST refuse to
+    accept any state-mutating callable here; mutations belong to Executor.
+    """
+
+    def generate(self, prompt: str, tools: tuple | None = None) -> str: ...
 
 
 class Ring0Validator:
@@ -123,7 +130,12 @@ class LLMGateway:
         # generate_and_validate() returns. Reset on every call.
         self.last_trace: Optional[DecisionTrace] = None
 
-    def generate_and_validate(self, prompt: str, max_retries: int = 3) -> str:
+    def generate_and_validate(
+        self,
+        prompt: str,
+        max_retries: int = 3,
+        tools: tuple | None = None,
+    ) -> str:
         trace = DecisionTrace()
         self.last_trace = trace
         trace.emit(
@@ -137,7 +149,8 @@ class LLMGateway:
         last_violations: list[str] = []
 
         for attempt in range(max_retries):
-            code = self.llm_provider.generate(current_prompt)
+            code = self.llm_provider.generate(current_prompt, tools=tools)
+            self._emit_tool_surface(trace, attempt + 1)
             violations = self.validator.validate(code, trace=trace)
 
             if not violations:
@@ -171,4 +184,23 @@ class LLMGateway:
         violation_text = "\n".join(f"- {v}" for v in last_violations)
         raise RuntimeError(
             f"Failed to generate valid code after {max_retries} attempts.\n{violation_text}"
+        )
+
+    def _emit_tool_surface(self, trace: DecisionTrace, attempt: int) -> None:
+        """Record which tools the provider actually used for this attempt.
+
+        The provider is expected to expose `last_used_tools` so the gateway
+        can observe the resolved tool surface without coupling to any
+        specific provider's internals. Providers that don't expose this
+        attribute simply produce an empty list — the trace then records
+        that the tool surface was not introspectable, which is itself a
+        useful signal for the eval harness.
+        """
+        used = getattr(self.llm_provider, "last_used_tools", ())
+        names = [getattr(t, "__name__", str(t)) for t in used]
+        trace.emit(
+            layer="provider",
+            decision=OBSERVE,
+            reason="tool_surface",
+            metadata={"attempt": attempt, "tools": names},
         )
