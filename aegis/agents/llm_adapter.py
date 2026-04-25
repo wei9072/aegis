@@ -9,6 +9,7 @@ import re
 import aegis_core_rs
 from aegis.analysis.signals import SignalLayer
 from aegis.delivery.renderer import DeliveryRenderer
+from aegis.intent.classifier import IntentClassifier
 from aegis.policy.engine import PolicyEngine
 from aegis.runtime.executor import ExecutionResult
 from aegis.runtime.trace import BLOCK, OBSERVE, PASS, DecisionTrace
@@ -142,6 +143,7 @@ class LLMGateway:
         delivery: Optional[DeliveryRenderer] = None,
         toolcall: Optional[ToolCallValidator] = None,
         executor_recorder: Optional[ExecutionRecorder] = None,
+        intent: Optional[IntentClassifier] = None,
     ) -> None:
         self.llm_provider = llm_provider
         self.validator = validator or Ring0Validator()
@@ -150,6 +152,7 @@ class LLMGateway:
         self.delivery = delivery or DeliveryRenderer()
         self.toolcall = toolcall or ToolCallValidator()
         self.executor_recorder = executor_recorder
+        self.intent = intent or IntentClassifier()
         # Most recent request's DecisionTrace; eval harness reads this after
         # generate_and_validate() returns. Reset on every call.
         self.last_trace: Optional[DecisionTrace] = None
@@ -167,6 +170,17 @@ class LLMGateway:
             decision=OBSERVE,
             reason="request_started",
             metadata={"prompt_chars": len(prompt), "max_retries": max_retries},
+        )
+
+        # Classify intent once on the original prompt — retry-rewritten
+        # prompts must not change the label, since intent is a property
+        # of the user's request, not the gateway's recovery loop.
+        intent_label = self.intent.classify(prompt)
+        trace.emit(
+            layer="intent",
+            decision=OBSERVE,
+            reason=intent_label.value,
+            metadata={"prompt_chars": len(prompt)},
         )
 
         current_prompt = prompt

@@ -216,11 +216,11 @@ def test_all_builtin_scenarios_pass_on_current_code():
         pytest.fail("scenario regressions:\n" + format_results(results))
 
 
-def test_builtin_scenarios_count_is_exactly_ten():
-    """Documented as 'minimal eval harness — 10 scenarios'. If you need
-    to add or remove one, update the design doc and this assertion in
-    the same PR."""
-    assert len(SCENARIOS) == 10
+def test_builtin_scenarios_count_matches_documented():
+    """Pinned to current count so adding/removing a scenario is a
+    deliberate edit. Original 10 + 2 from Phase 2.5 (IntentClassifier:
+    adversarial label + teaching-does-not-soften-policy invariant)."""
+    assert len(SCENARIOS) == 12
 
 
 def test_builtin_scenario_names_unique():
