@@ -18,5 +18,6 @@ serde_json = { workspace = true }
 
 aegis-trace = { path = "../aegis-trace" }
 aegis-decision = { path = "../aegis-decision" }
+aegis-ir = { path = "../aegis-ir" }
 aegis-providers = { path = "../aegis-providers" }
 aegis-runtime = { path = "../aegis-runtime" }

@@ -701,10 +701,9 @@ from-plan as a sub-bullet.
     practice no V1.x pipeline consumer needs it yet (Gemini-via-Python
     still works through `aegis/agents/gemini.py`). It lands when the
     V1.3 Rust pipeline has a real consumer for it.
-- **V1.2** — Validator + Executor in Rust — ✅ Partial (2026-04-26)
-  - `crates/aegis-runtime/` — new crate with the language-agnostic
-    snapshot/rollback primitive (`Snapshot`) and the sequence-level
-    detector helpers
+- **V1.2** — Validator + Executor in Rust — ✅ Partial+ (2026-04-26)
+  - `crates/aegis-runtime/` — language-agnostic snapshot/rollback
+    primitive (`Snapshot`) and the sequence-level detector helpers
   - `Snapshot::capture` / `restore` / `write_backup` — mirrors V0.x
     Python `Executor._take_snapshot` / `_rollback` / backup-dir
     semantics; idempotent re-add; deletes-now-restores; creates-now-
@@ -712,15 +711,23 @@ from-plan as a sub-bullet.
     paths that didn't exist at snapshot time
   - 5 cargo tests pin every restore branch
   - PyShim exposes `aegis._core.Snapshot` with the same surface
-  - **Scope divergence:** the plan called for porting the full
-    `Executor` + `PlanValidator` Python classes (~500 LOC). Both
-    are deeply intertwined with the IR data model (`PatchPlan`,
-    `Patch`, `EditEngine`, ~400 more LOC of Python) and with
-    Python-prompt-shaped Planner output. Porting just the IO
-    primitive ships an immediately useful Rust foundation
-    (`aegis-mcp`, future Rust pipeline) without dragging the IR
-    port along; the IR-model port is its own scoped phase, deferred
-    until V1.3+ has a concrete consumer that needs it.
+  - **IR-model port shipped (V1.2 follow-up):** `crates/aegis-ir/`
+    is the new home for `PatchKind`, `PatchStatus`, `Edit`, `Patch`,
+    `PatchPlan`, `EditResult`, plus `apply_edit` / `apply_edits` /
+    `is_ok`. The line-aware fallback joiner that fixed syntax_fix
+    convergence (raw concat → newline-aware) is in
+    `aegis-ir/src/edit_engine.rs`. PyShim exposes everything as
+    `aegis._core.{PatchKind, PatchStatus, Edit, Patch, PatchPlan,
+    EditResult, apply_edit, apply_edits, is_ok, plan_to_dict,
+    plan_from_dict, patch_to_dict, patch_from_dict}`. Python
+    `aegis/ir/patch.py` and `aegis/shared/edit_engine.py` are now
+    thin re-exports — every existing call site (Validator, Executor,
+    Planner, Pipeline) keeps working unchanged. 18 cargo tests
+    cover the engine; all 256 Python tests still pass.
+  - **What's still NOT in Rust:** the `Executor` and `PlanValidator`
+    *classes* (file IO + plan structure validation, ~500 Python
+    LOC). They now have all their data-model dependencies in Rust;
+    porting the classes themselves is the next clean V1.2 unit.
 - **V1.3** — Pipeline loop + IterationEvent in Rust — ✅ Partial (2026-04-26)
   - Sequence-level detectors (`is_state_stalemate`, `is_thrashing`,
     `is_plan_repeat_stalemate`) ported to `aegis-runtime::sequence`
@@ -732,6 +739,11 @@ from-plan as a sub-bullet.
     (the slim shim added in V1.0 — fields `derive_pattern` reads).
     Full IterationEvent port (with all the diagnostic fields the
     Python pipeline carries) deferred until the loop itself moves.
+  - **IR-model unblocking (V1.3 prerequisite shipped):** with
+    `aegis-ir` landed (see V1.2 follow-up above) the loop now has
+    its data types in Rust. The remaining V1.3 gap is the
+    coordination logic (~150 LOC of `Pipeline.run()` coordination
+    minus the ~600 LOC of Planner prompt construction).
   - **Scope divergence:** porting the full Pipeline.run() loop is
     ~750 Python LOC heavily entangled with the Planner (LLM-prompt-
     template work — fundamentally Python-shaped, not algorithmic).
@@ -740,9 +752,9 @@ from-plan as a sub-bullet.
     The clean split is "ship coordination as a Rust trait callable
     from Python; let prompts stay where they are". That work is
     well-defined but not in this commit's scope. The detector
-    helpers + Snapshot + IterationEvent shim cover the V1.3 exit
-    gate's load-bearing bit (decision-loop primitives are Rust
-    ground truth) without doing the bigger port.
+    helpers + Snapshot + IterationEvent shim + IR-model cover the
+    V1.3 exit gate's load-bearing bits (decision-loop primitives +
+    plan IR are Rust ground truth) without doing the bigger port.
 - **V1.4** — LanguageAdapter trait + Python adapter port — ✅ Done (2026-04-26)
   - `crates/aegis-core/src/ast/{adapter.rs,registry.rs}` ship the trait + global singleton
   - `analyze_file`, `get_imports`, `check_syntax`, `fan_out_signal`, `chain_depth_signal`
@@ -825,26 +837,33 @@ from-plan as a sub-bullet.
 | :--- | :--- | :--- |
 | V1.0 | ✅ | trace + decision data types, all Python tests still pass |
 | V1.1 | ✅ | OpenAI-compatible Rust provider; Python providers untouched (test rewrite gated on V1.3) |
-| V1.2 | ✅ Partial | `Snapshot` IO ported; full `Executor` + IR-model port deferred |
-| V1.3 | ✅ Partial | sequence detectors + `IterationEvent` shim ported; full loop port deferred (Planner is prompt-template-bound) |
+| V1.2 | ✅ Partial+ | `Snapshot` IO + IR model (`PatchPlan`/`Patch`/`Edit`) + `apply_edit` engine all in Rust; `Executor` + `PlanValidator` Python *classes* are the remaining V1.2 piece |
+| V1.3 | ✅ Partial | sequence detectors + `IterationEvent` shim + IR model ported; full Pipeline.run() coordination port still deferred (the small piece — Planner prompt construction stays Python) |
 | V1.4–V1.7 | ✅ | 10 languages, registry-driven dispatch, CLI auto-walks all extensions |
 | V1.8 | ⬜ | gated on V1.3-full + API quotas |
 | V1.9 | ⬜ | gated on V1.3-full |
 | V1.10 | ⬜ | gated on V1.9 + 2-week soak |
 | V2.0 | ⬜ | gated on V1.10 + CI infra |
 
-The "partial" V1.2/V1.3 entries each ship a load-bearing piece of the
-phase's value (Rust ground-truth detectors; Rust snapshot primitive
-that aegis-mcp + future Rust pipeline can call) without doing the
-larger IR-model port the original plan implicitly needed. That port is
-real work but doesn't naturally fit "always shippable per phase" — it's
-its own multi-session piece.
+The "partial" V1.2/V1.3 entries each now ship the load-bearing data
+contract (`PatchPlan` / `Patch` / `Edit` are Rust ground truth) plus
+the load-bearing logic (`apply_edit`'s line-aware fallback joiner is
+Rust ground truth). What remains for V1.2 full is `Executor` +
+`PlanValidator` Python *classes* — both a straightforward port now
+that all their data dependencies live in Rust. What remains for V1.3
+full is the Pipeline.run() coordination shell (~150 LOC, easily
+trait-callable from Python; the ~600 LOC of Planner prompt
+construction stays Python by design).
 
-**What this means for next-session-agent:** the next clean unit of
-work is the IR-model port (PatchPlan + Patch + EditEngine in Rust),
-which unblocks full V1.2 / V1.3 / V1.8 / V1.9 / V1.10 / V2.0 in
-sequence. That's the load-bearing path forward; everything else is
-incremental refinement.
+**What this means for next-session-agent:** with the IR-model port
+shipped, the next clean unit of work is **`Executor` + `PlanValidator`
+in Rust**. Both classes now have all their data dependencies in
+`aegis-ir` + `aegis-runtime::Snapshot`; the port is structural, not
+algorithmic. After that, the V1.3 coordination shell (~150 LOC,
+trait-callable from Python so Planner prompts can stay Python) closes
+out V1.3 full. Then V1.8 / V1.9 / V1.10 / V2.0 unblock in sequence as
+their gates are met (API quotas, 2-week soak, CI infra — all
+real-world, not code).
 
 ---
 

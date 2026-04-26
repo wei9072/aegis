@@ -38,6 +38,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-ir"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aegis-providers"
 version = "0.1.0"
 dependencies = [
@@ -52,6 +60,7 @@ name = "aegis-pyshim"
 version = "0.1.0"
 dependencies = [
  "aegis-decision",
+ "aegis-ir",
  "aegis-providers",
  "aegis-runtime",
  "aegis-trace",
