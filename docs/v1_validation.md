@@ -483,6 +483,100 @@ tests can't.
 
 ---
 
+## V1.6 verification sweep — Gap 1 stalemate detection in real traffic
+
+Run on 2026-04-26 immediately after V1.5 commit landed. Purpose:
+verify that the new `STALEMATE_DETECTED` and `THRASHING_DETECTED`
+patterns from V1.1 (`aegis/runtime/decision_pattern.py`) actually
+fire under real LLM behavior — not just under synthetic unit tests.
+
+The V1.5 sweep ran with pre-Gap-1 code (Python module cache
+isolation), so this is the first dataset where Gap 1 detectors are
+active.
+
+### Sweep matrix
+
+| scenario | model | runs | provider |
+| :--- | :--- | :--- | :--- |
+| regression_rollback | inclusionai/ling-2.6-1t:free | 5 | OpenRouter |
+| regression_rollback | minimax/minimax-m2.5:free | 5 | OpenRouter |
+
+Total: 10 runs. Both models on OpenRouter (operator chose: Gemma
+too slow for verification, Groq budget too tight for full sweeps).
+
+### Result — `STALEMATE_DETECTED` fires across two model families
+
+**8 of 10 runs hit `STALEMATE_DETECTED` at iter 2** (the third
+iteration), via the state-totals path: 2 prior iters of veto means
+`signal_value_totals` never moved, so the third iter triggers the
+detector and the loop terminates with the pattern recorded.
+
+| model | iters | pattern path | task verdict |
+| :--- | :--- | :--- | :--- |
+| ling-2.6 | 3 | `silent_done_veto → validation_veto → STALEMATE_DETECTED` | abandoned |
+| ling-2.6 | 3 | `silent_done_veto → silent_done_veto → STALEMATE_DETECTED` | abandoned |
+| ling-2.6 | 3 | `silent_done_veto → silent_done_veto → STALEMATE_DETECTED` | abandoned |
+| ling-2.6 | 3 | `validation_veto → validation_veto → STALEMATE_DETECTED` | abandoned |
+| ling-2.6 | 3 | `validation_veto → validation_veto → STALEMATE_DETECTED` | abandoned |
+| minimax | 3 | `silent_done_veto → validation_veto → STALEMATE_DETECTED` | abandoned |
+| minimax | 3 | `silent_done_veto → validation_veto → STALEMATE_DETECTED` | abandoned |
+| minimax | 3 | `silent_done_veto → validation_veto → STALEMATE_DETECTED` | abandoned |
+| minimax | 1 | `silent_done_veto` | abandoned (provider timeout — total_timeout=90s caught) |
+| minimax | 1 | `silent_done_veto` | abandoned (provider timeout — total_timeout=90s caught) |
+
+The two non-`STALEMATE_DETECTED` runs both hit the
+`OpenAIProvider.total_timeout=90s` wall-clock guard added in V1.5.
+Layer C correctly classified them as ABANDONED with the timeout
+message in the rationale — the framework absorbs provider failure
+gracefully even when the planner doesn't make it past iter 1.
+
+### What this validates
+
+Compare with the V1 + V1.5 sweep paths for the same scenario+model
+cell (pre-Gap-1):
+
+```
+V1   ling × regression_rollback: silent_done_veto → validation_veto → validation_veto
+V1.5 ling × regression_rollback: silent_done_veto → silent_done_veto → validation_veto
+V1.6 ling × regression_rollback: silent_done_veto → silent_done_veto → STALEMATE_DETECTED
+                                                                       ^^^^^^^^^^^^^^^^^^
+                                                                       new — Gap 1 detector firing
+```
+
+Same model, same scenario, same loop budget, three sweep
+generations. Pre-Gap-1 the loop hit `max_iters` silently; post-Gap-1
+the system explicitly *names* the failure mode and terminates with
+the right reason in `pipeline_error`:
+
+> `state stalemate — signal_value_totals unchanged for 3 iters; loop is making no progress`
+
+This satisfies the "why did it stop?" check from the V1.1 design
+discussion: the answer is no longer "max_iters" but
+"STALEMATE_DETECTED".
+
+### `THRASHING_DETECTED` — mechanism shipped, direct evidence pending
+
+V1.6 did not produce a direct `THRASHING_DETECTED` trace because
+ling and minimax both got stuck in veto chains before reaching
+`Executor.apply()` — which is the precondition for
+`REGRESSION_ROLLBACK` (and hence for ≥2 consecutive rollbacks =
+thrashing).
+
+**Indirect evidence is strong:** V1's gemma × regression_rollback
+run 3 produced
+`regression_rollback → regression_rollback → regression_rollback`
+under pre-Gap-1 code. Under Gap 1, that exact path triggers
+`THRASHING_DETECTED` at iter 1 (after the second consecutive
+`REGRESSION_ROLLBACK`). The pre-condition empirically exists; the
+detector is mechanically simpler than the state-stalemate detector
+that V1.6 directly validated.
+
+V1.7 backlog: re-sweep gemma × regression_rollback or use a Groq
+capable model (gpt-oss-120b hit rollback 2/5 in V1.5) to capture a
+direct `THRASHING_DETECTED` trace.
+
+---
+
 ## V1 completion checklist
 
 Per the user's plan, V1 is *complete* when these five conditions

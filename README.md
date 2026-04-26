@@ -27,7 +27,86 @@
 
 ---
 
-## 核心理念
+## 30-second quickstart
+
+```bash
+git clone <this-repo> aegis && cd aegis
+
+# Aegis ships a Rust extension for fast structural-signal extraction.
+# `pip install -e .` builds it via maturin (prebuilt wheels coming
+# soon — until then this step needs Rust toolchain installed).
+pip install -e .
+
+export GEMINI_API_KEY=...   # or GOOGLE_API_KEY / OPENROUTER_API_KEY / GROQ_API_KEY
+
+PYTHONPATH=. python examples/02_gateway_single_call.py
+```
+
+Expected output: a Python function plus a 7-line decision trace
+showing every gate that fired (Ring 0 syntax, IntentClassifier,
+PolicyEngine, etc.). That trace IS the product — Aegis surfaces every
+decision its gates make as machine-readable data, not as opaque
+LLM behavior.
+
+---
+
+## Programmatic usage (this is the product surface)
+
+The `aegis` CLI is a thin wrapper. The real interface is the Python
+library — you embed Aegis as a control plane around your own LLM
+agent or workflow. Three core patterns:
+
+**Multi-turn refactor with task-level verification:**
+
+```python
+from aegis.runtime import pipeline
+from aegis.agents.gemini import GeminiProvider
+from aegis.runtime.task_verifier import VerifierResult
+
+class MyVerifier:
+    def verify(self, workspace, trace):
+        # User-defined: what does "task done" mean here?
+        return VerifierResult(passed=..., rationale="...")
+
+result = pipeline.run(
+    task="reduce fan_out in service.py to under 5",
+    root="./project",
+    provider=GeminiProvider(),
+    verifier=MyVerifier(),
+    on_iteration=lambda ev: print(ev.iteration, ev.decision_pattern.value),
+)
+
+print(result.task_verdict.pattern.value)   # SOLVED / INCOMPLETE / ABANDONED
+```
+
+**Single-call gateway (wrap any one LLM completion):**
+
+```python
+from aegis.agents.llm_adapter import LLMGateway
+
+gateway = LLMGateway(llm_provider=GeminiProvider())
+safe_code = gateway.generate_and_validate(prompt="...")
+# Returns text only if every gate passed — else retries up to max_retries.
+for ev in gateway.last_trace.events:
+    print(ev.layer, ev.decision, ev.reason)
+```
+
+**No-LLM structural lint:**
+
+```python
+from aegis.enforcement.validator import Ring0Enforcer
+from aegis.analysis.signals import SignalLayer
+
+violations = list(Ring0Enforcer().check_file("src/foo.py"))
+signals = SignalLayer().extract("src/foo.py")  # fan_out, max_chain_depth, ...
+```
+
+Runnable copies of all three patterns + a custom-verifier walkthrough:
+[`examples/`](examples/).
+
+---
+
+## Core philosophy
 
 Aegis 把整個系統視為一個帶有回饋迴路的決策系統，沿三個能力軸演進：
 
