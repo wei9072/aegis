@@ -55,6 +55,15 @@ class DecisionPattern(str, Enum):
     # Planner declared done without any patches.
     NOOP_DONE = "noop_done"
 
+    # Sequence-level meta-decisions ("the loop noticed itself").
+    # Higher priority than per-iteration mechanical patterns above —
+    # if either fires, this iteration's pattern is the meta-pattern,
+    # because the meta-decision *is* what the iteration ultimately
+    # was. Emitted by pipeline._run_loop after observing the recent
+    # event history; not derivable from a single event in isolation.
+    STALEMATE_DETECTED = "stalemate_detected"     # no new ideas / no state movement
+    THRASHING_DETECTED = "thrashing_detected"     # repeated regression rollbacks
+
     # Logic gap — should never fire if deriver is exhaustive.
     UNKNOWN = "unknown"
 
@@ -62,11 +71,28 @@ class DecisionPattern(str, Enum):
 def derive_pattern(ev: "IterationEvent") -> DecisionPattern:
     """Map one IterationEvent to exactly one DecisionPattern.
 
-    Order of checks matters: silent_done_contradiction is more
-    specific than the generic VALIDATION_VETO and must be tested
-    first, otherwise both branches would match and the more
-    informative label would be lost.
+    Order of checks matters:
+      1. **Sequence-level flags first** (`thrashing_detected`,
+         `stalemate_detected`). These are set by the pipeline after
+         observing the recent event history, and they describe what
+         the iteration *was at the loop level* — overriding the
+         per-iteration mechanical shape because the meta-observation
+         is the more honest description.
+      2. Then the per-iteration mechanical patterns. Within those,
+         `silent_done_contradiction` is more specific than the generic
+         VALIDATION_VETO and must be tested first, otherwise both
+         branches would match and the more informative label would be
+         lost.
     """
+    # Sequence-level meta-decisions take precedence — see docstring.
+    # Thrashing checked before stalemate so a run that both regressed
+    # repeatedly *and* failed to make progress is labelled by the
+    # active failure mode (THRASHING) rather than the passive one.
+    if getattr(ev, "thrashing_detected", False):
+        return DecisionPattern.THRASHING_DETECTED
+    if getattr(ev, "stalemate_detected", False):
+        return DecisionPattern.STALEMATE_DETECTED
+
     # Patch was applied. Did it stick?
     if ev.applied and not ev.rolled_back:
         return (

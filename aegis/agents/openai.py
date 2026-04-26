@@ -23,6 +23,7 @@ trace shows what actually came back.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import urllib.error
@@ -37,7 +38,28 @@ _DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 
 class OpenAIProvider(LLMProvider):
-    """Generic OpenAI-compatible chat completions provider."""
+    """Generic OpenAI-compatible chat completions provider.
+
+    Two timeouts, intentionally distinct:
+
+      - `timeout` (urllib socket timeout) — fires only when an
+        individual socket read/write hangs for this many seconds.
+        Slow-but-progressing streams never trigger it.
+      - `total_timeout` (wall-clock per call) — hard ceiling on the
+        whole `generate()` call. Necessary because the V1.5 sweep
+        observed OpenRouter's GLM-4.5-Air free backend producing
+        valid responses that took 2,177 seconds to stream — under
+        the socket timeout, so urllib never aborted, but enough to
+        single-handedly stall a 120-run sweep. Without `total_timeout`
+        an unhealthy backend can hold the whole pipeline open
+        indefinitely.
+
+    `total_timeout` is enforced via a worker thread + Future. The
+    underlying urllib request is *not* actively cancelled (urllib has
+    no clean abort) — it leaks until the OS tears the socket down.
+    For sweep callers this is acceptable: the abandoned thread costs
+    a TCP connection slot, not loop-blocking time.
+    """
 
     def __init__(
         self,
@@ -47,6 +69,7 @@ class OpenAIProvider(LLMProvider):
         base_url: Optional[str] = None,
         api_key_env: str = "OPENAI_API_KEY",
         timeout: int = 120,
+        total_timeout: int = 90,
     ) -> None:
         key = api_key or os.environ.get(api_key_env)
         if not key:
@@ -58,6 +81,7 @@ class OpenAIProvider(LLMProvider):
         self.api_key = key
         self.base_url = (base_url or _DEFAULT_OPENAI_BASE_URL).rstrip("/")
         self.timeout = timeout
+        self.total_timeout = total_timeout
         self.last_used_tools: tuple = ()
 
     def generate(self, prompt: str, tools: tuple | None = None) -> str:
@@ -65,17 +89,39 @@ class OpenAIProvider(LLMProvider):
         self.last_used_tools = tuple(tools) if tools else ()
 
         url = f"{self.base_url}/chat/completions"
+        # Run the actual HTTP work in a worker thread so the caller
+        # gets a hard wall-clock timeout regardless of how the upstream
+        # decides to stream. See class docstring for the GLM-4.5-Air
+        # incident that motivated this.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(self._do_request, url, prompt)
+            try:
+                return fut.result(timeout=self.total_timeout)
+            except concurrent.futures.TimeoutError as e:
+                raise RuntimeError(
+                    f"OpenAI-compatible API request to {url} exceeded "
+                    f"total_timeout={self.total_timeout}s "
+                    f"(model={self.model_name})"
+                ) from e
+
+    def _do_request(self, url: str, prompt: str) -> str:
         payload = {
             "model": self.model_name,
             "messages": [{"role": "user", "content": prompt}],
         }
         body = json.dumps(payload).encode("utf-8")
+        # User-Agent matters: Groq sits behind Cloudflare and the
+        # default `Python-urllib/3.x` UA gets bounced by WAF rule 1010
+        # before the request reaches Groq's API. Identifying as Aegis
+        # plus a realistic stdlib UA both gets through and makes our
+        # traffic legible in their dashboards.
         request = urllib.request.Request(
             url,
             data=body,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
+                "User-Agent": "aegis-control-plane/1.0",
             },
             method="POST",
         )

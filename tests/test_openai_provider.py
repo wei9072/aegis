@@ -20,6 +20,11 @@ import pytest
 
 from aegis.agents.openai import OpenAIProvider
 from aegis.agents.openrouter import OpenRouterProvider, BASE_URL, DEFAULT_MODEL
+from aegis.agents.groq import (
+    GroqProvider,
+    BASE_URL as GROQ_BASE_URL,
+    DEFAULT_MODEL as GROQ_DEFAULT_MODEL,
+)
 
 
 class _FakeResponse:
@@ -147,6 +152,57 @@ def test_openrouter_default_model_is_pinned():
     that defaults to it — pin it explicitly."""
     assert DEFAULT_MODEL == "inclusionai/ling-2.6-1t:free"
     assert BASE_URL == "https://openrouter.ai/api/v1"
+
+
+def test_groq_overrides_base_url_and_env(monkeypatch):
+    """Mirror of openrouter test — different env var, different host,
+    same base-class parsing / error logic."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "groq-key")
+    p = GroqProvider()  # default model
+    assert p.base_url == GROQ_BASE_URL
+    assert p.api_key == "groq-key"
+    assert p.model_name == GROQ_DEFAULT_MODEL
+
+
+def test_groq_default_model_is_pinned():
+    """Renaming this constant is a breaking change for the V1
+    validation sweep's DEFAULT_MODELS matrix — pin it explicitly."""
+    assert GROQ_DEFAULT_MODEL == "llama-3.3-70b-versatile"
+    assert GROQ_BASE_URL == "https://api.groq.com/openai/v1"
+
+
+def test_groq_carries_request_body_to_target_url(monkeypatch):
+    """End-to-end smoke: generate() POSTs to Groq's URL with the
+    chosen model id and Bearer auth."""
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    captured = {}
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        captured["auth"] = req.get_header("Authorization")
+
+        class _Resp:
+            def __enter__(self_inner): return self_inner
+            def __exit__(self_inner, *exc): return False
+            def read(self_inner): return _ok_response("done").read()
+        return _Resp()
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        GroqProvider(model_name="qwen/qwen3-32b").generate("ping")
+
+    assert captured["url"] == f"{GROQ_BASE_URL}/chat/completions"
+    assert captured["body"]["model"] == "qwen/qwen3-32b"
+    assert captured["body"]["messages"] == [{"role": "user", "content": "ping"}]
+    assert captured["auth"] == "Bearer k"
+
+
+def test_groq_rejects_when_no_credential(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="GROQ_API_KEY is not set"):
+        GroqProvider()
 
 
 def test_openrouter_carries_request_body_to_target_url(monkeypatch):

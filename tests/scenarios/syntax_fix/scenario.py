@@ -25,6 +25,7 @@ from pathlib import Path
 
 from aegis.runtime.decision_pattern import DecisionPattern
 from tests.scenarios._runner import MultiTurnScenario
+from tests.scenarios.syntax_fix.verifier import SyntaxFixVerifier
 
 
 HERE = Path(__file__).parent
@@ -50,4 +51,5 @@ SCENARIO = MultiTurnScenario(
         "no_signal_regression": True,
     },
     expected_patterns=[DecisionPattern.APPLIED_DONE],
+    verifier=SyntaxFixVerifier(),
 )

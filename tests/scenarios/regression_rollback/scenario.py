@@ -47,6 +47,7 @@ from pathlib import Path
 
 from aegis.runtime.decision_pattern import DecisionPattern
 from tests.scenarios._runner import MultiTurnScenario
+from tests.scenarios.regression_rollback.verifier import RegressionRollbackVerifier
 
 
 HERE = Path(__file__).parent
@@ -80,4 +81,5 @@ SCENARIO = MultiTurnScenario(
     # blocks legitimate file splits, so demanding convergence here
     # would assert a system limitation, not a scenario contract.
     expected_patterns=[DecisionPattern.REGRESSION_ROLLBACK],
+    verifier=RegressionRollbackVerifier(seed_dir=HERE / "input"),
 )

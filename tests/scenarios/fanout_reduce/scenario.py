@@ -33,6 +33,7 @@ from pathlib import Path
 
 from aegis.runtime.decision_pattern import DecisionPattern
 from tests.scenarios._runner import MultiTurnScenario
+from tests.scenarios.fanout_reduce.verifier import FanoutReduceVerifier
 
 
 HERE = Path(__file__).parent
@@ -60,4 +61,5 @@ SCENARIO = MultiTurnScenario(
         "fan_out_target_at_most": 5,  # generous; ideal would be 2
     },
     expected_patterns=[DecisionPattern.APPLIED_DONE],
+    verifier=FanoutReduceVerifier(),
 )

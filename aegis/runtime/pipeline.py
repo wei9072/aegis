@@ -26,6 +26,7 @@ from aegis.graph.service import GraphService
 from aegis.ir.patch import PatchPlan, plan_to_dict
 from aegis.runtime.decision_pattern import DecisionPattern, derive_pattern
 from aegis.runtime.executor import ExecutionResult, Executor
+from aegis.runtime.task_verifier import TaskVerdict, TaskVerifier, apply_verifier
 from aegis.runtime.validator import PlanValidator, ValidationError
 
 
@@ -71,6 +72,13 @@ class IterationEvent:
     # (not just on the next ctx.previous_regression_detail) so the
     # JSON snapshot records *which* cost grew on the rolled-back step.
     regression_detail: dict[str, float] = field(default_factory=dict)
+    # Sequence-level meta-decisions, set by pipeline._run_loop after
+    # observing the event history. When either is True, this
+    # iteration's decision_pattern resolves to STALEMATE_DETECTED /
+    # THRASHING_DETECTED, overriding the per-iteration mechanical
+    # shape — the meta-observation is the more honest label.
+    stalemate_detected: bool = False
+    thrashing_detected: bool = False
 
     @property
     def silent_done_contradiction(self) -> bool:
@@ -106,6 +114,8 @@ class IterationEvent:
             "signal_value_totals": dict(self.signal_value_totals),
             "signal_value_delta_vs_prev": dict(self.signal_value_delta_vs_prev),
             "regression_detail": dict(self.regression_detail),
+            "stalemate_detected": self.stalemate_detected,
+            "thrashing_detected": self.thrashing_detected,
             "silent_done_contradiction": self.silent_done_contradiction,
             "decision_pattern": self.decision_pattern.value,
         }
@@ -124,9 +134,59 @@ class PipelineResult:
     error: str | None = None
     validation_errors: list[ValidationError] = field(default_factory=list)
     execution_result: ExecutionResult | None = None
+    # Layer C — populated after the loop terminates by the public
+    # `run()` wrapper. Always present (TaskPattern.NO_VERIFIER when no
+    # verifier was provided). Never read by the loop or the planner.
+    task_verdict: TaskVerdict | None = None
 
 
 def run(
+    task: str,
+    root: str,
+    provider: LLMProvider,
+    scope: list[str] | None = None,
+    max_iters: int = 3,
+    include_file_snippets: bool = True,
+    on_iteration: IterationCallback | None = None,
+    verifier: TaskVerifier | None = None,
+) -> PipelineResult:
+    """Drive the pipeline loop, then apply the Layer C verifier.
+
+    The verifier (if provided) runs **after** the loop terminates,
+    inspects the final workspace, and produces a TaskVerdict that is
+    attached to the returned PipelineResult. Verifier output is never
+    fed back into the loop, never reaches the planner prompt, and
+    never produces a new IterationEvent — these isolation rules are
+    what keep Aegis a decision-system rather than a goal-seeker.
+    See `aegis/runtime/task_verifier.py` for the full design rules.
+    """
+    captured: list[IterationEvent] = []
+
+    def _capturing_cb(ev: IterationEvent) -> None:
+        captured.append(ev)
+        if on_iteration is not None:
+            on_iteration(ev)
+
+    result = _run_loop(
+        task=task,
+        root=root,
+        provider=provider,
+        scope=scope,
+        max_iters=max_iters,
+        include_file_snippets=include_file_snippets,
+        on_iteration=_capturing_cb,
+    )
+    result.task_verdict = apply_verifier(
+        verifier=verifier,
+        workspace=Path(root).resolve(),
+        trace=captured,
+        pipeline_done=result.success,
+        iterations_run=result.iterations,
+    )
+    return result
+
+
+def _run_loop(
     task: str,
     root: str,
     provider: LLMProvider,
@@ -152,6 +212,82 @@ def run(
     last_regressed = False
     last_regression_detail: dict[str, float] = {}
 
+    # Sequence-level detector history. Appended after every emitted
+    # IterationEvent; consumed by _is_state_stalemate / _is_thrashing
+    # before the *next* emit decides whether this iteration's pattern
+    # should be the meta-pattern (STALEMATE_DETECTED / THRASHING_DETECTED).
+    value_totals_history: list[dict[str, float]] = []
+    regressed_history: list[bool] = []
+
+    def _step(
+        *,
+        applied: bool,
+        rolled_back: bool,
+        regressed: bool,
+        validation_errors_str: list[str],
+        regression_detail: dict[str, float] | None = None,
+        plan_repeated_now: bool = False,
+    ) -> tuple[IterationEvent, str | None]:
+        """Compute sequence-level flags, build + emit the event, update
+        history, return (event, terminate_reason).
+
+        terminate_reason is None when the loop should keep going.
+        Otherwise it's a human-readable explanation that goes into
+        PipelineResult.error.
+
+        `plan_repeated_now` is a *supporting* signal for stalemate,
+        not a primary trigger — see `_is_plan_repeat_stalemate` for
+        the rationale. Stalemate fires when *either* state has been
+        unchanged for `_STATE_STALEMATE_THRESHOLD` iters *or* the
+        plan is byte-identical to the previous one AND state hasn't
+        moved since.
+        """
+        current_vt = _kind_value_totals(ctx.signals)
+        state_stalemate = _is_state_stalemate(value_totals_history, current_vt)
+        plan_repeat_stalemate = _is_plan_repeat_stalemate(
+            plan_repeated_now, value_totals_history, current_vt,
+        )
+        thrash = _is_thrashing(regressed_history, regressed)
+        stalemate = state_stalemate or plan_repeat_stalemate
+
+        event = _emit_iteration(
+            on_iteration,
+            iteration=i,
+            plan=plan,
+            plan_id=plan_id,
+            validation_errors=validation_errors_str,
+            applied=applied,
+            rolled_back=rolled_back,
+            regressed=regressed,
+            ctx_signals=ctx.signals,
+            prev_kind_counts=prev_kind_counts,
+            prev_value_totals=prev_value_totals,
+            regression_detail=regression_detail,
+            stalemate_detected=stalemate,
+            thrashing_detected=thrash,
+        )
+        value_totals_history.append(current_vt)
+        regressed_history.append(regressed)
+
+        # Thrashing dominates stalemate when both fire — see
+        # derive_pattern's order-of-checks for the same reasoning.
+        if thrash:
+            return event, (
+                f"thrashing detected — {_THRASHING_THRESHOLD} consecutive "
+                f"regression rollbacks; further iterations would burn budget"
+            )
+        if stalemate:
+            if plan_repeat_stalemate and not state_stalemate:
+                return event, (
+                    "stalemate — planner repeated identical plan AND "
+                    "signal_value_totals unchanged since last iter"
+                )
+            return event, (
+                f"state stalemate — signal_value_totals unchanged for "
+                f"{_STATE_STALEMATE_THRESHOLD} iters; loop is making no progress"
+            )
+        return event, None
+
     for i in range(max_iters):
         ctx.previous_plan = last_plan
         ctx.previous_errors = last_errors
@@ -174,31 +310,25 @@ def run(
 
         plan_hash = _hash_plan(plan)
         plan_id = plan_hash[:8]
-        if last_plan_hash is not None and plan_hash == last_plan_hash and not plan.done:
-            _emit_iteration(
-                on_iteration,
-                iteration=i,
-                plan=plan,
-                plan_id=plan_id,
-                validation_errors=[],
-                applied=False,
-                rolled_back=False,
-                regressed=False,
-                ctx_signals=ctx.signals,
-                prev_kind_counts=prev_kind_counts,
-                prev_value_totals=prev_value_totals,
-            )
-            return PipelineResult(
-                success=False,
-                iterations=i + 1,
-                final_plan=plan,
-                signals_before=signals_before,
-                signals_after=ctx.signals,
-                error="planner repeated identical plan (stalemate)",
-            )
+        # Plan-repeat is a supporting signal — _step will combine it
+        # with state-movement check to decide stalemate. We no longer
+        # short-circuit on plan repeat alone (LLMs can rephrase same
+        # intent / reuse same wording with different intent — single
+        # signal too noisy). See _is_plan_repeat_stalemate for the
+        # full rationale.
+        plan_repeated_now = (
+            last_plan_hash is not None
+            and plan_hash == last_plan_hash
+            and not plan.done
+        )
         last_plan_hash = plan_hash
 
         if plan.done and not plan.patches:
+            # NOOP_DONE — planner positively declared completion.
+            # Skip _step so a coincidental value_totals stalemate
+            # doesn't override the explicit completion signal.
+            # See aegis_core_framing_negative_space memory: refusal
+            # is for degradation, not for declarations of completion.
             _emit_iteration(
                 on_iteration,
                 iteration=i,
@@ -222,37 +352,34 @@ def run(
 
         errors = validator.validate(plan)
         if errors:
-            _emit_iteration(
-                on_iteration,
-                iteration=i,
-                plan=plan,
-                plan_id=plan_id,
-                validation_errors=[str(e) for e in errors],
-                applied=False,
-                rolled_back=False,
-                regressed=False,
-                ctx_signals=ctx.signals,
-                prev_kind_counts=prev_kind_counts,
-                prev_value_totals=prev_value_totals,
+            _, term = _step(
+                applied=False, rolled_back=False, regressed=False,
+                validation_errors_str=[str(e) for e in errors],
+                plan_repeated_now=plan_repeated_now,
             )
+            if term is not None:
+                return PipelineResult(
+                    success=False, iterations=i + 1, final_plan=plan,
+                    signals_before=signals_before, signals_after=ctx.signals,
+                    validation_errors=errors, error=term,
+                )
             last_plan, last_errors, last_result, last_regressed = plan, errors, None, False
             continue
 
         result = executor.apply(plan)
         if not result.success:
-            _emit_iteration(
-                on_iteration,
-                iteration=i,
-                plan=plan,
-                plan_id=plan_id,
-                validation_errors=[],
-                applied=False,
-                rolled_back=True,  # executor returned failure, state restored
+            _, term = _step(
+                applied=False, rolled_back=True,  # executor returned failure, state restored
                 regressed=False,
-                ctx_signals=ctx.signals,
-                prev_kind_counts=prev_kind_counts,
-                prev_value_totals=prev_value_totals,
+                validation_errors_str=[],
+                plan_repeated_now=plan_repeated_now,
             )
+            if term is not None:
+                return PipelineResult(
+                    success=False, iterations=i + 1, final_plan=plan,
+                    signals_before=signals_before, signals_after=ctx.signals,
+                    execution_result=result, error=term,
+                )
             last_plan, last_errors, last_result, last_regressed = plan, [], result, False
             continue
 
@@ -261,38 +388,34 @@ def run(
             detail = _regression_detail(ctx.signals, new_ctx.signals)
             executor.rollback_result(result)
             result.rolled_back = True
-            _emit_iteration(
-                on_iteration,
-                iteration=i,
-                plan=plan,
-                plan_id=plan_id,
-                validation_errors=[],
-                applied=True,
-                rolled_back=True,
-                regressed=True,
-                ctx_signals=ctx.signals,  # post-rollback, same as before
-                prev_kind_counts=prev_kind_counts,
-                prev_value_totals=prev_value_totals,
+            _, term = _step(
+                applied=True, rolled_back=True, regressed=True,
+                validation_errors_str=[],
                 regression_detail=detail,
+                plan_repeated_now=plan_repeated_now,
             )
+            if term is not None:
+                return PipelineResult(
+                    success=False, iterations=i + 1, final_plan=plan,
+                    signals_before=signals_before, signals_after=ctx.signals,
+                    execution_result=result, error=term,
+                )
             last_plan, last_errors, last_result, last_regressed = plan, [], result, True
             last_regression_detail = detail
             continue
 
         ctx = new_ctx
-        _emit_iteration(
-            on_iteration,
-            iteration=i,
-            plan=plan,
-            plan_id=plan_id,
-            validation_errors=[],
-            applied=True,
-            rolled_back=False,
-            regressed=False,
-            ctx_signals=ctx.signals,
-            prev_kind_counts=prev_kind_counts,
-            prev_value_totals=prev_value_totals,
+        _, term = _step(
+            applied=True, rolled_back=False, regressed=False,
+            validation_errors_str=[],
+            plan_repeated_now=plan_repeated_now,
         )
+        if term is not None:
+            return PipelineResult(
+                success=False, iterations=i + 1, final_plan=plan,
+                signals_before=signals_before, signals_after=ctx.signals,
+                execution_result=result, error=term,
+            )
         prev_kind_counts = _kind_counts(ctx.signals)
         prev_value_totals = _kind_value_totals(ctx.signals)
         last_plan, last_errors, last_result, last_regressed = plan, [], result, False
@@ -334,9 +457,17 @@ def _emit_iteration(
     prev_kind_counts: dict[str, int],
     prev_value_totals: dict[str, float],
     regression_detail: dict[str, float] | None = None,
-) -> None:
-    if cb is None:
-        return
+    stalemate_detected: bool = False,
+    thrashing_detected: bool = False,
+) -> IterationEvent:
+    """Build the IterationEvent (always — even if cb is None) and
+    optionally pass it to the callback. Returns the event so the
+    caller can append to its detector history lists.
+
+    Stalemate / thrashing flags are computed by the caller from
+    history; this helper just plumbs them into the event so
+    derive_pattern() resolves to the right meta-pattern.
+    """
     kind_counts = _kind_counts(ctx_signals)
     value_totals = _kind_value_totals(ctx_signals)
     count_delta = {
@@ -347,7 +478,7 @@ def _emit_iteration(
         k: round(value_totals.get(k, 0.0) - prev_value_totals.get(k, 0.0), 4)
         for k in set(value_totals) | set(prev_value_totals)
     }
-    cb(IterationEvent(
+    event = IterationEvent(
         iteration=iteration,
         plan_id=plan_id,
         plan_goal=_truncate(getattr(plan, "goal", "") or "", 200),
@@ -365,7 +496,95 @@ def _emit_iteration(
         signal_value_totals=value_totals,
         signal_value_delta_vs_prev=value_delta,
         regression_detail=dict(regression_detail or {}),
-    ))
+        stalemate_detected=stalemate_detected,
+        thrashing_detected=thrashing_detected,
+    )
+    if cb is not None:
+        cb(event)
+    return event
+
+
+# Default thresholds for sequence-level detectors. Tuned conservatively:
+#   - state stalemate: 3 iters with identical value_totals. Threshold
+#     of 2 would false-positive on a legitimate single noop iter; 3
+#     means "two consecutive iters of no movement" which is a real
+#     decision-loop signal.
+#   - thrashing: 2 consecutive REGRESSION_ROLLBACK events. Rollback
+#     is rare enough that two-in-a-row is itself the alarm.
+_STATE_STALEMATE_THRESHOLD = 3
+_THRASHING_THRESHOLD = 2
+
+
+def _is_state_stalemate(
+    history: list[dict[str, float]],
+    current_value_totals: dict[str, float],
+    threshold: int = _STATE_STALEMATE_THRESHOLD,
+) -> bool:
+    """True iff the last `threshold` iterations (this one + the
+    `threshold-1` before it) all share identical signal_value_totals.
+
+    "State unchanged" stalemate — distinct from "plan repeated"
+    stalemate, which is detected separately by hashing the plan.
+    Catches the case where the planner produces *different* plans
+    that all fail to change anything (e.g. K rounds of validation
+    veto on different-but-equally-broken patches).
+    """
+    if len(history) < threshold - 1:
+        return False
+    recent = history[-(threshold - 1):]
+    return all(t == current_value_totals for t in recent)
+
+
+def _is_thrashing(
+    history: list[bool],
+    regressed_now: bool,
+    threshold: int = _THRASHING_THRESHOLD,
+) -> bool:
+    """True iff the last `threshold` events (this one + the
+    `threshold-1` before it) were all REGRESSION_ROLLBACK.
+
+    Specifically distinct from stalemate: thrashing = "every attempt
+    actively degraded state, then was correctly rolled back". The
+    system is making decisions; they're just all rejection decisions.
+    """
+    if not regressed_now:
+        return False
+    if len(history) < threshold - 1:
+        return False
+    return all(history[-(threshold - 1):])
+
+
+def _is_plan_repeat_stalemate(
+    plan_repeated_now: bool,
+    value_totals_history: list[dict[str, float]],
+    current_value_totals: dict[str, float],
+) -> bool:
+    """Plan repeat is a *supporting* signal, not a standalone trigger.
+
+    Two reasons it can't fire stalemate alone:
+
+      - **Same wording, different intent.** LLMs occasionally emit the
+        same canonical PatchPlan dict in genuinely different
+        contexts — e.g. a small prompt-template noise that produces
+        an identical hash even though the second emission was a
+        legitimate retry of a partially-applied edit.
+      - **Different wording, same intent.** And conversely, an LLM
+        rephrasing the same plan with one whitespace difference
+        wouldn't trigger plan-repeat at all — yet it's just as
+        stuck. plan_hash misses this case, so leaning on it as the
+        primary signal would over-fire on the cases it does catch
+        while missing the cases it doesn't.
+
+    The honest reading: plan-repeat is "I noticed the planner gave me
+    the same bytes again". It's only stalemate when the *state* also
+    confirms nothing is moving. Combined: plan repeat AND state
+    unchanged since the last iteration → real stalemate.
+    """
+    if not plan_repeated_now:
+        return False
+    if not value_totals_history:
+        return False
+    return value_totals_history[-1] == current_value_totals
 
 
 def _truncate(text: str, max_len: int) -> str:

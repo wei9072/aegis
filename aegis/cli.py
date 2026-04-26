@@ -223,15 +223,19 @@ def scenario_list():
 @scenario_group.command('run')
 @click.argument('name')
 @click.option('--provider', 'provider_name',
-              type=click.Choice(['gemini', 'openrouter'], case_sensitive=False),
+              type=click.Choice(['gemini', 'openrouter', 'groq'], case_sensitive=False),
               default='gemini', show_default=True,
               help='Which provider to drive the pipeline with. '
                    'gemini → google-genai (needs GEMINI_API_KEY or GOOGLE_API_KEY). '
                    'openrouter → OpenAI-compatible gateway over many backends '
-                   '(needs OPENROUTER_API_KEY).')
+                   '(needs OPENROUTER_API_KEY). '
+                   'groq → Groq hardware-accelerated inference, free tier with '
+                   'generous daily budgets across Llama / Qwen / gpt-oss / Allam '
+                   '(needs GROQ_API_KEY).')
 @click.option('--model', default=None,
               help='Model id. Defaults: gemini→gemma-4-31b-it, '
-                   'openrouter→inclusionai/ling-2.6-1t:free.')
+                   'openrouter→inclusionai/ling-2.6-1t:free, '
+                   'groq→llama-3.3-70b-versatile.')
 @click.option('--no-save', is_flag=True, default=False,
               help='Do not write a JSON snapshot to tests/scenarios/<name>/runs/.')
 def scenario_run(name, provider_name, model, no_save):
@@ -291,6 +295,10 @@ def _build_provider(provider_name: str, model: str | None):
         from aegis.agents.openrouter import DEFAULT_MODEL, OpenRouterProvider
         chosen = model or DEFAULT_MODEL
         return OpenRouterProvider(model_name=chosen), chosen
+    if provider_name == 'groq':
+        from aegis.agents.groq import DEFAULT_MODEL, GroqProvider
+        chosen = model or DEFAULT_MODEL
+        return GroqProvider(model_name=chosen), chosen
     raise click.UsageError(f"unknown provider {provider_name!r}")
 
 

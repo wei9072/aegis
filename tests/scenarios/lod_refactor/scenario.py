@@ -48,6 +48,7 @@ from pathlib import Path
 
 from aegis.runtime.decision_pattern import DecisionPattern
 from tests.scenarios._runner import MultiTurnScenario
+from tests.scenarios.lod_refactor.verifier import LodRefactorVerifier
 
 
 HERE = Path(__file__).parent
@@ -85,4 +86,5 @@ SCENARIO = MultiTurnScenario(
         DecisionPattern.SILENT_DONE_VETO,
         DecisionPattern.APPLIED_DONE,
     ],
+    verifier=LodRefactorVerifier(),
 )

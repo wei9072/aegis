@@ -1,17 +1,29 @@
 # Aegis — Architecture-Aware Control Plane for LLM Code Generation
 
-> Aegis 不是 coding tool。
-> Aegis 觀察 LLM 的修改結果、判斷是否變差、撤回錯誤決策、並調整下一步行動。
+> **Aegis does not try to make AI produce better code.**
+> **It ensures worse outcomes are not accepted.**
 >
-> 由 **Rust 內核** 與 **Python 控制平面** 組成。每一個 LLM 回合都跑過完整的 dataflow
-> `signal → policy → decision → action → trace`：結構性 gate（Ring 0 / 0.5）擷取訊號，
+> Aegis 不教模型怎麼寫，只確保變糟的結果不會被保留。
+>
+> 機制核心是 cost-aware regression rollback + 結構不變式 enforcement at module
+> boundaries：每一個 LLM 回合都跑過完整的 dataflow
+> `signal → policy → decision → action → trace`。結構性 gate（Ring 0 / 0.5）擷取訊號，
 > policy 把訊號翻譯成 `allow / warn / block`，delivery 用獨立通道把 warning 顯示給人類
-> （不汙染下一輪 LLM context），toolcall validator 比對 LLM 自述 vs Executor 實際寫入，
-> intent 層分類 prompt 並偵測語意 bypass。多輪重構場景下，pipeline iteration 透過
-> cost-aware regression detection 評估自己的工作，必要時 rollback；DecisionPattern
-> 把每一輪的決策形狀升成 first-class data（[V1 narrative](#v1--decision-system) 詳述）。
+> （不汙染下一輪 LLM context），toolcall validator 比對 LLM 自述 vs Executor 實際寫入。
+> 多輪重構場景下，pipeline iteration 透過 cost-aware regression detection 評估自己的工作，
+> 必要時 rollback。**每一個 gate 都是否決閘，沒有任何一個是目標閘。**
 >
-> **North Star** — 正確性的定義是 **decision correctness**，不是 output correctness。
+> 三層 decision language：
+>
+> - **Layer A** — per-gate trace event（`PASS / BLOCK / WARN / OBSERVE`）
+> - **Layer B** — per-iteration `DecisionPattern`（七種命名形狀）
+> - **Layer C** — per-task `TaskVerdict`（V2 Gap 2 引入）
+>
+> Layer A+B 完成 = **code-state safety harness**。Layer C 引入 = **task outcome 層**。
+>
+> 完整 framing 與 V1 evidence 見 [`docs/v1_validation.md`](docs/v1_validation.md)。
+> 任何新設計都必須通過這個檢核：**這個設計是在拒絕變糟，還是在導向變好？**
+> 如果是後者——方向錯了。
 
 ---
 
@@ -74,7 +86,7 @@ Phase 1–3b 是 **control plane components**：每個 gate 各司其職、emit 
 | 1. observe signals | `ec6507d` | 建 multi-turn scenario harness — 第一個 scenario `syntax_fix` 揭露 Planner ↔ matcher byte-concat 契約 bug |
 | 2. fix contract | `1849ef6` | edit-engine 加 line-aware fallback joiner — multi-turn 不再被 anchor mismatch 卡住 |
 | 3. instrument iteration | `b7915e7` | `IterationEvent` 加 value-aware signal tracking（instance count vs cost sum）— `fanout_reduce` 揭露這 gap |
-| 4. forward decision | `ee30088` | `lod_refactor` 第一次看到 ctx.previous_errors → planner re-plan → 收斂；plan_id + patch count 都改變，不只 random retry |
+| 4. forward decision | `ee30088` | `lod_refactor` 第一次看到 ctx.previous_errors 流回 planner prompt → 下一輪 plan_id + patch shape 改變 → 收斂。注意：可觀察到的是「上一輪結果改變了下一輪輸出」，而非「LLM 真的在 reasoning」——後者不在 V1 claim 內 |
 | 5. render trace | `37a6c66` | `aegis scenario run` 印出 Plan / Strategy / Validation / Apply / Signals / Decision 六段 narrative — system 從「能做決策」變成「決策可被人讀」 |
 | 6. backward decision | `9a3521b` | `regression_rollback` 第一次看到 system **否決自己的工作** — applied → rolled back，下一輪 strategy 引用 previous_regressed |
 | 7. name pattern | `9dca962` | `DecisionPattern` enum + `derive_pattern` — 七種決策形狀升成 first-class data。scenario 可以斷言 pattern path |
@@ -157,7 +169,7 @@ aegis scenario run lod_refactor --model gemini-2.5-flash
 - 觀察結果 → `fanout_reduce`（gradient improvement 可被量測）
 - 判斷是否變差 → `regression_rollback`（cost-aware regression 真的會 fire）
 - 回滾錯誤決策 → `regression_rollback`（applied → rolled back 真實發生）
-- 調整下一步行動 → `lod_refactor`（previous_errors 真的改變 plan_id + 拆解策略）
+- 調整下一步行動 → `lod_refactor`（previous_errors 進入 planner prompt → 下一輪 plan 結構改變；只 claim 資料管道，不 claim LLM reasoning 因果）
 
 ### V1 邊界（明確不在 V1 內）
 

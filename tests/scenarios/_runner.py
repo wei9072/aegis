@@ -30,6 +30,7 @@ from aegis.agents.llm_adapter import LLMProvider
 from aegis.runtime import pipeline as pipeline_mod
 from aegis.runtime.decision_pattern import DecisionPattern
 from aegis.runtime.pipeline import IterationEvent, PipelineResult
+from aegis.runtime.task_verifier import TaskPattern, TaskVerdict, TaskVerifier
 
 
 @dataclass
@@ -58,6 +59,11 @@ class MultiTurnScenario:
     # appear at least once in the produced trajectory, in any order.
     # Set to None / empty to skip assertion (informational run only).
     expected_patterns: list[DecisionPattern] = field(default_factory=list)
+    # Optional Layer C verifier — inspects the final workspace after
+    # the pipeline loop ends and produces a TaskVerdict. None means
+    # task-level outcome won't be reported (TaskPattern.NO_VERIFIER).
+    # See aegis/runtime/task_verifier.py for design rules.
+    verifier: TaskVerifier | None = None
 
 
 @dataclass
@@ -71,6 +77,7 @@ class MultiTurnResult:
     events: list[IterationEvent] = field(default_factory=list)
     expectations: dict[str, Any] = field(default_factory=dict)
     expected_patterns: list[DecisionPattern] = field(default_factory=list)
+    task_verdict: TaskVerdict | None = None
     workspace: str = ""
     started_at: str = ""
 
@@ -105,6 +112,9 @@ class MultiTurnResult:
             "observed_patterns": [p.value for p in self.observed_patterns],
             "missing_patterns": [p.value for p in self.missing_patterns],
             "patterns_match": self.patterns_match,
+            "task_verdict": (
+                self.task_verdict.to_dict() if self.task_verdict else None
+            ),
             "workspace": self.workspace,
         }
 
@@ -156,6 +166,7 @@ def run_scenario(
             scope=scenario.scope,
             max_iters=scenario.max_iterations,
             on_iteration=_capture,
+            verifier=scenario.verifier,
         )
     finally:
         # Workspace is kept on disk by default so the user can inspect
@@ -176,6 +187,7 @@ def run_scenario(
         events=events,
         expectations=dict(scenario.expectations),
         expected_patterns=list(scenario.expected_patterns),
+        task_verdict=pipeline_result.task_verdict,
         workspace=str(workspace),
         started_at=time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(started)),
     )
@@ -288,6 +300,12 @@ _PATTERN_SENTENCE: dict = {
         "validator vetoed; planner replans next iteration",
     DecisionPattern.NOOP_DONE:
         "planner declared done with no patches needed",
+    DecisionPattern.STALEMATE_DETECTED:
+        "loop noticed itself: same plan or unchanged state across "
+        "multiple iters — terminated rather than burn budget",
+    DecisionPattern.THRASHING_DETECTED:
+        "loop noticed itself: every recent attempt regressed and was "
+        "rolled back — terminated rather than burn budget",
     DecisionPattern.UNKNOWN:
         "unrecognised decision shape (deriver may need a new branch)",
 }
@@ -355,6 +373,22 @@ def _render_summary(result: MultiTurnResult) -> None:
                 f"{k}={v:g}" for k, v in sorted(last.signal_value_totals.items())
             )
             print(f"  Final signals: {totals}")
+
+    # Layer C — task-level verdict, separate from pipeline_success
+    if result.task_verdict is not None:
+        v = result.task_verdict
+        marker = {
+            TaskPattern.SOLVED: "✓ SOLVED",
+            TaskPattern.INCOMPLETE: "✗ INCOMPLETE (pipeline said done; verifier disagreed)",
+            TaskPattern.ABANDONED: "✗ ABANDONED (pipeline gave up; task not done)",
+            TaskPattern.NO_VERIFIER: "  no task verifier defined",
+            TaskPattern.VERIFIER_ERROR: "! VERIFIER_ERROR",
+        }.get(v.pattern, f"? {v.pattern.value}")
+        print(f"  Task verdict: {marker}")
+        if v.verifier_result and v.verifier_result.rationale:
+            print(f"                {v.verifier_result.rationale}")
+        if v.error:
+            print(f"                {v.error}")
 
     print(f"  Workspace:  {result.workspace}")
 
