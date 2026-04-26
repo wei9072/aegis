@@ -141,9 +141,8 @@ Other patterns (multi-turn pipeline, custom Layer C verifier,
 trace consumption): [`examples/`](examples/).
 
 **Build note.** Aegis ships a Rust extension for fast structural-signal
-extraction. `pip install -e ".[dev]"` handles the Python side
-(deps + `aegis` CLI on PATH); the Rust extension builds via a
-separate `maturin develop` step:
+extraction. `pip install -e .` builds both the Rust extension and
+the Python package in one step via maturin:
 
 ```bash
 # Prerequisites: Python 3.10+, git, and a Rust toolchain.
@@ -153,18 +152,18 @@ separate `maturin develop` step:
 
 git clone https://github.com/wei9072/aegis && cd aegis
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-cd aegis-core-rs && maturin develop --release && cd ..
+pip install -e .                   # 30s-2min first time; <5s after
 python examples/00_quickstart.py
 ```
 
-Examples self-bootstrap the import path; no `PYTHONPATH=` prefix
-required.
+Optional extras: `pip install -e ".[dev]"` adds pytest;
+`pip install -e ".[mcp]"` adds the MCP SDK so you can run
+`aegis-mcp` for Cursor / Claude Code integration.
 
-Single-step install via maturin mixed-mode requires renaming the
-Rust crate to be a submodule of `aegis` — deferred to V1+ when PyPI
-wheels are also addressed. Build friction tracked at
+Examples self-bootstrap the import path; no `PYTHONPATH=` prefix
+required. Build friction reports welcome at
 [`docs/launch/issue_rust_build_friction.md`](docs/launch/issue_rust_build_friction.md).
+PyPI prebuilt wheels coming once friction reports stabilise.
 
 ---
 

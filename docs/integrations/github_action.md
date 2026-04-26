@@ -48,11 +48,12 @@ jobs:
           path: _aegis
 
       - name: Install Aegis
+        # Single-step install via maturin mixed-mode (configured in
+        # the cloned aegis repo's pyproject.toml). Builds the Rust
+        # extension AND installs the Python package AND registers
+        # the `aegis` CLI on PATH.
         working-directory: _aegis
-        run: |
-          pip install maturin click google-genai prompt_toolkit
-          cd aegis-core-rs && maturin build --release --out dist/
-          pip install dist/*.whl
+        run: pip install -e .
 
       # --- Run Ring 0 against the PR's changed Python files ---
       - name: Run Aegis check on PR diff

@@ -33,31 +33,14 @@ jobs:
             aegis-core-rs/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('aegis-core-rs/Cargo.lock') }}
 
-      - name: Install Python build + test dependencies
+      - name: Install Aegis (builds Rust extension via maturin backend)
+        # Single-step install per pyproject.toml — maturin mixed-mode
+        # builds aegis._core (Rust) AND installs the Python packages
+        # AND pulls in deps AND registers the `aegis` / `aegis-mcp` CLIs.
+        # The [dev,mcp] extras add pytest and the MCP SDK respectively.
         run: |
           python -m pip install --upgrade pip
-          # No pyproject.toml yet — install deps explicitly. Tracks the
-          # editable .venv setup developers use locally. When pyproject.toml
-          # lands, this collapses to `pip install -e .[dev]`.
-          pip install \
-            maturin \
-            pytest \
-            click \
-            prompt_toolkit \
-            google-genai \
-            google-generativeai
-
-      - name: Build aegis-core-rs wheel and install
-        # `maturin develop` requires an active virtualenv (it injects the
-        # built extension into the venv's site-packages). GitHub Actions'
-        # setup-python doesn't create one, so develop fails with
-        # "Couldn't find a virtualenv or conda environment". The
-        # workaround is the explicit two-step that maturin's own error
-        # message suggests: build a wheel, then pip install it.
-        run: |
-          cd aegis-core-rs
-          maturin build --release --out dist/
-          pip install dist/*.whl
+          pip install -e ".[dev,mcp]"
 
       - name: Run pytest
         env:

@@ -6,7 +6,7 @@ from typing import Protocol, Optional
 import os
 import tempfile
 import re
-import aegis_core_rs
+from aegis import _core as aegis_core_rs
 from aegis.analysis.signals import SignalLayer
 from aegis.delivery.renderer import DeliveryRenderer
 from aegis.intent.bypass import IntentBypassDetector

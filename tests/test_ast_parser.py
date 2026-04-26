@@ -1,4 +1,4 @@
-import aegis_core_rs
+from aegis import _core as aegis_core_rs
 import pytest
 import tempfile
 import os

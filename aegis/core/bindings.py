@@ -1,9 +1,14 @@
 """
-Thin wrapper around the aegis_core_rs PyO3 extension.
-All other layers import from here — never directly from aegis_core_rs —
+Thin wrapper around the Rust PyO3 extension at `aegis._core`.
+All other layers import from here — never directly from `aegis._core` —
 so swapping the Rust backend only requires changes in one place.
+
+(Pre-V0.x the extension was importable as the top-level
+`aegis_core_rs`; maturin mixed-mode now installs it as a submodule
+of `aegis` instead, removing the manual `maturin develop` step from
+the install sequence.)
 """
-import aegis_core_rs as _rs
+from aegis import _core as _rs
 
 # Re-export Rust types
 DependencyGraph = _rs.DependencyGraph

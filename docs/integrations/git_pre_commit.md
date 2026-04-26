@@ -20,17 +20,19 @@ an environment variable.
 ### One-time setup
 
 ```bash
-# 1. Clone Aegis somewhere stable (only if you don't have it already)
+# 1. Install Aegis somewhere stable (single command — builds Rust + Python).
 git clone https://github.com/wei9072/aegis ~/code/aegis
 cd ~/code/aegis
 python -m venv .venv && source .venv/bin/activate
-pip install maturin click google-genai prompt_toolkit
-cd aegis-core-rs && maturin develop --release && cd ..
+pip install -e .
 
-# 2. Tell your shell where Aegis lives
+# 2. Tell your shell where Aegis lives, so the hook can find it.
 echo 'export AEGIS_HOME=~/code/aegis' >> ~/.bashrc
 source ~/.bashrc
 ```
+
+Prerequisites (Rust toolchain, Python 3.10+) covered in
+[`AGENTS.md`](../../AGENTS.md#setup--the-canonical-install-sequence).
 
 ### Per-project hook
 

@@ -44,33 +44,34 @@ cd ~/aegis
 python -m venv .venv
 source .venv/bin/activate
 
-# 2. Editable install — pulls Python deps + registers the `aegis` CLI on PATH.
-pip install -e ".[dev]"
+# 2. Single-step install — builds the Rust extension via maturin AND
+# installs the Python packages AND deps AND registers the `aegis` CLI.
+# Takes 30s-2min on first run (Rust compilation), <5s on subsequent.
+pip install -e .
 
-# 3. Build + install the Rust extension into the same venv.
-cd aegis-core-rs && maturin develop --release && cd ..
-
-# 4. VERIFY (do not skip — confirms the install worked end-to-end).
+# 3. VERIFY (do not skip — confirms the install worked end-to-end).
 python examples/00_quickstart.py
 ```
 
-Expected output of step 4 includes the lines `ALLOWED → ...` and
+Optional extras for specific scenarios:
+
+```bash
+pip install -e ".[dev]"       # adds pytest for running tests
+pip install -e ".[mcp]"       # adds the MCP SDK for `aegis-mcp` server
+pip install -e ".[dev,mcp]"   # both
+```
+
+Expected output of step 3 includes the lines `ALLOWED → ...` and
 `BLOCKED → RuntimeError: ...`. If you don't see both, the install
 is broken — diagnose before proceeding to integration. Common causes:
 
-- `cargo: command not found` → restart shell or `source "$HOME/.cargo/env"`
-- `ModuleNotFoundError: No module named 'aegis_core_rs'` → re-run step 3 inside the venv
-- `ModuleNotFoundError: No module named 'aegis'` → check that `python` resolves to the venv's Python (`which python`); if not, re-run step 2 with the venv active
+- `cargo: command not found` → restart shell or `source "$HOME/.cargo/env"`. The Rust toolchain is required for step 2 (PyPI wheels coming later — see issue tracker).
+- `ImportError: dynamic module does not define module export function` → re-run step 2 (Rust extension may have been left in inconsistent state).
+- `ModuleNotFoundError: No module named 'aegis'` → check that `python` resolves to the venv's Python (`which python`); if not, re-run step 2 with the venv active.
 
-After step 4 passes, Aegis is installed and the `aegis` CLI is on
-PATH. You're ready to integrate.
-
-**Why the Rust step is separate.** V0.x's `pyproject.toml` uses
-setuptools (standard Python packaging); the Rust extension still
-builds via `maturin develop`. Single-step install via maturin
-mixed-mode requires renaming the Rust crate to be a submodule of
-`aegis` (~25 import-site refactor), deferred to V1+ when PyPI
-wheels are also being addressed.
+After step 3 passes, Aegis is installed and the `aegis` CLI is on
+PATH. The Python package and Rust extension are both in the venv;
+`python -c "from aegis import _core"` works. You're ready to integrate.
 
 ---
 

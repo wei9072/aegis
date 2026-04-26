@@ -1,27 +1,23 @@
 # Build/install metadata.
 #
-# V0.x note: the Rust extension `aegis_core_rs` builds via a separate
-# `maturin develop --release` step inside `aegis-core-rs/`. Bundling
-# it into a single `pip install` (maturin mixed-mode at this repo's
-# layout) requires renaming the extension to be a submodule of
-# `aegis` (e.g. `aegis._core`), which would touch ~25 import sites.
-# Deferred until V1+ when packaging discipline (PyPI wheels, version
-# pinning) is also being addressed.
+# Maturin mixed-mode build: a single `pip install -e .` builds the
+# Rust extension into the active Python environment AND installs the
+# `aegis` and `aegis_mcp` Python packages with their dependencies
+# AND registers the `aegis` and `aegis-mcp` CLI entry points.
 #
-# What `pip install -e ".[dev]"` does today:
-#   - Registers the `aegis` Python package in editable mode
-#   - Installs runtime dependencies (click, google-genai, etc.)
-#   - Adds the `aegis` CLI to PATH (via [project.scripts])
-#   - With [dev] extra: also installs maturin + pytest
+# Layout:
+#   aegis/                   Python package
+#   aegis/_core              Rust extension (was: top-level aegis_core_rs)
+#   aegis_mcp/               Optional MCP server package
+#   aegis-core-rs/           Rust crate source (Cargo.toml here)
 #
-# What you still need to do manually:
-#   cd aegis-core-rs && maturin develop --release
-#
-# See AGENTS.md for the full install sequence.
+# Editable install: `pip install -e .` — Python source changes take
+# effect immediately; Rust source changes require re-running pip
+# install (or `maturin develop --release` from aegis-core-rs/).
 
 [build-system]
-requires = ["setuptools>=68.0"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "aegis-control-plane"
@@ -51,12 +47,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "maturin>=1.0",
     "pytest>=7.0",
 ]
 mcp = [
-    # Optional — only needed if you want to run `aegis-mcp` as an
-    # MCP server for Cursor / Claude Code / other MCP clients.
     "mcp>=0.9",
 ]
 
@@ -69,6 +62,12 @@ Homepage = "https://github.com/wei9072/aegis"
 Issues = "https://github.com/wei9072/aegis/issues"
 "V1 Validation Evidence" = "https://github.com/wei9072/aegis/blob/main/docs/v1_validation.md"
 
-[tool.setuptools.packages.find]
-include = ["aegis*", "aegis_mcp*"]
-exclude = ["tests*", "examples*", "docs*", "aegis-core-rs*", "scripts*"]
+[tool.maturin]
+manifest-path = "aegis-core-rs/Cargo.toml"
+python-source = "."
+module-name = "aegis._core"
+# Include the optional aegis_mcp/ package in built wheels — maturin's
+# default Python package discovery only picks up the package matching
+# `module-name`'s leading segment (here: `aegis`); aegis_mcp needs to
+# be added explicitly.
+include = [{ path = "aegis_mcp/**/*.py", format = ["sdist", "wheel"] }]

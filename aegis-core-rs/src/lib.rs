@@ -16,7 +16,7 @@ fn ring0_status() -> PyResult<String> {
 }
 
 #[pymodule]
-fn aegis_core_rs(_py: Python, m: &PyModule) -> PyResult<()> {
+fn _core(_py: Python, m: &PyModule) -> PyResult<()> {
     // Status
     m.add_function(wrap_pyfunction!(ring0_status, m)?)?;
 

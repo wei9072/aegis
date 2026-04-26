@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "aegis_core_rs"
+# Underscore-prefixed name signals "private submodule of `aegis`".
+# Maturin's `module-name = "aegis._core"` in pyproject.toml installs
+# the produced .so at aegis/_core.<so>, matching this PyO3 binding.
+name = "_core"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
