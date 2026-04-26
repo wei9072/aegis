@@ -11,13 +11,15 @@ This example uses the on_iteration callback to render a one-line
 summary per iter — the same shape `aegis scenario run` displays.
 
 Run from the repo root:
-    PYTHONPATH=. python examples/04_read_decision_trace.py
+    python examples/04_read_decision_trace.py
 """
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from aegis.agents.gemini import GeminiProvider
-from aegis.runtime import pipeline
-from aegis.runtime.decision_pattern import DecisionPattern
+from aegis.agents.gemini import GeminiProvider  # noqa: E402
+from aegis.runtime import pipeline  # noqa: E402
+from aegis.runtime.decision_pattern import DecisionPattern  # noqa: E402
 
 
 _LABEL = {

@@ -11,10 +11,14 @@ add Aegis as a thin sanity layer without changing the workflow's loop
 structure.
 
 Run from the repo root:
-    PYTHONPATH=. python examples/02_gateway_single_call.py
+    python examples/02_gateway_single_call.py
 """
-from aegis.agents.gemini import GeminiProvider
-from aegis.agents.llm_adapter import LLMGateway
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from aegis.agents.gemini import GeminiProvider  # noqa: E402
+from aegis.agents.llm_adapter import LLMGateway  # noqa: E402
 
 
 def main() -> None:

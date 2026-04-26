@@ -13,14 +13,16 @@ This keeps Aegis a decision-system rather than a goal-seeker. See
 docs/v1_validation.md#framing for the full design rule.
 
 Run from the repo root:
-    PYTHONPATH=. python examples/03_custom_verifier.py
+    python examples/03_custom_verifier.py
 """
 import ast
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from aegis.agents.gemini import GeminiProvider
-from aegis.runtime import pipeline
-from aegis.runtime.task_verifier import VerifierResult
+from aegis.agents.gemini import GeminiProvider  # noqa: E402
+from aegis.runtime import pipeline  # noqa: E402
+from aegis.runtime.task_verifier import VerifierResult  # noqa: E402
 
 
 class FileParsesVerifier:

@@ -14,9 +14,17 @@ That's the entire integration surface — see examples/02 for a real
 provider.
 
 Run from the repo root:
-    PYTHONPATH=. python examples/00_quickstart.py
+    python examples/00_quickstart.py
+
+(Self-bootstraps the import path — no PYTHONPATH= prefix needed
+until pyproject.toml lands and `pip install -e .` becomes the
+canonical setup.)
 """
-from aegis.agents.llm_adapter import LLMGateway
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from aegis.agents.llm_adapter import LLMGateway  # noqa: E402
 
 
 class StubLLM:

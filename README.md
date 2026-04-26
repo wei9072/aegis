@@ -142,8 +142,11 @@ git clone https://github.com/wei9072/aegis && cd aegis
 python -m venv .venv && source .venv/bin/activate
 pip install maturin pytest click prompt_toolkit google-genai google-generativeai
 cd aegis-core-rs && maturin develop --release && cd ..
-PYTHONPATH=. python examples/00_quickstart.py
+python examples/00_quickstart.py
 ```
+
+(Examples self-bootstrap the import path; no `PYTHONPATH=` prefix
+needed until `pip install -e .` becomes the canonical setup.)
 
 The build friction is tracked at
 [`docs/launch/issue_rust_build_friction.md`](docs/launch/issue_rust_build_friction.md);

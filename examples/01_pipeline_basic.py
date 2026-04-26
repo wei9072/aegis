@@ -10,15 +10,17 @@ Aegis wraps any LLM provider in a control loop that:
   - asks the optional Layer C verifier whether the *task* (not just the loop) is done
 
 Run from the repo root:
-    PYTHONPATH=. python examples/01_pipeline_basic.py
+    python examples/01_pipeline_basic.py
 
 Requires GEMINI_API_KEY (or GOOGLE_API_KEY) in the environment.
 Substitute with OpenRouterProvider / GroqProvider for cross-family runs.
 """
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from aegis.agents.gemini import GeminiProvider
-from aegis.runtime import pipeline
+from aegis.agents.gemini import GeminiProvider  # noqa: E402
+from aegis.runtime import pipeline  # noqa: E402
 
 
 def main() -> None:
