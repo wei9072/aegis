@@ -735,33 +735,43 @@ from-plan as a sub-bullet.
     the rollback-on-failure path, the create-then-modify in-memory
     threading, the GC limit, and every ErrorKind variant). All 256
     Python tests still pass.
-- **V1.3** — Pipeline loop + IterationEvent in Rust — ✅ Partial (2026-04-26)
+- **V1.3** — Pipeline loop + IterationEvent in Rust — ✅ Partial++ (2026-04-26)
   - Sequence-level detectors (`is_state_stalemate`, `is_thrashing`,
     `is_plan_repeat_stalemate`) ported to `aegis-runtime::sequence`
     as pure functions; PyShim exposes them; Python pipeline.py's
     `_is_*` helpers are now thin re-exports (Rust is the
     ground-truth implementation)
   - 4 cargo tests pin every detector branch
-  - `IterationEvent` already partially in `aegis-decision::iteration`
-    (the slim shim added in V1.0 — fields `derive_pattern` reads).
-    Full IterationEvent port (with all the diagnostic fields the
-    Python pipeline carries) deferred until the loop itself moves.
-  - **IR-model unblocking (V1.3 prerequisite shipped):** with
-    `aegis-ir` landed (see V1.2 follow-up above) the loop now has
-    its data types in Rust. The remaining V1.3 gap is the
-    coordination logic (~150 LOC of `Pipeline.run()` coordination
-    minus the ~600 LOC of Planner prompt construction).
-  - **Scope divergence:** porting the full Pipeline.run() loop is
-    ~750 Python LOC heavily entangled with the Planner (LLM-prompt-
-    template work — fundamentally Python-shaped, not algorithmic).
-    Honest read: the loop's *coordination* logic is small and
-    portable; the *prompt construction* is large and Python-shaped.
-    The clean split is "ship coordination as a Rust trait callable
-    from Python; let prompts stay where they are". That work is
-    well-defined but not in this commit's scope. The detector
-    helpers + Snapshot + IterationEvent shim + IR-model cover the
-    V1.3 exit gate's load-bearing bits (decision-loop primitives +
-    plan IR are Rust ground truth) without doing the bigger port.
+  - **IterationEvent fully ported (V1.3 follow-up):**
+    `aegis_decision::iteration::IterationEvent` now carries every
+    field the Python dataclass had — `signals_total`, the four
+    `signals_by_kind` / `signal_delta_vs_prev` / `signal_value_totals`
+    / `signal_value_delta_vs_prev` maps, `regression_detail`,
+    `validation_errors`, `plan_goal`, `plan_strategy`. PyShim
+    exposes it as `aegis._core.IterationEvent` with full kwargs
+    constructor matching the V0.x dataclass (so
+    `IterationEvent(**base)` in tests works), `to_dict` method, and
+    the two `@property`-equivalents (`silent_done_contradiction`,
+    `decision_pattern`). Python `IterationEvent` is now a thin
+    re-export.
+  - **Per-iteration metric helpers ported (V1.3 follow-up):**
+    `aegis-runtime/src/metrics.rs` is the new home for
+    `kind_counts`, `kind_value_totals`, `total_cost`, `regressed`,
+    `regression_detail`, `hash_plan` (the loop's per-step
+    metric-aggregation primitives). PyShim exposes them; Python
+    `_kind_counts` / `_kind_value_totals` / `_total_cost` /
+    `_regressed` / `_regression_detail` / `_hash_plan` in pipeline.py
+    are thin re-exports. 9 cargo tests pin every aggregation,
+    including the round-to-4-decimal regression-detail rule and the
+    iteration/parent_id-stripping plan hash.
+  - **What's still Python:** the Pipeline.run() loop body itself
+    (~250 LOC of coordination), `LLMPlanner.plan(ctx)` (prompt
+    template work), `_build_context()` (uses SignalLayer +
+    GraphService stack). The loop now consumes only Rust-ground-
+    truth primitives (Executor, PlanValidator, IterationEvent,
+    metrics, sequence detectors); the remaining port is wiring it
+    as a Rust trait callable from Python with shims around Planner
+    + ContextBuilder, which is well-defined but not yet executed.
 - **V1.4** — LanguageAdapter trait + Python adapter port — ✅ Done (2026-04-26)
   - `crates/aegis-core/src/ast/{adapter.rs,registry.rs}` ship the trait + global singleton
   - `analyze_file`, `get_imports`, `check_syntax`, `fan_out_signal`, `chain_depth_signal`
@@ -845,7 +855,7 @@ from-plan as a sub-bullet.
 | V1.0 | ✅ | trace + decision data types, all Python tests still pass |
 | V1.1 | ✅ | OpenAI-compatible Rust provider; Python providers untouched (test rewrite gated on V1.3) |
 | V1.2 | ✅ Done | `Snapshot` IO + IR model + `apply_edit` engine + `Executor` + `PlanValidator` all in Rust; Python modules are thin re-exports |
-| V1.3 | ✅ Partial | sequence detectors + `IterationEvent` shim + IR model ported; full Pipeline.run() coordination port still deferred (the small piece — Planner prompt construction stays Python) |
+| V1.3 | ✅ Partial++ | sequence detectors + full `IterationEvent` + per-iter metric helpers + `hash_plan` all in Rust; Pipeline.run() *body* still Python (depends on LLMPlanner + _build_context, both Python-shaped) |
 | V1.4–V1.7 | ✅ | 10 languages, registry-driven dispatch, CLI auto-walks all extensions |
 | V1.8 | ⬜ | gated on V1.3-full + API quotas |
 | V1.9 | ⬜ | gated on V1.3-full |
@@ -860,17 +870,22 @@ shape: the Pipeline.run() coordination shell (~150 LOC) ports
 naturally to Rust as a trait callable from Python; the ~600 LOC of
 Planner prompt construction stays Python by design.
 
-**What this means for next-session-agent:** with V1.2 done, the next
-clean unit of work is the **Pipeline.run() coordination shell**
-(V1.3 full). Every dependency it needs already lives in Rust:
-`aegis-ir` for the plan, `aegis-runtime::{Executor, PlanValidator,
-Snapshot, sequence detectors}` for the loop primitives,
-`aegis-providers::LLMProvider` for the LLM seam. The shell wires
-those together and emits an `IterationEvent` per turn — the loop's
-*coordination* is small and portable. The Planner stays Python
-(prompt construction is fundamentally Python-shaped). After V1.3
-full, V1.8 / V1.9 / V1.10 / V2.0 unblock in sequence as their
-real-world gates are met (API quotas, 2-week soak, CI infra).
+**What this means for next-session-agent:** with V1.2 done and V1.3
+at Partial++, every per-iteration primitive the loop touches is now
+Rust ground truth (executor, validator, snapshot, sequence detectors,
+IterationEvent, metrics, plan hash). The remaining V1.3 unit is the
+**loop body itself** — wiring those primitives together as a
+`run_loop()` function in Rust, with two trait shims for the parts
+that stay Python:
+  1. `Planner` trait — `plan(ctx) -> PatchPlan` — Python LLMPlanner
+     gets adapted via `PyPlannerShim`
+  2. `ContextBuilder` trait — `build(task, root, scope, snippets)
+     -> PlanContext` — Python `_build_context` gets adapted via
+     `PyContextBuilderShim`
+The loop's coordination is ~150 LOC; the trait callbacks are
+straightforward PyO3 work. After V1.3 full, V1.8 / V1.9 / V1.10 /
+V2.0 unblock in sequence as their real-world gates are met (API
+quotas, 2-week soak, CI infra).
 
 ---
 

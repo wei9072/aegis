@@ -20,9 +20,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use aegis_runtime::{
-    is_plan_repeat_stalemate as rs_plan_repeat,
+    hash_plan as rs_hash_plan, is_plan_repeat_stalemate as rs_plan_repeat,
     is_state_stalemate as rs_state_stalemate, is_thrashing as rs_thrashing,
-    ExecutionResult as RsExecutionResult, Executor as RsExecutor,
+    kind_counts as rs_kind_counts, kind_value_totals as rs_kind_value_totals,
+    regressed as rs_regressed, regression_detail as rs_regression_detail,
+    total_cost as rs_total_cost, ExecutionResult as RsExecutionResult, Executor as RsExecutor,
     PatchResult as RsPatchResult, PlanValidator as RsPlanValidator, Snapshot,
     ValidationError as RsValidationError,
 };
@@ -491,6 +493,103 @@ impl PyPlanValidator {
     }
 }
 
+// ---------- metric helpers (pure aggregations + plan hash) ----------
+
+/// `signals: dict[str, list[Signal]]` — duck-typed; each Signal must
+/// expose `.name` (str) and `.value` (number). Returns
+/// `dict[str, int]` with kind-name → instance count.
+#[pyfunction]
+pub fn kind_counts<'py>(py: Python<'py>, signals: &PyDict) -> PyResult<&'py PyDict> {
+    let names = collect_signal_names(signals)?;
+    let counts = rs_kind_counts(names.iter().map(|s| s.as_str()));
+    let out = PyDict::new(py);
+    for (k, v) in counts {
+        out.set_item(k, v as i64)?;
+    }
+    Ok(out)
+}
+
+/// Same shape as `kind_counts`, but sums the `.value` field instead.
+#[pyfunction]
+pub fn kind_value_totals<'py>(py: Python<'py>, signals: &PyDict) -> PyResult<&'py PyDict> {
+    let items = collect_signal_name_value_pairs(signals)?;
+    let totals = rs_kind_value_totals(items.iter().map(|(k, v)| (k.as_str(), *v)));
+    let out = PyDict::new(py);
+    for (k, v) in totals {
+        out.set_item(k, v)?;
+    }
+    Ok(out)
+}
+
+/// Sum every signal value across every file. Same input shape.
+#[pyfunction]
+pub fn total_cost(signals: &PyDict) -> PyResult<f64> {
+    let items = collect_signal_name_value_pairs(signals)?;
+    Ok(rs_total_cost(items.into_iter().map(|(_, v)| v)))
+}
+
+/// Did the patch make the codebase worse? Cost-based (not
+/// instance-count-based) comparison.
+#[pyfunction]
+pub fn regressed(before: &PyDict, after: &PyDict) -> PyResult<bool> {
+    let b = total_cost(before)?;
+    let a = total_cost(after)?;
+    Ok(rs_regressed(b, a))
+}
+
+/// Per-kind cost growth for kinds whose cost rose. Empty dict means
+/// no regression.
+#[pyfunction]
+pub fn regression_detail<'py>(
+    py: Python<'py>,
+    before: &PyDict,
+    after: &PyDict,
+) -> PyResult<&'py PyDict> {
+    let before_items = collect_signal_name_value_pairs(before)?;
+    let after_items = collect_signal_name_value_pairs(after)?;
+    let before_totals = rs_kind_value_totals(before_items.iter().map(|(k, v)| (k.as_str(), *v)));
+    let after_totals = rs_kind_value_totals(after_items.iter().map(|(k, v)| (k.as_str(), *v)));
+    let detail = rs_regression_detail(&before_totals, &after_totals);
+    let out = PyDict::new(py);
+    for (k, v) in detail {
+        out.set_item(k, v)?;
+    }
+    Ok(out)
+}
+
+/// SHA-256 over `plan_to_dict(plan)` minus `iteration` and
+/// `parent_id`. Stable across re-runs of the same plan content;
+/// internal-only (used by Pipeline._run_loop's plan-repeat detection).
+#[pyfunction]
+pub fn hash_plan(plan: &PyPatchPlan) -> String {
+    rs_hash_plan(plan.inner_ref())
+}
+
+fn collect_signal_names(signals: &PyDict) -> PyResult<Vec<String>> {
+    let mut out = Vec::new();
+    for (_path, sig_list) in signals.iter() {
+        let l: &PyList = sig_list.downcast()?;
+        for sig in l.iter() {
+            let name = sig.getattr("name")?.extract::<String>()?;
+            out.push(name);
+        }
+    }
+    Ok(out)
+}
+
+fn collect_signal_name_value_pairs(signals: &PyDict) -> PyResult<Vec<(String, f64)>> {
+    let mut out = Vec::new();
+    for (_path, sig_list) in signals.iter() {
+        let l: &PyList = sig_list.downcast()?;
+        for sig in l.iter() {
+            let name = sig.getattr("name")?.extract::<String>()?;
+            let value = sig.getattr("value")?.extract::<f64>()?;
+            out.push((name, value));
+        }
+    }
+    Ok(out)
+}
+
 pub fn register(m: &PyModule) -> PyResult<()> {
     m.add_class::<PySnapshot>()?;
     m.add_class::<PyExecutor>()?;
@@ -501,5 +600,11 @@ pub fn register(m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(is_state_stalemate, m)?)?;
     m.add_function(wrap_pyfunction!(is_thrashing, m)?)?;
     m.add_function(wrap_pyfunction!(is_plan_repeat_stalemate, m)?)?;
+    m.add_function(wrap_pyfunction!(kind_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(kind_value_totals, m)?)?;
+    m.add_function(wrap_pyfunction!(total_cost, m)?)?;
+    m.add_function(wrap_pyfunction!(regressed, m)?)?;
+    m.add_function(wrap_pyfunction!(regression_detail, m)?)?;
+    m.add_function(wrap_pyfunction!(hash_plan, m)?)?;
     Ok(())
 }

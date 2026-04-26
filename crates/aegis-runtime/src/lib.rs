@@ -12,11 +12,16 @@
 //! depending on the Python executor.
 
 pub mod executor;
+pub mod metrics;
 pub mod sequence;
 pub mod snapshot;
 pub mod validator;
 
 pub use executor::{ExecutionResult, Executor, ExecutorError, PatchResult};
+pub use metrics::{
+    hash_plan, kind_counts, kind_value_totals, regressed, regression_detail, total_cost,
+    truncate_summary,
+};
 pub use sequence::{is_plan_repeat_stalemate, is_state_stalemate, is_thrashing};
 pub use snapshot::{Snapshot, SnapshotError};
 pub use validator::{ErrorKind, PlanValidator, ValidationError};

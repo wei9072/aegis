@@ -7,119 +7,32 @@ Stop conditions (any one):
   - max_iters reached
 Regression (total signal count increased) triggers rollback for that
 iteration; loop continues if budget remains.
+
+V1.3 follow-up: `IterationEvent` and the per-iteration metric helpers
+(`_kind_counts`, `_kind_value_totals`, `_total_cost`, `_regressed`,
+`_regression_detail`, `_hash_plan`) are now thin Python re-exports
+backed by `aegis._core` (Rust). The loop body itself still lives
+here — it depends on `LLMPlanner` and `_build_context`, both of which
+are fundamentally Python-shaped (prompt template work + the SignalLayer
++ GraphService stack).
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import os
-from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable
 from pathlib import Path
 
+from aegis._core import IterationEvent
 from aegis.agents.llm_adapter import LLMProvider
 from aegis.agents.planner import LLMPlanner, PlanContext
 from aegis.analysis.signals import SignalLayer
 from aegis.core.bindings import Signal, get_imports
 from aegis.graph.service import GraphService
-from aegis.ir.patch import PatchPlan, plan_to_dict
-from aegis.runtime.decision_pattern import DecisionPattern, derive_pattern
+from aegis.ir.patch import PatchPlan
 from aegis.runtime.executor import ExecutionResult, Executor
 from aegis.runtime.task_verifier import TaskVerdict, TaskVerifier, apply_verifier
 from aegis.runtime.validator import PlanValidator, ValidationError
-
-
-@dataclass(frozen=True)
-class IterationEvent:
-    """One iteration's outcome, in a shape stable enough for JSON
-    serialisation and run-to-run diffing.
-
-    Captures *what the pipeline decided this turn*, not the full plan
-    content (kept out for compactness — `plan_id` lets two runs be
-    compared without storing every patch). Multi-turn scenario runners
-    consume these to render trajectories and to assert convergence.
-
-    Two parallel signal views, intentionally redundant:
-      - `signals_by_kind` / `signal_delta_vs_prev`: how many *instances*
-        of each signal kind exist (≈ how many files carry that signal).
-        Useful for "did a new file pick up an issue?" questions.
-      - `signal_value_totals` / `signal_value_delta_vs_prev`: the
-        summed *values* across files (a file with `fan_out=15` and a
-        file with `fan_out=8` give a fan_out total of 23). This is
-        what answers "did the pipeline make the metric better or
-        worse?", which the instance-count view alone cannot.
-    """
-
-    iteration: int
-    plan_id: str                 # 8-char prefix of plan hash; stable across runs of identical plans
-    plan_goal: str = ""          # planner's restatement of the task
-    plan_strategy: str = ""      # planner's approach for this iteration
-    plan_done: bool = False      # planner declared "task complete"
-    plan_patches: int = 0        # number of patches in the plan
-    validation_passed: bool = False
-    validation_errors: list[str] = field(default_factory=list)
-    applied: bool = False        # executor ran and succeeded
-    rolled_back: bool = False    # executor ran but rolled back (regression or failure)
-    regressed: bool = False      # post-apply signal count > pre-apply
-    signals_total: int = 0
-    signals_by_kind: dict[str, int] = field(default_factory=dict)
-    signal_delta_vs_prev: dict[str, int] = field(default_factory=dict)
-    signal_value_totals: dict[str, float] = field(default_factory=dict)
-    signal_value_delta_vs_prev: dict[str, float] = field(default_factory=dict)
-    # Per-kind cost growth that triggered rollback this iteration, if
-    # any. Empty dict on iterations that didn't regress. Captured here
-    # (not just on the next ctx.previous_regression_detail) so the
-    # JSON snapshot records *which* cost grew on the rolled-back step.
-    regression_detail: dict[str, float] = field(default_factory=dict)
-    # Sequence-level meta-decisions, set by pipeline._run_loop after
-    # observing the event history. When either is True, this
-    # iteration's decision_pattern resolves to STALEMATE_DETECTED /
-    # THRASHING_DETECTED, overriding the per-iteration mechanical
-    # shape — the meta-observation is the more honest label.
-    stalemate_detected: bool = False
-    thrashing_detected: bool = False
-
-    @property
-    def silent_done_contradiction(self) -> bool:
-        """The Planner declared done but the patch never made it to disk.
-        Pipeline correctly ignored the flag, but a downstream observer
-        (CLI / report) wants to surface this loudly."""
-        return self.plan_done and not self.applied and self.plan_patches > 0
-
-    @property
-    def decision_pattern(self) -> DecisionPattern:
-        """Which named shape this iteration's outcome falls into.
-        Derived purely from the boolean flags above — see
-        `aegis.runtime.decision_pattern.derive_pattern` for the logic.
-        Scenario expectations and trace summaries consume this."""
-        return derive_pattern(self)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "iteration": self.iteration,
-            "plan_id": self.plan_id,
-            "plan_goal": self.plan_goal,
-            "plan_strategy": self.plan_strategy,
-            "plan_done": self.plan_done,
-            "plan_patches": self.plan_patches,
-            "validation_passed": self.validation_passed,
-            "validation_errors": list(self.validation_errors),
-            "applied": self.applied,
-            "rolled_back": self.rolled_back,
-            "regressed": self.regressed,
-            "signals_total": self.signals_total,
-            "signals_by_kind": dict(self.signals_by_kind),
-            "signal_delta_vs_prev": dict(self.signal_delta_vs_prev),
-            "signal_value_totals": dict(self.signal_value_totals),
-            "signal_value_delta_vs_prev": dict(self.signal_value_delta_vs_prev),
-            "regression_detail": dict(self.regression_detail),
-            "stalemate_detected": self.stalemate_detected,
-            "thrashing_detected": self.thrashing_detected,
-            "silent_done_contradiction": self.silent_done_contradiction,
-            "decision_pattern": self.decision_pattern.value,
-        }
-
 
 IterationCallback = Callable[[IterationEvent], None]
 
@@ -574,26 +487,21 @@ def _truncate(text: str, max_len: int) -> str:
 
 
 def _kind_counts(signals: dict[str, list[Signal]]) -> dict[str, int]:
-    counter: Counter[str] = Counter()
-    for sig_list in signals.values():
-        for sig in sig_list:
-            counter[sig.name] += 1
-    return dict(counter)
+    """Re-export (V1.3 Rust port). See `aegis_runtime::metrics::kind_counts`."""
+    from aegis._core import kind_counts
+    return kind_counts(signals)
 
 
 def _kind_value_totals(signals: dict[str, list[Signal]]) -> dict[str, float]:
-    """Sum each signal kind's value across every file.
+    """Re-export (V1.3 Rust port). See `aegis_runtime::metrics::kind_value_totals`.
 
     Two files with `fan_out=15` and `fan_out=8` produce a fan_out
     total of 23. This is the metric scenario runners need to track —
     instance counts alone (a file either carries fan_out or not)
     cannot reflect "fan_out dropped from 15 to 2".
     """
-    totals: dict[str, float] = {}
-    for sig_list in signals.values():
-        for sig in sig_list:
-            totals[sig.name] = totals.get(sig.name, 0.0) + float(sig.value)
-    return totals
+    from aegis._core import kind_value_totals
+    return kind_value_totals(signals)
 
 
 def _build_context(
@@ -676,56 +584,47 @@ def _scope_filter(
 
 
 def _hash_plan(plan: PatchPlan) -> str:
-    data = plan_to_dict(plan)
-    data.pop("iteration", None)
-    data.pop("parent_id", None)
-    blob = json.dumps(data, sort_keys=True).encode("utf-8")
-    return hashlib.sha256(blob).hexdigest()
+    """Re-export (V1.3 Rust port). See `aegis_runtime::metrics::hash_plan`."""
+    from aegis._core import hash_plan
+    return hash_plan(plan)
 
 
 def _regressed(
     before: dict[str, list[Signal]], after: dict[str, list[Signal]]
 ) -> bool:
-    """Did the patch make the codebase worse?
+    """Re-export (V1.3 Rust port). See `aegis_runtime::metrics::regressed`.
 
     Uses total signal *cost* (sum of values across files), not
     instance count. The instance-count strategy used previously
     false-positive'd legitimate refactors that produced new files —
     every new file picks up zero-valued signals (fan_out=0,
     max_chain_depth=0) which raised the count without raising any
-    actual cost. cost-based comparison answers the question the
+    actual cost. Cost-based comparison answers the question the
     pipeline is actually asking: "did this change degrade the
     codebase's structural quality?".
     """
-    return _total_cost(after) > _total_cost(before)
+    from aegis._core import regressed
+    return regressed(before, after)
 
 
 def _total_cost(signals: dict[str, list[Signal]]) -> float:
-    """Sum every signal value across every file. New files with
-    all-zero signals contribute 0 — by design, so a benign split
-    doesn't look like regression."""
-    return sum(
-        float(sig.value)
-        for sig_list in signals.values()
-        for sig in sig_list
-    )
+    """Re-export (V1.3 Rust port). See `aegis_runtime::metrics::total_cost`.
+
+    New files with all-zero signals contribute 0 — by design, so a
+    benign split doesn't look like regression."""
+    from aegis._core import total_cost
+    return total_cost(signals)
 
 
 def _regression_detail(
     before: dict[str, list[Signal]], after: dict[str, list[Signal]]
 ) -> dict[str, float]:
-    """Per-kind cost deltas, restricted to kinds whose cost actually rose.
+    """Re-export (V1.3 Rust port). See `aegis_runtime::metrics::regression_detail`.
 
     Returns the LLM-facing version of "why was this rolled back".
     Empty dict means "no regression". Used to populate
     `PlanContext.previous_regression_detail` so the next planner turn
     can address the specific cost that grew, not just retry blindly.
     """
-    before_totals = _kind_value_totals(before)
-    after_totals = _kind_value_totals(after)
-    detail: dict[str, float] = {}
-    for kind in set(before_totals) | set(after_totals):
-        delta = after_totals.get(kind, 0.0) - before_totals.get(kind, 0.0)
-        if delta > 0:
-            detail[kind] = round(delta, 4)
-    return detail
+    from aegis._core import regression_detail
+    return dict(regression_detail(before, after))

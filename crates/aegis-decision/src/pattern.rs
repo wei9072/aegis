@@ -85,7 +85,7 @@ pub fn derive_pattern(ev: &IterationEvent) -> DecisionPattern {
     if ev.rolled_back {
         return DecisionPattern::ExecutorFailure;
     }
-    if ev.silent_done_contradiction {
+    if ev.silent_done_contradiction() {
         return DecisionPattern::SilentDoneVeto;
     }
     if ev.plan_done && ev.plan_patches == 0 && ev.validation_passed {
@@ -150,11 +150,15 @@ mod tests {
 
     #[test]
     fn silent_done_veto() {
+        // Computed silent_done_contradiction: plan_done && !applied
+        // && plan_patches > 0. Validation must also fail (otherwise
+        // the event resolves to NOOP_DONE / APPLIED_CONTINUING earlier).
         let mut e = ev();
         e.plan_done = true;
         e.plan_patches = 1;
+        e.applied = false;
         e.validation_passed = false;
-        e.silent_done_contradiction = true;
+        assert!(e.silent_done_contradiction());
         assert_eq!(derive_pattern(&e), DecisionPattern::SilentDoneVeto);
     }
 
