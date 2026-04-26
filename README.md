@@ -24,6 +24,9 @@
 > 完整 framing 與 V1 evidence 見 [`docs/v1_validation.md`](docs/v1_validation.md)。
 > 任何新設計都必須通過這個檢核：**這個設計是在拒絕變糟，還是在導向變好？**
 > 如果是後者——方向錯了。
+>
+> Licensed under [MIT](LICENSE). v0.x — interface is stable, package
+> structure (`pyproject.toml` / PyPI wheels) is not yet.
 
 ---
 

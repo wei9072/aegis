@@ -1,0 +1,60 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            aegis-core-rs/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('aegis-core-rs/Cargo.lock') }}
+
+      - name: Install Python build + test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # No pyproject.toml yet — install deps explicitly. Tracks the
+          # editable .venv setup developers use locally. When pyproject.toml
+          # lands, this collapses to `pip install -e .[dev]`.
+          pip install \
+            maturin \
+            pytest \
+            click \
+            prompt_toolkit \
+            google-genai \
+            google-generativeai
+
+      - name: Build and install aegis-core-rs (Rust extension)
+        working-directory: aegis-core-rs
+        run: maturin develop --release
+
+      - name: Run pytest
+        env:
+          # Tests must not hit real LLM APIs. Provider tests mock at the
+          # urllib boundary. If a test ever needs a real key, that's a
+          # design bug — flag in PR review.
+          PYTHONPATH: ${{ github.workspace }}
+        run: pytest tests/ -v --tb=short
