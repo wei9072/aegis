@@ -43,6 +43,11 @@ Thumbs.db
 tests/scenarios/*/runs_*/
 tests/scenarios/*/runs/
 
+# Examples create _scratch_<name>/ directories at runtime to host
+# their generated workspaces. These are throwaway — same policy as
+# scenario runs/ above.
+examples/_scratch_*/
+
 # --- Agent tooling / local state ---
 .claude/
 .claw/
