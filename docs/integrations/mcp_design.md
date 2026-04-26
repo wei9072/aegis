@@ -1,8 +1,15 @@
-# MCP server design (interface pinned, implementation pending)
+# MCP server design + minimum viable build
 
 The git-hook and GitHub-Action integrations protect at the **commit
 boundary**. They are post-hoc — by the time the hook fires, the
 LLM has already produced and saved its work.
+
+**Status (V0.x):** `validate_change` is implemented and shipped in
+the `aegis_mcp` package. `validate_diff` and `get_signals` from the
+design are deferred — added when external demand justifies them.
+Install with `pip install -e ".[mcp]"`, run with `aegis-mcp`. See
+[Configuration shape](#configuration-shape-illustrative) below for
+how to plug into Cursor / Claude Code.
 
 The MCP server protects at the **decision boundary** — the agent
 calls Aegis *before* writing files, gets a verdict, and decides
@@ -221,17 +228,28 @@ adapter — no new decision logic.
 
 ## Status
 
-🟡 **Design pinned, build deferred.** Per
-[`docs/post_launch_discipline.md`](../post_launch_discipline.md):
-build when an external user files an issue saying *"I want to
-integrate Aegis with Cursor / Claude Code and the only blocker is
-no MCP server"*. The interface above is what gets built when that
-demand arrives — no re-deriving the design.
+✅ **`validate_change` shipped in `aegis_mcp/server.py`.**
+🟡 `validate_diff` + `get_signals` deferred until external demand
+   justifies them (per
+   [`docs/post_launch_discipline.md`](../post_launch_discipline.md)
+   — wait for an issue saying "I need them for X").
 
-If you want to build it yourself before that, the interface above
-is stable. Open a PR adding `aegis_mcp/` as a new top-level package
-that depends on `aegis` core; we'll review for fidelity to the
-contract above.
+The implementation is ~150 lines of Python wrapping existing aegis
+types (`Ring0Enforcer`, `SignalLayer`, `PolicyEngine`); the contract
+above is what got built. Tested at
+[`tests/test_mcp_server.py`](../../tests/test_mcp_server.py),
+including a structural test pinning the "reasons must be
+machine-parseable, not coaching" rule.
+
+Install + run:
+
+```bash
+pip install -e ".[mcp]"
+aegis-mcp        # starts MCP server on stdio
+```
+
+Then configure your MCP client per [Configuration shape](#configuration-shape-illustrative)
+above.
 
 ---
 

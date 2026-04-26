@@ -141,23 +141,30 @@ Other patterns (multi-turn pipeline, custom Layer C verifier,
 trace consumption): [`examples/`](examples/).
 
 **Build note.** Aegis ships a Rust extension for fast structural-signal
-extraction. V0.x has no `pyproject.toml` yet, so `pip install -e .`
-doesn't work directly — instead:
+extraction. `pip install -e ".[dev]"` handles the Python side
+(deps + `aegis` CLI on PATH); the Rust extension builds via a
+separate `maturin develop` step:
 
 ```bash
+# Prerequisites: Python 3.10+, git, and a Rust toolchain.
+# If you don't have Rust:
+#   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+#   source "$HOME/.cargo/env"
+
 git clone https://github.com/wei9072/aegis && cd aegis
 python -m venv .venv && source .venv/bin/activate
-pip install maturin pytest click prompt_toolkit google-genai google-generativeai
+pip install -e ".[dev]"
 cd aegis-core-rs && maturin develop --release && cd ..
 python examples/00_quickstart.py
 ```
 
-(Examples self-bootstrap the import path; no `PYTHONPATH=` prefix
-needed until `pip install -e .` becomes the canonical setup.)
+Examples self-bootstrap the import path; no `PYTHONPATH=` prefix
+required.
 
-The build friction is tracked at
-[`docs/launch/issue_rust_build_friction.md`](docs/launch/issue_rust_build_friction.md);
-PyPI wheels coming once the friction reports stabilise.
+Single-step install via maturin mixed-mode requires renaming the
+Rust crate to be a submodule of `aegis` — deferred to V1+ when PyPI
+wheels are also addressed. Build friction tracked at
+[`docs/launch/issue_rust_build_friction.md`](docs/launch/issue_rust_build_friction.md).
 
 ---
 
@@ -171,7 +178,7 @@ that doesn't ask you to switch tools.
 | :--- | :--- | :--- |
 | Commit | [Git pre-commit hook](docs/integrations/git_pre_commit.md) | ✓ ready (5-line bash) |
 | PR / merge | [GitHub Action / CI gate](docs/integrations/github_action.md) | ✓ ready (10-line YAML) |
-| Agent decision | [MCP server](docs/integrations/mcp_design.md) | 🟡 design pinned, build pending |
+| Agent decision | [MCP server](docs/integrations/mcp_design.md) | ✅ `validate_change` ready (`pip install -e ".[mcp]" && aegis-mcp`) |
 
 Pick whichever boundary fits your workflow; you can stack them.
 Index + per-path detail: [`docs/integrations/`](docs/integrations/).

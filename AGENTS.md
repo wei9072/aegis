@@ -38,16 +38,16 @@ python --version           # need 3.10+
 git --version              # any recent
 cargo --version || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env"
 
-# 1. Clone and enter.
+# 1. Clone, enter, venv.
 git clone https://github.com/wei9072/aegis ~/aegis
 cd ~/aegis
-
-# 2. Python venv + deps.
 python -m venv .venv
 source .venv/bin/activate
-pip install --quiet maturin pytest click prompt_toolkit google-genai google-generativeai
 
-# 3. Build + install the Rust extension into the venv.
+# 2. Editable install — pulls Python deps + registers the `aegis` CLI on PATH.
+pip install -e ".[dev]"
+
+# 3. Build + install the Rust extension into the same venv.
 cd aegis-core-rs && maturin develop --release && cd ..
 
 # 4. VERIFY (do not skip — confirms the install worked end-to-end).
@@ -60,9 +60,17 @@ is broken — diagnose before proceeding to integration. Common causes:
 
 - `cargo: command not found` → restart shell or `source "$HOME/.cargo/env"`
 - `ModuleNotFoundError: No module named 'aegis_core_rs'` → re-run step 3 inside the venv
-- `ModuleNotFoundError: No module named 'aegis'` → check that `python` resolves to the venv's Python (`which python`)
+- `ModuleNotFoundError: No module named 'aegis'` → check that `python` resolves to the venv's Python (`which python`); if not, re-run step 2 with the venv active
 
-After step 4 passes, Aegis is installed and ready to integrate.
+After step 4 passes, Aegis is installed and the `aegis` CLI is on
+PATH. You're ready to integrate.
+
+**Why the Rust step is separate.** V0.x's `pyproject.toml` uses
+setuptools (standard Python packaging); the Rust extension still
+builds via `maturin develop`. Single-step install via maturin
+mixed-mode requires renaming the Rust crate to be a submodule of
+`aegis` (~25 import-site refactor), deferred to V1+ when PyPI
+wheels are also being addressed.
 
 ---
 
@@ -147,11 +155,15 @@ completions), use `pipeline.run()` instead of `LLMGateway` — see
 [`examples/01_pipeline_basic.py`](examples/01_pipeline_basic.py)
 and [`examples/03_custom_verifier.py`](examples/03_custom_verifier.py).
 
-For the user inside Cursor / Claude Code who wants Aegis as an MCP
-tool: the server isn't built yet (interface pinned at
-[`docs/integrations/mcp_design.md`](docs/integrations/mcp_design.md)).
-Don't try to implement it ad-hoc — tell the user to file an issue
-asking for `aegis-mcp` so the build gets prioritized.
+**For Cursor / Claude Code users specifically:** there's a fourth
+path — the MCP server. Install the optional `mcp` extra
+(`pip install -e ".[mcp]"`) and run `aegis-mcp`. Configure the
+client per
+[`docs/integrations/mcp_design.md`](docs/integrations/mcp_design.md);
+the agent can then call `validate_change(path, new_content,
+old_content?)` mid-loop and get a structured verdict back. Only
+`validate_change` exposed in V0.x — if the user needs the other
+tools (`validate_diff`, `get_signals`), tell them to file an issue.
 
 ---
 
