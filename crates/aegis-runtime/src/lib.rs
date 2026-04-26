@@ -12,12 +12,17 @@
 //! depending on the Python executor.
 
 pub mod executor;
+pub mod loop_step;
 pub mod metrics;
 pub mod sequence;
 pub mod snapshot;
 pub mod validator;
 
 pub use executor::{ExecutionResult, Executor, ExecutorError, PatchResult};
+pub use loop_step::{
+    step_decision, LoopState, StepDecision, TerminateReason, STATE_STALEMATE_THRESHOLD,
+    THRASHING_THRESHOLD,
+};
 pub use metrics::{
     hash_plan, kind_counts, kind_value_totals, regressed, regression_detail, total_cost,
     truncate_summary,

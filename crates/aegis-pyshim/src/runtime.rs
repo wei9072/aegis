@@ -372,12 +372,197 @@ impl PyExecutor {
     }
 }
 
+// ---------- PipelineResult ----------
+
+/// Mirror of the V0.x Python `PipelineResult` dataclass. Mutable —
+/// `task_verdict` is set by the public `run()` wrapper *after* the
+/// loop returns (Layer C runs post-loop), so callers can assign
+/// `result.task_verdict = ...` exactly like the Python dataclass.
+///
+/// `signals_before` / `signals_after` are opaque Python objects
+/// (`dict[str, list[Signal]]`) since Signal lives in `aegis-core`'s
+/// PyO3 surface, not in this crate. Holding them as `PyObject`
+/// keeps that decoupling without losing the `result.signals_after.get(...)`
+/// usage patterns in scenario runners.
+#[pyclass(name = "PipelineResult", module = "aegis._core")]
+pub struct PyPipelineResult {
+    success: bool,
+    iterations: u32,
+    final_plan: Option<Py<crate::ir::PyPatchPlan>>,
+    signals_before: Option<PyObject>,
+    signals_after: Option<PyObject>,
+    error: Option<String>,
+    validation_errors: Vec<Py<PyValidationError>>,
+    execution_result: Option<Py<PyExecutionResult>>,
+    task_verdict: Option<PyObject>,
+}
+
+#[pymethods]
+impl PyPipelineResult {
+    #[new]
+    #[pyo3(signature = (
+        success=false,
+        iterations=0_i64,
+        final_plan=None,
+        signals_before=None,
+        signals_after=None,
+        error=None,
+        validation_errors=None,
+        execution_result=None,
+        task_verdict=None,
+    ))]
+    pub fn new(
+        py: Python<'_>,
+        success: bool,
+        iterations: i64,
+        final_plan: Option<Py<crate::ir::PyPatchPlan>>,
+        signals_before: Option<PyObject>,
+        signals_after: Option<PyObject>,
+        error: Option<String>,
+        validation_errors: Option<&PyList>,
+        execution_result: Option<Py<PyExecutionResult>>,
+        task_verdict: Option<PyObject>,
+    ) -> PyResult<Self> {
+        let validation_errors = match validation_errors {
+            Some(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items.iter() {
+                    let ve: Py<PyValidationError> = item.extract()?;
+                    out.push(ve);
+                }
+                out
+            }
+            None => Vec::new(),
+        };
+        let _ = py; // silence unused; kept for future GIL-bound work
+        Ok(Self {
+            success,
+            iterations: iterations.max(0) as u32,
+            final_plan,
+            signals_before,
+            signals_after,
+            error,
+            validation_errors,
+            execution_result,
+            task_verdict,
+        })
+    }
+
+    #[getter]
+    fn success(&self) -> bool {
+        self.success
+    }
+    #[setter]
+    pub fn set_success(&mut self, v: bool) {
+        self.success = v;
+    }
+
+    #[getter]
+    fn iterations(&self) -> u32 {
+        self.iterations
+    }
+    #[setter]
+    pub fn set_iterations(&mut self, v: i64) {
+        self.iterations = v.max(0) as u32;
+    }
+
+    #[getter]
+    fn final_plan(&self, py: Python<'_>) -> Option<Py<crate::ir::PyPatchPlan>> {
+        self.final_plan.as_ref().map(|p| p.clone_ref(py))
+    }
+    #[setter]
+    pub fn set_final_plan(&mut self, v: Option<Py<crate::ir::PyPatchPlan>>) {
+        self.final_plan = v;
+    }
+
+    #[getter]
+    fn signals_before(&self, py: Python<'_>) -> PyObject {
+        match &self.signals_before {
+            Some(v) => v.clone_ref(py),
+            None => PyDict::new(py).into(),
+        }
+    }
+    #[setter]
+    pub fn set_signals_before(&mut self, v: Option<PyObject>) {
+        self.signals_before = v;
+    }
+
+    #[getter]
+    fn signals_after(&self, py: Python<'_>) -> PyObject {
+        match &self.signals_after {
+            Some(v) => v.clone_ref(py),
+            None => PyDict::new(py).into(),
+        }
+    }
+    #[setter]
+    pub fn set_signals_after(&mut self, v: Option<PyObject>) {
+        self.signals_after = v;
+    }
+
+    #[getter]
+    fn error(&self) -> Option<String> {
+        self.error.clone()
+    }
+    #[setter]
+    pub fn set_error(&mut self, v: Option<String>) {
+        self.error = v;
+    }
+
+    #[getter]
+    fn validation_errors(&self, py: Python<'_>) -> Vec<Py<PyValidationError>> {
+        self.validation_errors
+            .iter()
+            .map(|p| p.clone_ref(py))
+            .collect()
+    }
+    #[setter]
+    pub fn set_validation_errors(&mut self, v: &PyList) -> PyResult<()> {
+        let mut out = Vec::with_capacity(v.len());
+        for item in v.iter() {
+            out.push(item.extract::<Py<PyValidationError>>()?);
+        }
+        self.validation_errors = out;
+        Ok(())
+    }
+
+    #[getter]
+    fn execution_result(&self, py: Python<'_>) -> Option<Py<PyExecutionResult>> {
+        self.execution_result.as_ref().map(|p| p.clone_ref(py))
+    }
+    #[setter]
+    pub fn set_execution_result(&mut self, v: Option<Py<PyExecutionResult>>) {
+        self.execution_result = v;
+    }
+
+    #[getter]
+    fn task_verdict(&self, py: Python<'_>) -> Option<PyObject> {
+        self.task_verdict.as_ref().map(|p| p.clone_ref(py))
+    }
+    #[setter]
+    pub fn set_task_verdict(&mut self, v: Option<PyObject>) {
+        self.task_verdict = v;
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PipelineResult(success={}, iterations={}, error={:?})",
+            self.success, self.iterations, self.error
+        )
+    }
+}
+
 // ---------- PlanValidator + ValidationError ----------
 
 #[pyclass(name = "ValidationError", module = "aegis._core")]
 #[derive(Clone)]
 pub struct PyValidationError {
     inner: RsValidationError,
+}
+
+impl PyValidationError {
+    pub(crate) fn from_inner(inner: RsValidationError) -> Self {
+        Self { inner }
+    }
 }
 
 #[pymethods]
@@ -597,6 +782,7 @@ pub fn register(m: &PyModule) -> PyResult<()> {
     m.add_class::<PyPatchResult>()?;
     m.add_class::<PyPlanValidator>()?;
     m.add_class::<PyValidationError>()?;
+    m.add_class::<PyPipelineResult>()?;
     m.add_function(wrap_pyfunction!(is_state_stalemate, m)?)?;
     m.add_function(wrap_pyfunction!(is_thrashing, m)?)?;
     m.add_function(wrap_pyfunction!(is_plan_repeat_stalemate, m)?)?;

@@ -735,43 +735,46 @@ from-plan as a sub-bullet.
     the rollback-on-failure path, the create-then-modify in-memory
     threading, the GC limit, and every ErrorKind variant). All 256
     Python tests still pass.
-- **V1.3** — Pipeline loop + IterationEvent in Rust — ✅ Partial++ (2026-04-26)
+- **V1.3** — Pipeline loop + IterationEvent in Rust — ✅ Done (2026-04-26)
   - Sequence-level detectors (`is_state_stalemate`, `is_thrashing`,
-    `is_plan_repeat_stalemate`) ported to `aegis-runtime::sequence`
-    as pure functions; PyShim exposes them; Python pipeline.py's
-    `_is_*` helpers are now thin re-exports (Rust is the
-    ground-truth implementation)
-  - 4 cargo tests pin every detector branch
-  - **IterationEvent fully ported (V1.3 follow-up):**
-    `aegis_decision::iteration::IterationEvent` now carries every
-    field the Python dataclass had — `signals_total`, the four
-    `signals_by_kind` / `signal_delta_vs_prev` / `signal_value_totals`
-    / `signal_value_delta_vs_prev` maps, `regression_detail`,
-    `validation_errors`, `plan_goal`, `plan_strategy`. PyShim
-    exposes it as `aegis._core.IterationEvent` with full kwargs
-    constructor matching the V0.x dataclass (so
-    `IterationEvent(**base)` in tests works), `to_dict` method, and
-    the two `@property`-equivalents (`silent_done_contradiction`,
-    `decision_pattern`). Python `IterationEvent` is now a thin
-    re-export.
-  - **Per-iteration metric helpers ported (V1.3 follow-up):**
-    `aegis-runtime/src/metrics.rs` is the new home for
-    `kind_counts`, `kind_value_totals`, `total_cost`, `regressed`,
-    `regression_detail`, `hash_plan` (the loop's per-step
-    metric-aggregation primitives). PyShim exposes them; Python
-    `_kind_counts` / `_kind_value_totals` / `_total_cost` /
-    `_regressed` / `_regression_detail` / `_hash_plan` in pipeline.py
-    are thin re-exports. 9 cargo tests pin every aggregation,
-    including the round-to-4-decimal regression-detail rule and the
-    iteration/parent_id-stripping plan hash.
-  - **What's still Python:** the Pipeline.run() loop body itself
-    (~250 LOC of coordination), `LLMPlanner.plan(ctx)` (prompt
-    template work), `_build_context()` (uses SignalLayer +
-    GraphService stack). The loop now consumes only Rust-ground-
-    truth primitives (Executor, PlanValidator, IterationEvent,
-    metrics, sequence detectors); the remaining port is wiring it
-    as a Rust trait callable from Python with shims around Planner
-    + ContextBuilder, which is well-defined but not yet executed.
+    `is_plan_repeat_stalemate`) live in `aegis-runtime::sequence`;
+    `aegis-runtime::loop_step::step_decision` is the pure
+    decision-step function the loop calls each iter
+  - **IterationEvent fully ported:** `aegis_decision::iteration`
+    carries every field the Python dataclass had; PyShim exposes
+    it as `aegis._core.IterationEvent` with kwargs constructor +
+    `to_dict` + the two `@property` equivalents
+    (`silent_done_contradiction`, `decision_pattern`)
+  - **Per-iter metric helpers ported:** `aegis-runtime::metrics`
+    is the new home for `kind_counts` / `kind_value_totals` /
+    `total_cost` / `regressed` / `regression_detail` / `hash_plan`;
+    Python helpers in pipeline.py are thin re-exports
+  - **Pipeline.run() loop body in Rust:**
+    `crates/aegis-pyshim/src/pipeline.rs::run_loop` is the new
+    entry point. The loop's coordination (NOOP_DONE shortcut,
+    validator gate, executor apply, post-apply re-context, cost-
+    based regression rollback, step-decision termination, max-iter
+    fallback) all run as Rust. Two seams stay Python:
+      1. **Planner** — passed in as a Python object exposing
+         `.plan(ctx) -> PatchPlan`. The Rust loop invokes via
+         `planner.call_method1("plan", (ctx,))`. `LLMPlanner`'s
+         prompt-template work stays Python by design.
+      2. **ContextBuilder** — passed in as a Python callable
+         `(task, root, scope, include_snippets) -> PlanContext`.
+         The Rust loop invokes it to seed and re-build context.
+         The Python `_build_context()` (uses SignalLayer +
+         GraphService stack) stays Python.
+  - **PipelineResult is now a PyO3 class** (`aegis._core.PipelineResult`)
+    with full setattr support so the public Python `run()` wrapper
+    can still attach `result.task_verdict` post-loop.
+  - **Python `_run_loop` is a thin delegator** to
+    `aegis._core.run_loop`. The V0.x loop body is preserved as
+    `_legacy_run_loop_kept_for_diff` for diff-vs-Rust comparisons
+    and as a fallback if a port-regression is found; deletion gated
+    on a 2-week production soak (per the V1.10 entry below).
+  - 7 cargo tests pin every step-decision branch (state stalemate,
+    thrashing, plan-repeat stalemate, dominance order, fresh state,
+    state-movement override). All 256 Python tests still pass.
 - **V1.4** — LanguageAdapter trait + Python adapter port — ✅ Done (2026-04-26)
   - `crates/aegis-core/src/ast/{adapter.rs,registry.rs}` ship the trait + global singleton
   - `analyze_file`, `get_imports`, `check_syntax`, `fan_out_signal`, `chain_depth_signal`
@@ -794,36 +797,37 @@ from-plan as a sub-bullet.
     target tree-sitter 0.22 which is ABI-incompatible with our 0.20
     grammar set
   - Java + Dart show 🟡 chain-depth in README pending per-adapter overrides
-- **V1.8** — Scenarios + verifiers in Rust — ⬜ deferred (gate: V1.3 full pipeline)
+- **V1.8** — Scenarios + verifiers in Rust — ⬜ deferred (gate: API quotas only)
   - **Why deferred:** V1.8 re-runs the V1.5 cross-model sweep against
-    the Rust pipeline as cross-implementation validation. That requires
-    (a) the Rust pipeline actually exists end-to-end (V1.3 partial
-    isn't enough), (b) live LLM API quotas (Groq + OpenRouter free
-    tiers, ~70 minutes of wall-clock per V1.5 baseline). Both gates
-    are real and outside the scope of "just write more code" — V1.8
-    earns its line item only after V1.3 is fully done AND fresh API
-    quotas are available.
-  - **Trigger to start:** V1.3 ships the full pipeline loop in Rust
-    AND user has API budget for a 100-run cross-model sweep.
+    the Rust pipeline as cross-implementation validation. With V1.3
+    full now shipped (the loop body is Rust), the only remaining gate
+    is live LLM API quotas (Groq + OpenRouter free tiers, ~70 minutes
+    of wall-clock per V1.5 baseline) — not a code task; just budget.
+  - **Trigger to start:** user has API budget for a 100-run
+    cross-model sweep against the Rust pipeline.
   - **Scenarios as data:** the 4 V1 scenarios (syntax_fix /
     fanout_reduce / lod_refactor / regression_rollback) live under
     `tests/scenarios/`. Their Python verifier classes (~50 LOC each)
     can be ported when V1.3 lands; the scenario *data* (initial state
     + task prompt) is already language-portable JSON+files.
-- **V1.9** — Rust-native CLI + MCP server — ⬜ deferred (gate: V1.3 full pipeline)
-  - **Why deferred:** the plan's V1.9 work is "binaries link against
-    aegis-runtime directly (no Python)". With V1.3 only partial
-    (detector primitives in Rust; loop still Python), a Rust-native
-    `aegis check` / `aegis pipeline run` would have to either
-    re-implement the loop (duplicating V1.3 work) or shell out to
-    Python (defeating the point). Neither ships value.
-  - **What can ship now:** a thin clap-based `aegis-cli` binary that
-    wraps the existing Python entry points via `PyO3` *embedding*
-    Python (the inverse of today's Python-imports-Rust direction).
-    That demo is interesting but not what V1.9 promised; leaving it
-    to a real V1.3-complete state.
-  - **What ALREADY ships:** the Rust pieces are in place — `aegis-cli`
-    can be added in 1 session once V1.3 is full.
+- **V1.9** — Rust-native CLI + MCP server — ⬜ deferred (gate: Python seam adapters)
+  - **Why deferred:** V1.9 wants binaries linked against `aegis-runtime`
+    directly (no Python at runtime). With V1.3 done, the loop body
+    runs as Rust — but it still calls Python for the **Planner**
+    (LLMPlanner is prompt-template work) and the **ContextBuilder**
+    (SignalLayer + GraphService are Python today). A V1.9 binary
+    needs Rust-native versions of both:
+      1. **Rust planner** — wraps `aegis-providers::LLMProvider`
+         with prompt-template construction. ~200 LOC; the prompt
+         strings can stay verbatim from the Python.
+      2. **Rust context builder** — port `_build_context` to use
+         `aegis-core` Signal/SignalLayer + a new graph crate. ~150
+         LOC after `aegis-core` exposes the right APIs.
+    Both are well-scoped follow-ups; not in V1.3 scope.
+  - **What ALREADY ships:** the loop body, all decision-making,
+    every per-iter primitive. A `aegis-cli` binary wrapping Python
+    via PyO3 embedding (inverse of today) ships in 1 session if
+    needed before the full Rust planner/ctx_builder land.
 - **V1.10** — Python deletion — ⬜ deferred (gate: V1.9 done + 2-week soak)
   - **Why deferred:** deleting `aegis/` Python without an
     independently-validated Rust replacement would brick every
@@ -855,37 +859,33 @@ from-plan as a sub-bullet.
 | V1.0 | ✅ | trace + decision data types, all Python tests still pass |
 | V1.1 | ✅ | OpenAI-compatible Rust provider; Python providers untouched (test rewrite gated on V1.3) |
 | V1.2 | ✅ Done | `Snapshot` IO + IR model + `apply_edit` engine + `Executor` + `PlanValidator` all in Rust; Python modules are thin re-exports |
-| V1.3 | ✅ Partial++ | sequence detectors + full `IterationEvent` + per-iter metric helpers + `hash_plan` all in Rust; Pipeline.run() *body* still Python (depends on LLMPlanner + _build_context, both Python-shaped) |
+| V1.3 | ✅ Done | full Pipeline.run() body in Rust via `aegis._core.run_loop`; LLMPlanner + _build_context passed in as Python seams; legacy Python loop preserved as `_legacy_run_loop_kept_for_diff` for safety net |
 | V1.4–V1.7 | ✅ | 10 languages, registry-driven dispatch, CLI auto-walks all extensions |
 | V1.8 | ⬜ | gated on V1.3-full + API quotas |
 | V1.9 | ⬜ | gated on V1.3-full |
 | V1.10 | ⬜ | gated on V1.9 + 2-week soak |
 | V2.0 | ⬜ | gated on V1.10 + CI infra |
 
-V1.2 is now end-to-end Rust: data contract (`PatchPlan` / `Patch` /
-`Edit`), engine logic (`apply_edit`'s line-aware fallback joiner),
-and the two service classes (`Executor` for atomic apply +
-`PlanValidator` for the gate). V1.3 still has the same remaining
-shape: the Pipeline.run() coordination shell (~150 LOC) ports
-naturally to Rust as a trait callable from Python; the ~600 LOC of
-Planner prompt construction stays Python by design.
+V1.2 is end-to-end Rust (data + engine + Executor + PlanValidator).
+V1.3 is now end-to-end Rust too: the Pipeline.run() loop body runs
+as `aegis._core.run_loop`, with `LLMPlanner` and `_build_context`
+passed in as Python seams. Every decision the loop makes — when to
+emit which IterationEvent, when to roll back on cost regression,
+when to stop on stalemate / thrashing — is Rust code calling Rust
+data through Rust functions.
 
-**What this means for next-session-agent:** with V1.2 done and V1.3
-at Partial++, every per-iteration primitive the loop touches is now
-Rust ground truth (executor, validator, snapshot, sequence detectors,
-IterationEvent, metrics, plan hash). The remaining V1.3 unit is the
-**loop body itself** — wiring those primitives together as a
-`run_loop()` function in Rust, with two trait shims for the parts
-that stay Python:
-  1. `Planner` trait — `plan(ctx) -> PatchPlan` — Python LLMPlanner
-     gets adapted via `PyPlannerShim`
-  2. `ContextBuilder` trait — `build(task, root, scope, snippets)
-     -> PlanContext` — Python `_build_context` gets adapted via
-     `PyContextBuilderShim`
-The loop's coordination is ~150 LOC; the trait callbacks are
-straightforward PyO3 work. After V1.3 full, V1.8 / V1.9 / V1.10 /
-V2.0 unblock in sequence as their real-world gates are met (API
-quotas, 2-week soak, CI infra).
+**What this means for next-session-agent:** the next clean unit is
+either:
+  1. **V1.8** — re-run the V1.5 cross-model sweep against the Rust
+     pipeline. Pure validation work; no code changes. Needs LLM API
+     budget (Groq + OpenRouter free tiers, ~70 minutes per baseline).
+  2. **V1.9 prep** — port `LLMPlanner` and `_build_context` to Rust
+     so the eventual `aegis-cli` / `aegis-mcp` binaries have no
+     Python runtime dependency. Both are well-scoped (prompt
+     strings stay verbatim; `aegis-core` already has Signal +
+     adapters).
+After either, V1.10 / V2.0 unblock as their real-world gates are met
+(2-week soak, CI infra).
 
 ---
 

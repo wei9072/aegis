@@ -20,6 +20,7 @@ mod ir;
 mod task;
 mod providers;
 mod runtime;
+mod pipeline;
 
 use pyo3::prelude::*;
 
@@ -33,5 +34,6 @@ pub fn register(m: &PyModule) -> PyResult<()> {
     task::register(m)?;
     providers::register(m)?;
     runtime::register(m)?;
+    pipeline::register(m)?;
     Ok(())
 }

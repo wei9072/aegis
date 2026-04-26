@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 from pathlib import Path
 
-from aegis._core import IterationEvent
+from aegis._core import IterationEvent, PipelineResult
 from aegis.agents.llm_adapter import LLMProvider
 from aegis.agents.planner import LLMPlanner, PlanContext
 from aegis.analysis.signals import SignalLayer
@@ -35,22 +35,6 @@ from aegis.runtime.task_verifier import TaskVerdict, TaskVerifier, apply_verifie
 from aegis.runtime.validator import PlanValidator, ValidationError
 
 IterationCallback = Callable[[IterationEvent], None]
-
-
-@dataclass
-class PipelineResult:
-    success: bool
-    iterations: int
-    final_plan: PatchPlan | None = None
-    signals_before: dict[str, list[Signal]] = field(default_factory=dict)
-    signals_after: dict[str, list[Signal]] = field(default_factory=dict)
-    error: str | None = None
-    validation_errors: list[ValidationError] = field(default_factory=list)
-    execution_result: ExecutionResult | None = None
-    # Layer C — populated after the loop terminates by the public
-    # `run()` wrapper. Always present (TaskPattern.NO_VERIFIER when no
-    # verifier was provided). Never read by the loop or the planner.
-    task_verdict: TaskVerdict | None = None
 
 
 def run(
@@ -108,6 +92,45 @@ def _run_loop(
     include_file_snippets: bool = True,
     on_iteration: IterationCallback | None = None,
 ) -> PipelineResult:
+    """Drive the multi-turn loop. V1.3 full: this is now a thin
+    wrapper around `aegis._core.run_loop` (Rust). The Python
+    `LLMPlanner` and `_build_context` are passed as callable shims;
+    everything else (validator, executor, IterationEvent construction,
+    metric aggregation, sequence detection, step-decision) runs as
+    native Rust through the trait-less PyO3 boundary.
+
+    See `crates/aegis-pyshim/src/pipeline.rs` for the orchestration
+    logic and `crates/aegis-runtime/src/loop_step.rs` for the pure
+    decision-step function the Rust loop calls.
+    """
+    from aegis._core import run_loop
+    planner = LLMPlanner(provider)
+    return run_loop(
+        task=task,
+        root=root,
+        planner=planner,
+        ctx_builder=_build_context,
+        scope=scope,
+        max_iters=max_iters,
+        include_file_snippets=include_file_snippets,
+        on_iteration=on_iteration,
+    )
+
+
+def _legacy_run_loop_kept_for_diff(
+    task: str,
+    root: str,
+    provider: LLMProvider,
+    scope: list[str] | None = None,
+    max_iters: int = 3,
+    include_file_snippets: bool = True,
+    on_iteration: IterationCallback | None = None,
+) -> PipelineResult:
+    """V0.x reference implementation. Retained as a single
+    Python-side body for diff-vs-Rust comparisons and as a fallback
+    if a Rust-port regression is found. Not exported; not called.
+    Delete once the Rust loop has soaked in production for 2 weeks.
+    """
     root_abs = str(Path(root).resolve())
     planner = LLMPlanner(provider)
     validator = PlanValidator(root_abs, scope=scope)
