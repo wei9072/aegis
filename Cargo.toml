@@ -12,6 +12,7 @@ members = [
     "crates/aegis-trace",
     "crates/aegis-decision",
     "crates/aegis-providers",
+    "crates/aegis-runtime",
     "crates/aegis-pyshim",
 ]
 

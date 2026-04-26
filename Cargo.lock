@@ -53,9 +53,21 @@ version = "0.1.0"
 dependencies = [
  "aegis-decision",
  "aegis-providers",
+ "aegis-runtime",
  "aegis-trace",
  "pyo3",
  "serde_json",
+]
+
+[[package]]
+name = "aegis-runtime"
+version = "0.1.0"
+dependencies = [
+ "aegis-decision",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

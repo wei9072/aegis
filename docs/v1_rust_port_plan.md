@@ -701,8 +701,48 @@ from-plan as a sub-bullet.
     practice no V1.x pipeline consumer needs it yet (Gemini-via-Python
     still works through `aegis/agents/gemini.py`). It lands when the
     V1.3 Rust pipeline has a real consumer for it.
-- **V1.2** — Validator + Executor in Rust — ⬜ not started
-- **V1.3** — Pipeline loop + IterationEvent in Rust — ⬜ not started
+- **V1.2** — Validator + Executor in Rust — ✅ Partial (2026-04-26)
+  - `crates/aegis-runtime/` — new crate with the language-agnostic
+    snapshot/rollback primitive (`Snapshot`) and the sequence-level
+    detector helpers
+  - `Snapshot::capture` / `restore` / `write_backup` — mirrors V0.x
+    Python `Executor._take_snapshot` / `_rollback` / backup-dir
+    semantics; idempotent re-add; deletes-now-restores; creates-now-
+    deletes; backup dir gets `<path>.deleted_marker` files for
+    paths that didn't exist at snapshot time
+  - 5 cargo tests pin every restore branch
+  - PyShim exposes `aegis._core.Snapshot` with the same surface
+  - **Scope divergence:** the plan called for porting the full
+    `Executor` + `PlanValidator` Python classes (~500 LOC). Both
+    are deeply intertwined with the IR data model (`PatchPlan`,
+    `Patch`, `EditEngine`, ~400 more LOC of Python) and with
+    Python-prompt-shaped Planner output. Porting just the IO
+    primitive ships an immediately useful Rust foundation
+    (`aegis-mcp`, future Rust pipeline) without dragging the IR
+    port along; the IR-model port is its own scoped phase, deferred
+    until V1.3+ has a concrete consumer that needs it.
+- **V1.3** — Pipeline loop + IterationEvent in Rust — ✅ Partial (2026-04-26)
+  - Sequence-level detectors (`is_state_stalemate`, `is_thrashing`,
+    `is_plan_repeat_stalemate`) ported to `aegis-runtime::sequence`
+    as pure functions; PyShim exposes them; Python pipeline.py's
+    `_is_*` helpers are now thin re-exports (Rust is the
+    ground-truth implementation)
+  - 4 cargo tests pin every detector branch
+  - `IterationEvent` already partially in `aegis-decision::iteration`
+    (the slim shim added in V1.0 — fields `derive_pattern` reads).
+    Full IterationEvent port (with all the diagnostic fields the
+    Python pipeline carries) deferred until the loop itself moves.
+  - **Scope divergence:** porting the full Pipeline.run() loop is
+    ~750 Python LOC heavily entangled with the Planner (LLM-prompt-
+    template work — fundamentally Python-shaped, not algorithmic).
+    Honest read: the loop's *coordination* logic is small and
+    portable; the *prompt construction* is large and Python-shaped.
+    The clean split is "ship coordination as a Rust trait callable
+    from Python; let prompts stay where they are". That work is
+    well-defined but not in this commit's scope. The detector
+    helpers + Snapshot + IterationEvent shim cover the V1.3 exit
+    gate's load-bearing bit (decision-loop primitives are Rust
+    ground truth) without doing the bigger port.
 - **V1.4** — LanguageAdapter trait + Python adapter port — ✅ Done (2026-04-26)
   - `crates/aegis-core/src/ast/{adapter.rs,registry.rs}` ship the trait + global singleton
   - `analyze_file`, `get_imports`, `check_syntax`, `fan_out_signal`, `chain_depth_signal`
@@ -725,10 +765,86 @@ from-plan as a sub-bullet.
     target tree-sitter 0.22 which is ABI-incompatible with our 0.20
     grammar set
   - Java + Dart show 🟡 chain-depth in README pending per-adapter overrides
-- **V1.8** — Scenarios + verifiers in Rust — ⬜ not started
-- **V1.9** — Rust-native CLI + MCP server — ⬜ not started
-- **V1.10** — Python deletion — ⬜ not started
-- **V2.0** — Distribution + polish — ⬜ not started
+- **V1.8** — Scenarios + verifiers in Rust — ⬜ deferred (gate: V1.3 full pipeline)
+  - **Why deferred:** V1.8 re-runs the V1.5 cross-model sweep against
+    the Rust pipeline as cross-implementation validation. That requires
+    (a) the Rust pipeline actually exists end-to-end (V1.3 partial
+    isn't enough), (b) live LLM API quotas (Groq + OpenRouter free
+    tiers, ~70 minutes of wall-clock per V1.5 baseline). Both gates
+    are real and outside the scope of "just write more code" — V1.8
+    earns its line item only after V1.3 is fully done AND fresh API
+    quotas are available.
+  - **Trigger to start:** V1.3 ships the full pipeline loop in Rust
+    AND user has API budget for a 100-run cross-model sweep.
+  - **Scenarios as data:** the 4 V1 scenarios (syntax_fix /
+    fanout_reduce / lod_refactor / regression_rollback) live under
+    `tests/scenarios/`. Their Python verifier classes (~50 LOC each)
+    can be ported when V1.3 lands; the scenario *data* (initial state
+    + task prompt) is already language-portable JSON+files.
+- **V1.9** — Rust-native CLI + MCP server — ⬜ deferred (gate: V1.3 full pipeline)
+  - **Why deferred:** the plan's V1.9 work is "binaries link against
+    aegis-runtime directly (no Python)". With V1.3 only partial
+    (detector primitives in Rust; loop still Python), a Rust-native
+    `aegis check` / `aegis pipeline run` would have to either
+    re-implement the loop (duplicating V1.3 work) or shell out to
+    Python (defeating the point). Neither ships value.
+  - **What can ship now:** a thin clap-based `aegis-cli` binary that
+    wraps the existing Python entry points via `PyO3` *embedding*
+    Python (the inverse of today's Python-imports-Rust direction).
+    That demo is interesting but not what V1.9 promised; leaving it
+    to a real V1.3-complete state.
+  - **What ALREADY ships:** the Rust pieces are in place — `aegis-cli`
+    can be added in 1 session once V1.3 is full.
+- **V1.10** — Python deletion — ⬜ deferred (gate: V1.9 done + 2-week soak)
+  - **Why deferred:** deleting `aegis/` Python without an
+    independently-validated Rust replacement would brick every
+    integration listed in `docs/integrations/` (pre-commit, CI,
+    MCP). The plan correctly required V1.9 first; V1.9 isn't done
+    so V1.10 can't even be considered.
+  - **What's needed before V1.10:** V1.3 + V1.8 + V1.9 all green,
+    plus a 2-week real-traffic soak on the Rust binaries with no
+    regressions reported. The plan's "Python deletion is a
+    1-session phase" estimate assumes that pre-work; honoring it.
+- **V2.0** — Distribution + polish — ⬜ deferred (gate: V1.10 done; CI infra)
+  - **Why deferred:** V2.0 promises `cargo install aegis-cli`,
+    `brew install aegis`, `npm install -g @aegis/cli`, GitHub
+    Releases auto-publish across 5 platforms × 2 architectures.
+    Every one of those needs a real artifact built from V1.10's
+    Python-free state, plus CI infrastructure setup (cibuildwheel-
+    equivalent for Rust, signed Homebrew tap, npm publish creds).
+    None of that work makes sense before there's something to
+    publish.
+  - **What's actionable today:** the structure is in place. V2.0
+    becomes a 2–3-session rollout once V1.10 ships — `cargo dist`
+    handles the cross-compile matrix; the Homebrew tap + npm
+    wrapper are <100 lines each.
+
+### Honest summary as of 2026-04-26
+
+| Phase | State | What's true today |
+| :--- | :--- | :--- |
+| V1.0 | ✅ | trace + decision data types, all Python tests still pass |
+| V1.1 | ✅ | OpenAI-compatible Rust provider; Python providers untouched (test rewrite gated on V1.3) |
+| V1.2 | ✅ Partial | `Snapshot` IO ported; full `Executor` + IR-model port deferred |
+| V1.3 | ✅ Partial | sequence detectors + `IterationEvent` shim ported; full loop port deferred (Planner is prompt-template-bound) |
+| V1.4–V1.7 | ✅ | 10 languages, registry-driven dispatch, CLI auto-walks all extensions |
+| V1.8 | ⬜ | gated on V1.3-full + API quotas |
+| V1.9 | ⬜ | gated on V1.3-full |
+| V1.10 | ⬜ | gated on V1.9 + 2-week soak |
+| V2.0 | ⬜ | gated on V1.10 + CI infra |
+
+The "partial" V1.2/V1.3 entries each ship a load-bearing piece of the
+phase's value (Rust ground-truth detectors; Rust snapshot primitive
+that aegis-mcp + future Rust pipeline can call) without doing the
+larger IR-model port the original plan implicitly needed. That port is
+real work but doesn't naturally fit "always shippable per phase" — it's
+its own multi-session piece.
+
+**What this means for next-session-agent:** the next clean unit of
+work is the IR-model port (PatchPlan + Patch + EditEngine in Rust),
+which unblocks full V1.2 / V1.3 / V1.8 / V1.9 / V1.10 / V2.0 in
+sequence. That's the load-bearing path forward; everything else is
+incremental refinement.
 
 ---
 

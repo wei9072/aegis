@@ -515,24 +515,27 @@ _STATE_STALEMATE_THRESHOLD = 3
 _THRASHING_THRESHOLD = 2
 
 
+# Detector helpers ported to Rust in V1.3 (re-export pattern). The
+# Python signatures are preserved for backward compatibility — pinned
+# by `tests/test_decision_pattern.py::test_*_helper_threshold_*`.
+# Threshold args still accepted but only the Rust default is used;
+# callers that need to vary thresholds were never wired (no V0.x
+# call site changes the default).
 def _is_state_stalemate(
     history: list[dict[str, float]],
     current_value_totals: dict[str, float],
     threshold: int = _STATE_STALEMATE_THRESHOLD,
 ) -> bool:
-    """True iff the last `threshold` iterations (this one + the
-    `threshold-1` before it) all share identical signal_value_totals.
-
-    "State unchanged" stalemate — distinct from "plan repeated"
-    stalemate, which is detected separately by hashing the plan.
-    Catches the case where the planner produces *different* plans
-    that all fail to change anything (e.g. K rounds of validation
-    veto on different-but-equally-broken patches).
-    """
-    if len(history) < threshold - 1:
-        return False
-    recent = history[-(threshold - 1):]
-    return all(t == current_value_totals for t in recent)
+    if threshold != _STATE_STALEMATE_THRESHOLD:
+        # No V0.x caller varies this; the Rust impl hardcodes
+        # threshold=3. If a future caller needs custom thresholds,
+        # surface that as a Cargo trait method and re-export.
+        if len(history) < threshold - 1:
+            return False
+        recent = history[-(threshold - 1):]
+        return all(t == current_value_totals for t in recent)
+    from aegis._core import is_state_stalemate
+    return is_state_stalemate(history, current_value_totals)
 
 
 def _is_thrashing(
@@ -540,18 +543,14 @@ def _is_thrashing(
     regressed_now: bool,
     threshold: int = _THRASHING_THRESHOLD,
 ) -> bool:
-    """True iff the last `threshold` events (this one + the
-    `threshold-1` before it) were all REGRESSION_ROLLBACK.
-
-    Specifically distinct from stalemate: thrashing = "every attempt
-    actively degraded state, then was correctly rolled back". The
-    system is making decisions; they're just all rejection decisions.
-    """
-    if not regressed_now:
-        return False
-    if len(history) < threshold - 1:
-        return False
-    return all(history[-(threshold - 1):])
+    if threshold != _THRASHING_THRESHOLD:
+        if not regressed_now:
+            return False
+        if len(history) < threshold - 1:
+            return False
+        return all(history[-(threshold - 1):])
+    from aegis._core import is_thrashing
+    return is_thrashing(history, regressed_now)
 
 
 def _is_plan_repeat_stalemate(
@@ -559,32 +558,10 @@ def _is_plan_repeat_stalemate(
     value_totals_history: list[dict[str, float]],
     current_value_totals: dict[str, float],
 ) -> bool:
-    """Plan repeat is a *supporting* signal, not a standalone trigger.
-
-    Two reasons it can't fire stalemate alone:
-
-      - **Same wording, different intent.** LLMs occasionally emit the
-        same canonical PatchPlan dict in genuinely different
-        contexts — e.g. a small prompt-template noise that produces
-        an identical hash even though the second emission was a
-        legitimate retry of a partially-applied edit.
-      - **Different wording, same intent.** And conversely, an LLM
-        rephrasing the same plan with one whitespace difference
-        wouldn't trigger plan-repeat at all — yet it's just as
-        stuck. plan_hash misses this case, so leaning on it as the
-        primary signal would over-fire on the cases it does catch
-        while missing the cases it doesn't.
-
-    The honest reading: plan-repeat is "I noticed the planner gave me
-    the same bytes again". It's only stalemate when the *state* also
-    confirms nothing is moving. Combined: plan repeat AND state
-    unchanged since the last iteration → real stalemate.
-    """
-    if not plan_repeated_now:
-        return False
-    if not value_totals_history:
-        return False
-    return value_totals_history[-1] == current_value_totals
+    from aegis._core import is_plan_repeat_stalemate
+    return is_plan_repeat_stalemate(
+        plan_repeated_now, value_totals_history, current_value_totals
+    )
 
 
 def _truncate(text: str, max_len: int) -> str:

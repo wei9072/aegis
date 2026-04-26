@@ -18,6 +18,7 @@ mod trace;
 mod decision;
 mod task;
 mod providers;
+mod runtime;
 
 use pyo3::prelude::*;
 
@@ -29,5 +30,6 @@ pub fn register(m: &PyModule) -> PyResult<()> {
     decision::register(m)?;
     task::register(m)?;
     providers::register(m)?;
+    runtime::register(m)?;
     Ok(())
 }
