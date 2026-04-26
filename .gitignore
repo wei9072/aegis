@@ -15,7 +15,10 @@ env/
 htmlcov/
 
 # --- Rust ---
-aegis-core-rs/target/
+# V0.x kept the cargo target dir under aegis-core-rs/; V1.0 moved
+# the workspace under crates/ so target/ now lives at repo root.
+target/
+crates/*/target/
 **/*.rs.bk
 Cargo.lock.bak
 

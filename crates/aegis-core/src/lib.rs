@@ -43,5 +43,8 @@ fn _core(_py: Python, m: &PyModule) -> PyResult<()> {
     // Incremental updater
     m.add_class::<incremental::IncrementalUpdater>()?;
 
+    // V1.0 — register pure-Rust trace + decision types via pyshim.
+    aegis_pyshim::register(m)?;
+
     Ok(())
 }

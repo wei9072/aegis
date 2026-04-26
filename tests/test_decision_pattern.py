@@ -207,7 +207,12 @@ def test_plan_repeat_stalemate_requires_state_no_movement():
 
 def test_pattern_values_are_stable_strings():
     """ROADMAP §6.3 spirit: existing reason/label codes must not change.
-    Pinning every value here so renames are visible in diff."""
+    Pinning every value here so renames are visible in diff.
+
+    Post V1.0 (Rust port): DecisionPattern is a PyO3 enum and PyO3 0.20
+    doesn't expose metaclass `__iter__`. Use `members()` classmethod
+    to enumerate variants instead of `for p in DecisionPattern`.
+    """
     expected = {
         "applied_done", "applied_continuing", "regression_rollback",
         "executor_failure", "silent_done_veto", "validation_veto",
@@ -216,4 +221,4 @@ def test_pattern_values_are_stable_strings():
         "stalemate_detected", "thrashing_detected",
         "unknown",
     }
-    assert {p.value for p in DecisionPattern} == expected
+    assert {p.value for p in DecisionPattern.members()} == expected

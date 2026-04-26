@@ -63,9 +63,10 @@ Issues = "https://github.com/wei9072/aegis/issues"
 "V1 Validation Evidence" = "https://github.com/wei9072/aegis/blob/main/docs/v1_validation.md"
 
 [tool.maturin]
-manifest-path = "aegis-core-rs/Cargo.toml"
+manifest-path = "crates/aegis-core/Cargo.toml"
 python-source = "."
 module-name = "aegis._core"
+features = ["extension-module"]
 # Include the optional aegis_mcp/ package in built wheels — maturin's
 # default Python package discovery only picks up the package matching
 # `module-name`'s leading segment (here: `aegis`); aegis_mcp needs to

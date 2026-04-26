@@ -1,0 +1,31 @@
+# Aegis Cargo workspace.
+#
+# Per docs/v1_rust_port_plan.md, the V1 port lives under crates/.
+# Each crate is a single responsibility; aegis-pyshim is the only
+# crate that depends on PyO3 features intended for the maturin
+# extension boundary, and it deletes itself at V1.10.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/aegis-core",
+    "crates/aegis-trace",
+    "crates/aegis-decision",
+    "crates/aegis-pyshim",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/wei9072/aegis"
+
+[workspace.dependencies]
+# `extension-module` is opted-in via per-crate features so that
+# `cargo test --workspace` can link without the Python extension
+# scaffolding. Maturin enables it via `tool.maturin.features` in
+# pyproject.toml.
+pyo3 = { version = "0.20.2" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"

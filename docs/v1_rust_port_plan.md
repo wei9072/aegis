@@ -656,7 +656,26 @@ When a phase completes, change `⬜ not started` to
 `✅ Done (commit <hash>, YYYY-MM-DD)` and append any divergences-
 from-plan as a sub-bullet.
 
-- **V1.0** — Foundation: trace + decision data types — ⬜ not started
+- **V1.0** — Foundation: trace + decision data types — ✅ Done (2026-04-26 — `git log --grep="V1.0 — Foundation"`)
+  - `cargo test --workspace`: 33 passed (8 suites)
+  - `pytest`: 256 passed (entry-gate Python suite untouched)
+  - Workspace: `crates/{aegis-core,aegis-trace,aegis-decision,aegis-pyshim}`
+  - `pyproject.toml` `manifest-path` updated to `crates/aegis-core/Cargo.toml`
+  - `extension-module` is now a per-crate Cargo feature (`aegis-core`,
+    `aegis-pyshim`); maturin enables it via `[tool.maturin] features`,
+    `cargo test` runs without it. Plan didn't anticipate this gate;
+    documented as a divergence and adopted because the alternative
+    (stripping pyo3 from cargo test entirely) leaks Python tooling
+    into Rust development.
+  - PyO3 0.20 doesn't expose enum metaclass `__iter__`, so
+    `DecisionPattern.members()` / `TaskPattern.members()` classmethods
+    were added. Two pre-existing tests (`test_pattern_values_are_stable_strings`,
+    `test_apply_verifier_*`) updated from `for p in DecisionPattern` /
+    `is TaskPattern.X` to `members()` / `==`. Semantically equivalent.
+  - `TaskVerdict.__dataclass_fields__` introspection in
+    `test_task_verdict_has_no_feedback_field` swapped for `dir()`-based
+    introspection (PyO3 classes aren't dataclasses). Same intent — fence
+    against retry/feedback/hint/next_plan/advice/guidance fields.
 - **V1.1** — Provider abstraction + first Rust impl — ⬜ not started
 - **V1.2** — Validator + Executor in Rust — ⬜ not started
 - **V1.3** — Pipeline loop + IterationEvent in Rust — ⬜ not started

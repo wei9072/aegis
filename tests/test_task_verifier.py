@@ -53,14 +53,14 @@ def test_derive_no_verifier_present():
     assert derive_task_pattern(
         verifier_present=False, verifier_passed=None, verifier_raised=False,
         pipeline_done=True,
-    ) is TaskPattern.NO_VERIFIER
+    ) == TaskPattern.NO_VERIFIER
 
 
 def test_derive_verifier_raised():
     assert derive_task_pattern(
         verifier_present=True, verifier_passed=None, verifier_raised=True,
         pipeline_done=True,
-    ) is TaskPattern.VERIFIER_ERROR
+    ) == TaskPattern.VERIFIER_ERROR
 
 
 def test_derive_solved_regardless_of_pipeline_done():
@@ -71,7 +71,7 @@ def test_derive_solved_regardless_of_pipeline_done():
         assert derive_task_pattern(
             verifier_present=True, verifier_passed=True, verifier_raised=False,
             pipeline_done=pipeline_done,
-        ) is TaskPattern.SOLVED
+        ) == TaskPattern.SOLVED
 
 
 def test_derive_incomplete_vs_abandoned():
@@ -81,11 +81,11 @@ def test_derive_incomplete_vs_abandoned():
     assert derive_task_pattern(
         verifier_present=True, verifier_passed=False, verifier_raised=False,
         pipeline_done=True,
-    ) is TaskPattern.INCOMPLETE
+    ) == TaskPattern.INCOMPLETE
     assert derive_task_pattern(
         verifier_present=True, verifier_passed=False, verifier_raised=False,
         pipeline_done=False,
-    ) is TaskPattern.ABANDONED
+    ) == TaskPattern.ABANDONED
 
 
 # ---------- apply_verifier (always returns a TaskVerdict) ----------
@@ -95,7 +95,7 @@ def test_apply_verifier_none_yields_no_verifier(tmp_path: Path):
         verifier=None, workspace=tmp_path, trace=[],
         pipeline_done=True, iterations_run=2,
     )
-    assert verdict.pattern is TaskPattern.NO_VERIFIER
+    assert verdict.pattern == TaskPattern.NO_VERIFIER
     assert verdict.verifier_result is None
     assert verdict.pipeline_done is True
     assert verdict.iterations_run == 2
@@ -106,7 +106,7 @@ def test_apply_verifier_passing(tmp_path: Path):
         verifier=_PassingVerifier(), workspace=tmp_path, trace=[],
         pipeline_done=True, iterations_run=1,
     )
-    assert verdict.pattern is TaskPattern.SOLVED
+    assert verdict.pattern == TaskPattern.SOLVED
     assert verdict.verifier_result is not None
     assert verdict.verifier_result.passed is True
     assert verdict.verifier_result.evidence == {"k": 1}
@@ -117,7 +117,7 @@ def test_apply_verifier_failing_pipeline_done(tmp_path: Path):
         verifier=_FailingVerifier(), workspace=tmp_path, trace=[],
         pipeline_done=True, iterations_run=3,
     )
-    assert verdict.pattern is TaskPattern.INCOMPLETE
+    assert verdict.pattern == TaskPattern.INCOMPLETE
     assert verdict.verifier_result.rationale == "nope"
 
 
@@ -126,7 +126,7 @@ def test_apply_verifier_failing_pipeline_not_done(tmp_path: Path):
         verifier=_FailingVerifier(), workspace=tmp_path, trace=[],
         pipeline_done=False, iterations_run=3,
     )
-    assert verdict.pattern is TaskPattern.ABANDONED
+    assert verdict.pattern == TaskPattern.ABANDONED
 
 
 def test_apply_verifier_swallows_exception(tmp_path: Path):
@@ -136,7 +136,7 @@ def test_apply_verifier_swallows_exception(tmp_path: Path):
         verifier=_RaisingVerifier(), workspace=tmp_path, trace=[],
         pipeline_done=True, iterations_run=1,
     )
-    assert verdict.pattern is TaskPattern.VERIFIER_ERROR
+    assert verdict.pattern == TaskPattern.VERIFIER_ERROR
     assert verdict.verifier_result is None
     assert "RuntimeError" in verdict.error
     assert "verifier blew up" in verdict.error
@@ -152,8 +152,21 @@ def test_task_verdict_has_no_feedback_field():
     framing-level conversation before the merge.
 
     See `docs/v1_validation.md#framing` design rule #3.
+
+    Post V1.0 (Rust port): TaskVerdict is a PyO3 class — its public
+    fields are exposed as `@property` getters (`pattern`,
+    `verifier_result`, `pipeline_done`, `iterations_run`, `error`),
+    plus the `to_dict()` method. We introspect with `dir()` filtered
+    on non-dunder, non-method attribute names. `to_dict` is excluded
+    because it's a method, not a field.
     """
-    fields = {f.name for f in TaskVerdict.__dataclass_fields__.values()}
+    method_names = {"to_dict"}
+    fields = {
+        name
+        for name in dir(TaskVerdict)
+        if not name.startswith("_") and name not in method_names
+    }
+    assert fields, "TaskVerdict introspection returned no fields — port broke"
     forbidden_substrings = (
         "retry", "feedback", "hint", "next_plan", "advice", "guidance",
     )
