@@ -154,6 +154,23 @@ PyPI wheels coming once the friction reports stabilise.
 
 ---
 
+## Integrations
+
+You're already using Cursor / Claude Code / Aider / Copilot / your
+own agent. Aegis is meant to be a **side-channel enforcement layer**
+that doesn't ask you to switch tools.
+
+| Boundary | Path | Status |
+| :--- | :--- | :--- |
+| Commit | [Git pre-commit hook](docs/integrations/git_pre_commit.md) | ✓ ready (5-line bash) |
+| PR / merge | [GitHub Action / CI gate](docs/integrations/github_action.md) | ✓ ready (10-line YAML) |
+| Agent decision | [MCP server](docs/integrations/mcp_design.md) | 🟡 design pinned, build pending |
+
+Pick whichever boundary fits your workflow; you can stack them.
+Index + per-path detail: [`docs/integrations/`](docs/integrations/).
+
+---
+
 ## Status
 
 | Layer | State | Notes |
