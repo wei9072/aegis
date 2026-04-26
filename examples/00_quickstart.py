@@ -10,8 +10,12 @@ Wraps a fake LLM in the gateway and shows two outcomes:
 To wrap your OWN LLM, replace `StubLLM` with a class that calls
 your provider (OpenAI, Anthropic, OpenRouter, vLLM, anything) and
 implements the same `.generate(prompt, tools=None) -> str` method.
-That's the entire integration surface — see examples/02 for a real
-provider.
+That's the entire integration surface — this file IS the wrap-
+your-own-LLM template.
+
+For a real-provider example (Gemini Gemma via google-genai),
+see examples/02_gateway_single_call.py. The shape is identical;
+only `StubLLM` is replaced with `GeminiProvider`.
 
 Run from the repo root:
     python examples/00_quickstart.py

@@ -1,16 +1,22 @@
 """
-Example 02 — Single-call gateway (Layer A only).
+Example 02 — Single-call gateway with a real provider.
 
-The simplest way to use Aegis: wrap one LLM completion in all the
-in-pipeline gates (Ring 0 syntax, ToolCallValidator, IntentClassifier,
-IntentBypassDetector, PolicyEngine). The gateway returns text only if
-every gate passed; otherwise it retries up to max_retries.
+Same shape as examples/00_quickstart.py — but uses the real
+GeminiProvider (Gemma family) instead of a StubLLM. Runs an actual
+LLM call through every Aegis in-pipeline gate (Ring 0 syntax,
+ToolCallValidator, IntentClassifier, IntentBypassDetector,
+PolicyEngine), returning text only if every gate passed.
 
-Use this when you have an existing LLM-driven workflow and want to
-add Aegis as a thin sanity layer without changing the workflow's loop
-structure.
+To wrap YOUR OWN LLM (instead of GeminiProvider), see
+examples/00_quickstart.py — you implement the same one-method
+LLMProvider Protocol that GeminiProvider satisfies, then plug it
+into LLMGateway exactly the same way as below.
 
-Run from the repo root:
+Use this gateway pattern when you have an existing LLM-driven
+workflow and want to add Aegis as a thin sanity layer without
+changing the workflow's loop structure.
+
+Run from the repo root (requires GEMINI_API_KEY or GOOGLE_API_KEY):
     python examples/02_gateway_single_call.py
 """
 import sys

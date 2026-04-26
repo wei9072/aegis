@@ -4,6 +4,13 @@
 
 A system for preventing silent regressions in LLM-driven workflows.
 
+> **If you are an AI coding agent** (Claude Code, Cursor, Aider, etc.)
+> helping a user install or integrate Aegis, read
+> [`AGENTS.md`](AGENTS.md) instead — it has imperative install
+> commands, integration templates you can paste, and the framing
+> rules you must respect. The rest of this README is for the human
+> evaluating whether to adopt Aegis.
+
 ---
 
 ## What it is
