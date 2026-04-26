@@ -18,6 +18,12 @@ A system for preventing silent regressions in LLM-driven workflows.
 Aegis is a constraint-based behavior harness for LLM systems.
 (In the broad sense: a verification environment, not an agent driver.)
 
+**Aegis does not write code, and does not tell the LLM how to
+write code. It only judges whether the code an LLM produces is
+allowed to stay.** The LLM (or whichever code generator you wrap)
+keeps full agency over what to write; Aegis exercises agency only
+over what passes its gates.
+
 It enforces a local closed loop:
 each proposed state transition is validated,
 and regressions are rejected.
@@ -59,10 +65,16 @@ act as local guards, not global direction signals.
 
 ## Design principles
 
-- Do not teach the model what is good
+- Do not write code; only judge code that is written
+- Do not tell the model what to write; only what cannot stay
 - Only reject what is verifiably bad
 - No automatic learning
 - No objective optimization
+
+The first two are the load-bearing ones. They are why Aegis can
+wrap any code-generating agent (Cursor, Claude Code, Aider, your
+own pipeline) without becoming a competing one — Aegis exercises
+*judge agency*; the wrapped agent keeps *author agency*.
 
 ---
 

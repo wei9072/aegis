@@ -1,5 +1,20 @@
 # Multi-language support plan
 
+> **⚠️ SUPERSEDED — 2026-04-26.** This document has been folded
+> into [`docs/v1_rust_port_plan.md`](v1_rust_port_plan.md). The
+> per-language work originally planned here is now V1.4–V1.7 of
+> the Rust port (the `LanguageAdapter` trait moves into Rust
+> without a PyO3 boundary, which makes the implementation cleaner
+> than the originally-planned Python+Rust hybrid).
+>
+> **Read `v1_rust_port_plan.md` for the canonical schedule.** This
+> file is preserved unmodified below as the design rationale for
+> the language abstractions (still valid: trait shape, per-language
+> checklist, risks, out-of-scope). Don't drive new work from this
+> file.
+
+---
+
 > **Status:** Plan only — no code in this commit. Authored 2026-04-26.
 > A new agent picking this up should read this file end-to-end before
 > touching `aegis-core-rs/`. The plan is intentionally complete enough
