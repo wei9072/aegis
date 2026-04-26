@@ -676,7 +676,31 @@ from-plan as a sub-bullet.
     `test_task_verdict_has_no_feedback_field` swapped for `dir()`-based
     introspection (PyO3 classes aren't dataclasses). Same intent — fence
     against retry/feedback/hint/next_plan/advice/guidance fields.
-- **V1.1** — Provider abstraction + first Rust impl — ⬜ not started
+- **V1.1** — Provider abstraction + first Rust impl — ✅ Done (2026-04-26)
+  - `crates/aegis-providers/` — `LLMProvider` trait, `ProviderError` typed
+    enum, `OpenAIChatProvider` impl that covers OpenAI / OpenRouter /
+    Groq via configurable `base_url` + `display_name`
+  - HTTP abstracted behind `HttpClient`; production impl is `UreqClient`
+    (sync `ureq`, no tokio yet — V1.3 pipeline port revisits async if
+    needed); `StubHttpClient` for tests
+  - 10 cargo tests covering: success body, HTTP-status error, network
+    error, malformed JSON, missing-choices, env-var fallback, OpenRouter
+    + Groq config wiring
+  - PyShim exposes `aegis._core.RustOpenAIProvider` with the same
+    `.generate(prompt, tools=None) -> str` shape as the Python provider
+    (mutating-tool rejection at the Python boundary)
+  - **Scope divergence from original plan:** Python providers in
+    `aegis/agents/*.py` are NOT yet replaced by Rust-backed re-exports.
+    Reason: the existing 17 `tests/test_openai_provider.py` tests mock
+    `urllib.request.urlopen` directly — replacing the provider would
+    break all 17 mocks. Rewriting them to mock at the Rust HTTP layer
+    is best done together with the V1.3 pipeline port (when the call
+    site naturally moves to Rust providers), not as a separate test-
+    rewrite commit. Today both implementations exist side-by-side.
+  - **Gemini deferred:** The plan listed Gemini as part of V1.1; in
+    practice no V1.x pipeline consumer needs it yet (Gemini-via-Python
+    still works through `aegis/agents/gemini.py`). It lands when the
+    V1.3 Rust pipeline has a real consumer for it.
 - **V1.2** — Validator + Executor in Rust — ⬜ not started
 - **V1.3** — Pipeline loop + IterationEvent in Rust — ⬜ not started
 - **V1.4** — LanguageAdapter trait + Python adapter port — ✅ Done (2026-04-26)

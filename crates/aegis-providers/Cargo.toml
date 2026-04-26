@@ -1,0 +1,16 @@
+[package]
+name = "aegis-providers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# `ureq` is sync, ~100 deps, no tokio. Matches V0.x Python sync
+# semantics — the V1 pipeline port (V1.3) decides whether to move
+# to async.
+ureq = { version = "2.10", default-features = false, features = ["tls"] }
