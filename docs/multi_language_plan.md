@@ -599,13 +599,39 @@ this in order:
 
 ## Phase status
 
-- **Phase 0** — Refactor to LanguageAdapter trait — ⬜ not started
-- **Phase 1** — TypeScript + JavaScript — ⬜ not started
-- **Phase 2** — Go — ⬜ not started
-- **Phase 3** — Java + C# — ⬜ not started
-- **Phase 4** — PHP + Swift + Kotlin + Dart — ⬜ not started
-- **Phase 5** — Acceptance review — ⬜ not started
+- **Phase 0** — Refactor to LanguageAdapter trait — ✅ Done (2026-04-26, V1.4)
+- **Phase 1** — TypeScript + JavaScript — ✅ Done (2026-04-26, V1.5)
+- **Phase 2** — Go — ✅ Done (2026-04-26, V1.6)
+- **Phase 3** — Java + C# — ✅ Done (2026-04-26, V1.6)
+- **Phase 4** — PHP + Swift + Kotlin + Dart — ✅ Done (2026-04-26, V1.7)
+- **Phase 5** — Acceptance review — ⬜ not started (gate: real usage data)
 - **Phase 6** — Vue / Angular / Flutter — ⬜ not started (evidence-gated)
+
+**Divergences from this plan during V1.4–V1.7 implementation:**
+
+- All 4 implementation phases shipped in a single commit because
+  the per-language work is mechanically identical — adding 9
+  adapters in one batch costs less than 9 separate commits and the
+  registry meta-test (`every_adapter_parses_empty_file_without_panicking`,
+  `every_adapter_compiles_its_import_query`) catches "forgot to
+  register" / "broken grammar" cases atomically.
+- `tree-sitter-kotlin` pinned to `=0.3.4` and `tree-sitter-dart`
+  pinned to `=0.0.3` — newer versions of both crates target
+  tree-sitter 0.21+/0.22+, which is ABI-incompatible with the
+  0.20 line that the rest of the grammars use. Pinning is the
+  cheapest fix; bumping the entire grammar set to 0.22 is a
+  separate work item.
+- `max_chain_depth` default walker chains across the union of
+  member-access / call shapes for all 10 grammars rather than
+  per-language overrides. Java + Dart under-count by 1 in the
+  basic `a.b.c` shape — flagged 🟡 in README; per-language
+  overrides land when a real-traffic signal needs them (Phase 5
+  acceptance review).
+- Unit-test coverage per language is light — the registry meta-
+  test + a Python-side smoke test cover the "is this language
+  actually wired" question; per-language `tests/test_<lang>_*.py`
+  files are deferred until real users surface concrete cases that
+  break.
 
 When a phase completes, change `⬜ not started` to `✅ Done (commit <hash>, YYYY-MM-DD)`.
 

@@ -17,39 +17,53 @@ def check(path, signals):
     """Check Ring 0 architectural rules on PATH."""
     from aegis.enforcement.validator import Ring0Enforcer
     from aegis.analysis.signals import SignalLayer
+    from aegis.core.bindings import supported_extensions
 
     enforcer = Ring0Enforcer()
     signal_layer = SignalLayer()
     has_violations = False
 
-    py_files = []
+    # Walk every extension the registry knows about (Python +
+    # tier-2 languages from V1.4–V1.7). Files with unknown
+    # extensions are silently skipped — Aegis has no opinion on
+    # them, which is the right negative-space stance.
+    exts = tuple(supported_extensions())
+    files_to_check: list[str] = []
     if os.path.isfile(path):
-        if path.endswith('.py'):
-            py_files.append(path)
+        if path.lower().endswith(exts):
+            files_to_check.append(path)
     else:
         for root, dirs, files in os.walk(path):
             dirs[:] = [d for d in dirs if not d.startswith('.')]
-            for file in files:
-                if file.endswith('.py'):
-                    py_files.append(os.path.join(root, file))
+            for f in files:
+                if f.lower().endswith(exts):
+                    files_to_check.append(os.path.join(root, f))
 
-    if not py_files:
-        click.echo(f"No Python files found in {path}")
+    if not files_to_check:
+        click.echo(f"No supported source files found in {path}")
+        click.echo(f"Supported extensions: {', '.join(exts)}")
         return
 
-    for f in py_files:
+    for f in files_to_check:
         for v in enforcer.check_file(f):
             has_violations = True
             click.echo(v)
 
+    # Cross-file circular-dependency check is currently
+    # Python-only — pass only `.py` files into check_project so
+    # other languages aren't misanalysed. (Multi-language
+    # circular-dep detection lives in V2+ scope per the rust port
+    # plan.)
+    py_files = [f for f in files_to_check if f.lower().endswith((".py", ".pyi"))]
     root_dir = path if os.path.isdir(path) else os.path.dirname(path)
-    for v in enforcer.check_project(py_files, root=root_dir):
-        has_violations = True
-        click.echo(v)
+    if py_files:
+        for v in enforcer.check_project(py_files, root=root_dir):
+            has_violations = True
+            click.echo(v)
 
     if signals:
         click.echo("\n--- Ring 0.5 Structural Signals ---")
-        for f in py_files:
+        for f in files_to_check:
             try:
                 sigs = signal_layer.extract(f)
                 if sigs:

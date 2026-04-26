@@ -206,6 +206,35 @@ Index + per-path detail: [`docs/integrations/`](docs/integrations/).
 | Eval Harness | 🟡 | 15 deterministic scenarios + 4 multi-turn scenarios; minimal by design — adaptive eval is post-V2 |
 | Feedback Layer | ❌ | Out of scope by design — see [Non-goals](#non-goals) and [Critical Principle](docs/gap3_control_plane.md#critical-principle) |
 
+### Supported source languages (Ring 0 + Ring 0.5 signals)
+
+Tier 2 multi-language support landed in V1.4–V1.7 of the Rust port
+(see [`docs/v1_rust_port_plan.md`](docs/v1_rust_port_plan.md)). The
+multi-turn pipeline is still Python-only — these languages get the
+**enforcement** half (syntax-error detection, fan-out, max-chain-depth)
+without the **refactor** half.
+
+| Language | Ring 0 syntax | Ring 0.5 fan-out | Ring 0.5 chain-depth | Extensions |
+| :--- | :---: | :---: | :---: | :--- |
+| Python | ✅ | ✅ | ✅ | `.py`, `.pyi` |
+| TypeScript | ✅ | ✅ | ✅ | `.ts`, `.tsx`, `.mts`, `.cts` |
+| JavaScript | ✅ | ✅ | ✅ | `.js`, `.mjs`, `.cjs`, `.jsx` |
+| Go | ✅ | ✅ | ✅ | `.go` |
+| Java | ✅ | ✅ | 🟡 | `.java` |
+| C# | ✅ | ✅ | ✅ | `.cs` |
+| PHP | ✅ | ✅ | ✅ | `.php`, `.phtml`, `.php5`, `.php7`, `.phps` |
+| Swift | ✅ | ✅ | ✅ | `.swift` |
+| Kotlin | ✅ | ✅ | ✅ | `.kt`, `.kts` |
+| Dart | ✅ | ✅ | 🟡 | `.dart` |
+
+🟡 = the default chain-depth walker under-counts on this language's
+AST shape; per-language overrides are the planned fix path
+(`LanguageAdapter::max_chain_depth`).
+
+Adding a language is one Cargo dep + one adapter file + one
+`.scm` query — see
+[`docs/multi_language_plan.md#per-language-work-checklist`](docs/multi_language_plan.md#per-language-work-checklist).
+
 ---
 
 ## Philosophy

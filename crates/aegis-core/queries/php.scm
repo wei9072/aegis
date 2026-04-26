@@ -1,0 +1,6 @@
+(namespace_use_clause (qualified_name) @import)
+(namespace_use_clause (name) @import)
+(require_expression (string) @import)
+(require_once_expression (string) @import)
+(include_expression (string) @import)
+(include_once_expression (string) @import)

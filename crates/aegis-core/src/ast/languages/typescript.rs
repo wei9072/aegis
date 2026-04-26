@@ -1,11 +1,35 @@
 use pyo3::prelude::*;
 use tree_sitter::{Language, Parser, Query, QueryCursor};
 
+use crate::ast::adapter::LanguageAdapter;
+
 pub fn language() -> Language {
-    tree_sitter_typescript::language_typescript()
+    // tsx grammar parses both `.ts` and `.tsx`, so a single adapter
+    // can cover both extensions without runtime branching.
+    tree_sitter_typescript::language_tsx()
 }
 
-pub const IMPORT_QUERY: &str = "(import_statement source: (string) @import_path)";
+pub const IMPORT_QUERY: &str = include_str!("../../../queries/typescript.scm");
+
+pub struct TypeScriptAdapter;
+
+impl LanguageAdapter for TypeScriptAdapter {
+    fn name(&self) -> &'static str {
+        "typescript"
+    }
+
+    fn extensions(&self) -> &'static [&'static str] {
+        &[".ts", ".tsx", ".mts", ".cts"]
+    }
+
+    fn tree_sitter_language(&self) -> Language {
+        language()
+    }
+
+    fn import_query(&self) -> &'static str {
+        IMPORT_QUERY
+    }
+}
 
 #[pyfunction]
 pub fn extract_ts_imports(code: &str) -> Vec<String> {

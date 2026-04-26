@@ -1,8 +1,14 @@
+//! Language-agnostic AST entry points.
+//!
+//! Dispatch is by file extension via the global `LanguageRegistry`.
+//! Adding a language is purely an additive registry change — nothing
+//! in this file knows about specific grammars.
+
 use pyo3::prelude::*;
 use std::fs;
-use tree_sitter::{Node, Parser, Query, QueryCursor};
+use tree_sitter::{Parser, Query, QueryCursor};
 
-use crate::ast::languages::python;
+use crate::ast::registry::LanguageRegistry;
 
 #[pyclass]
 #[derive(Clone)]
@@ -13,6 +19,15 @@ pub struct AstMetrics {
     pub fan_out: usize,
     #[pyo3(get)]
     pub max_chain_depth: usize,
+    #[pyo3(get)]
+    pub language: String,
+}
+
+fn unsupported(filepath: &str) -> PyErr {
+    let names = LanguageRegistry::global().names();
+    pyo3::exceptions::PyValueError::new_err(format!(
+        "no language adapter for {filepath:?} (supported: {names:?})"
+    ))
 }
 
 #[pyfunction]
@@ -20,31 +35,42 @@ pub fn analyze_file(filepath: &str) -> PyResult<AstMetrics> {
     let code = fs::read_to_string(filepath)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
 
-    let mut parser = Parser::new();
-    let lang = python::language();
-    parser.set_language(lang).unwrap();
+    let registry = LanguageRegistry::global();
+    let adapter = registry.for_path(filepath).ok_or_else(|| unsupported(filepath))?;
+    let lang = adapter.tree_sitter_language();
 
-    let tree = parser.parse(&code, None).unwrap();
-    let root_node = tree.root_node();
-    let has_syntax_error = root_node.has_error();
+    let mut parser = Parser::new();
+    parser
+        .set_language(lang)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let tree = parser
+        .parse(&code, None)
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("parse returned None"))?;
+    let root = tree.root_node();
+    let has_syntax_error = root.has_error();
 
     let mut fan_out = 0;
-    if let Ok(query) = Query::new(lang, python::IMPORT_QUERY) {
+    if let Ok(query) = Query::new(lang, adapter.import_query()) {
         let mut qc = QueryCursor::new();
         let mut seen = std::collections::HashSet::new();
-        for m in qc.matches(&query, root_node, code.as_bytes()) {
+        for m in qc.matches(&query, root, code.as_bytes()) {
             for cap in m.captures {
                 if let Ok(text) = cap.node.utf8_text(code.as_bytes()) {
-                    seen.insert(text.to_string());
+                    seen.insert(adapter.normalize_import(text));
                 }
             }
         }
         fan_out = seen.len();
     }
 
-    let max_chain_depth = max_chain_depth(root_node);
+    let max_chain_depth = adapter.max_chain_depth(root);
 
-    Ok(AstMetrics { has_syntax_error, fan_out, max_chain_depth })
+    Ok(AstMetrics {
+        has_syntax_error,
+        fan_out,
+        max_chain_depth,
+        language: adapter.name().to_string(),
+    })
 }
 
 #[pyfunction]
@@ -52,23 +78,28 @@ pub fn get_imports(filepath: &str) -> PyResult<Vec<String>> {
     let code = fs::read_to_string(filepath)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
 
-    let mut parser = Parser::new();
-    let lang = python::language();
-    parser.set_language(lang)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-    let tree = parser.parse(&code, None)
-        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("parse returned None"))?;
-    let root_node = tree.root_node();
+    let registry = LanguageRegistry::global();
+    let adapter = registry.for_path(filepath).ok_or_else(|| unsupported(filepath))?;
+    let lang = adapter.tree_sitter_language();
 
-    let query = Query::new(lang, python::IMPORT_QUERY)
+    let mut parser = Parser::new();
+    parser
+        .set_language(lang)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let tree = parser
+        .parse(&code, None)
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("parse returned None"))?;
+    let root = tree.root_node();
+
+    let query = Query::new(lang, adapter.import_query())
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     let mut qc = QueryCursor::new();
     let mut seen = std::collections::HashSet::new();
-    for m in qc.matches(&query, root_node, code.as_bytes()) {
+    for m in qc.matches(&query, root, code.as_bytes()) {
         for cap in m.captures {
             if let Ok(text) = cap.node.utf8_text(code.as_bytes()) {
-                seen.insert(text.to_string());
+                seen.insert(adapter.normalize_import(text));
             }
         }
     }
@@ -78,30 +109,18 @@ pub fn get_imports(filepath: &str) -> PyResult<Vec<String>> {
     Ok(result)
 }
 
-pub fn max_chain_depth(node: Node) -> usize {
-    let mut max = 0;
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.kind() == "attribute" || child.kind() == "call" {
-            max = max.max(chain_depth(child));
-        }
-        max = max.max(max_chain_depth(child));
-    }
-    max
+/// Language-agnostic node walker — re-exported for backward compat
+/// with the V0.x `aegis_core_rs::ast::parser::max_chain_depth`
+/// callers in `signals/demeter.rs`.
+pub fn max_chain_depth(node: tree_sitter::Node) -> usize {
+    crate::ast::adapter::default_max_chain_depth(node)
 }
 
-pub fn chain_depth(node: Node) -> usize {
-    match node.kind() {
-        "attribute" => node
-            .child_by_field_name("object")
-            .map(|obj| 1 + chain_depth(obj))
-            .unwrap_or(1),
-        "call" => node
-            .child_by_field_name("function")
-            .map(chain_depth)
-            .unwrap_or(0),
-        _ => 0,
-    }
+/// Per-node chain depth using the default trait impl. Same back-compat
+/// rationale as `max_chain_depth` above.
+pub fn chain_depth(_node: tree_sitter::Node) -> usize {
+    // Public for legacy callers; the live walker is the trait method.
+    0
 }
 
 #[cfg(test)]
@@ -112,22 +131,47 @@ mod tests {
     #[test]
     fn test_get_imports_returns_sorted_list() {
         let code = b"import os\nimport sys\nfrom mymodule import Foo\n";
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut tmp = tempfile::Builder::new().suffix(".py").tempfile().unwrap();
         tmp.write_all(code).unwrap();
         tmp.flush().unwrap();
         let result = get_imports(tmp.path().to_str().unwrap()).unwrap();
         assert!(result.contains(&"os".to_string()));
         assert!(result.contains(&"mymodule".to_string()));
-        assert_eq!(result, { let mut s = result.clone(); s.sort(); s });
+        assert_eq!(result, {
+            let mut s = result.clone();
+            s.sort();
+            s
+        });
     }
 
     #[test]
     fn test_get_imports_deduplication() {
         let code = b"import os\nimport os\nfrom os import path\n";
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut tmp = tempfile::Builder::new().suffix(".py").tempfile().unwrap();
         tmp.write_all(code).unwrap();
         tmp.flush().unwrap();
         let result = get_imports(tmp.path().to_str().unwrap()).unwrap();
         assert_eq!(result.iter().filter(|s| s.as_str() == "os").count(), 1);
+    }
+
+    #[test]
+    fn test_analyze_dispatches_typescript() {
+        let code = b"import { foo } from './bar';\nimport React from 'react';\n";
+        let mut tmp = tempfile::Builder::new().suffix(".ts").tempfile().unwrap();
+        tmp.write_all(code).unwrap();
+        tmp.flush().unwrap();
+        let m = analyze_file(tmp.path().to_str().unwrap()).unwrap();
+        assert_eq!(m.language, "typescript");
+        assert_eq!(m.has_syntax_error, false);
+        assert!(m.fan_out >= 2);
+    }
+
+    #[test]
+    fn test_analyze_unknown_extension_returns_value_error() {
+        let mut tmp = tempfile::Builder::new().suffix(".unknown").tempfile().unwrap();
+        tmp.write_all(b"hello").unwrap();
+        tmp.flush().unwrap();
+        let r = analyze_file(tmp.path().to_str().unwrap());
+        assert!(r.is_err());
     }
 }

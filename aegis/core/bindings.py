@@ -25,3 +25,5 @@ check_syntax = _rs.check_syntax
 extract_signals = _rs.extract_signals
 extract_ts_imports = _rs.extract_ts_imports
 build_ir = _rs.build_ir
+supported_languages = _rs.supported_languages
+supported_extensions = _rs.supported_extensions

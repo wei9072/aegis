@@ -3,20 +3,20 @@ use tree_sitter::Language;
 use crate::ast::adapter::LanguageAdapter;
 
 pub fn language() -> Language {
-    tree_sitter_python::language()
+    tree_sitter_swift::language()
 }
 
-pub const IMPORT_QUERY: &str = include_str!("../../../queries/python.scm");
+pub const IMPORT_QUERY: &str = include_str!("../../../queries/swift.scm");
 
-pub struct PythonAdapter;
+pub struct SwiftAdapter;
 
-impl LanguageAdapter for PythonAdapter {
+impl LanguageAdapter for SwiftAdapter {
     fn name(&self) -> &'static str {
-        "python"
+        "swift"
     }
 
     fn extensions(&self) -> &'static [&'static str] {
-        &[".py", ".pyi"]
+        &[".swift"]
     }
 
     fn tree_sitter_language(&self) -> Language {

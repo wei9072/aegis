@@ -3,20 +3,20 @@ use tree_sitter::Language;
 use crate::ast::adapter::LanguageAdapter;
 
 pub fn language() -> Language {
-    tree_sitter_python::language()
+    tree_sitter_java::language()
 }
 
-pub const IMPORT_QUERY: &str = include_str!("../../../queries/python.scm");
+pub const IMPORT_QUERY: &str = include_str!("../../../queries/java.scm");
 
-pub struct PythonAdapter;
+pub struct JavaAdapter;
 
-impl LanguageAdapter for PythonAdapter {
+impl LanguageAdapter for JavaAdapter {
     fn name(&self) -> &'static str {
-        "python"
+        "java"
     }
 
     fn extensions(&self) -> &'static [&'static str] {
-        &[".py", ".pyi"]
+        &[".java"]
     }
 
     fn tree_sitter_language(&self) -> Language {

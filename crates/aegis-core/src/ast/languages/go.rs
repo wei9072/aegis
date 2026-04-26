@@ -3,20 +3,20 @@ use tree_sitter::Language;
 use crate::ast::adapter::LanguageAdapter;
 
 pub fn language() -> Language {
-    tree_sitter_python::language()
+    tree_sitter_go::language()
 }
 
-pub const IMPORT_QUERY: &str = include_str!("../../../queries/python.scm");
+pub const IMPORT_QUERY: &str = include_str!("../../../queries/go.scm");
 
-pub struct PythonAdapter;
+pub struct GoAdapter;
 
-impl LanguageAdapter for PythonAdapter {
+impl LanguageAdapter for GoAdapter {
     fn name(&self) -> &'static str {
-        "python"
+        "go"
     }
 
     fn extensions(&self) -> &'static [&'static str] {
-        &[".py", ".pyi"]
+        &[".go"]
     }
 
     fn tree_sitter_language(&self) -> Language {

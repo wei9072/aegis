@@ -209,6 +209,8 @@ Cheatsheet for "I need to find X in this repo":
 | Multi-turn refactor with verifier | [`examples/01_pipeline_basic.py`](examples/01_pipeline_basic.py), [`examples/03_custom_verifier.py`](examples/03_custom_verifier.py) |
 | Read the decision trace | [`examples/04_read_decision_trace.py`](examples/04_read_decision_trace.py) |
 | Add a new LLM provider | mirror [`aegis/agents/groq.py`](aegis/agents/groq.py) — subclass `OpenAIProvider` if OpenAI-compatible, else implement the `LLMProvider` Protocol from scratch |
+| Add a new source language | one Cargo dep + one [`crates/aegis-core/src/ast/languages/<lang>.rs`](crates/aegis-core/src/ast/languages/) adapter + one [`crates/aegis-core/queries/<lang>.scm`](crates/aegis-core/queries/) query, then register in [`registry.rs`](crates/aegis-core/src/ast/registry.rs). Per-language checklist in [`docs/multi_language_plan.md`](docs/multi_language_plan.md). |
+| List supported languages from Python | `from aegis.core.bindings import supported_languages, supported_extensions` |
 | Add a new scenario | new dir under [`tests/scenarios/`](tests/scenarios/); copy structure from `tests/scenarios/syntax_fix/` |
 | Run all tests | `PYTHONPATH=. python -m pytest tests/ -q` (251 should pass) |
 | Run cross-model evidence sweep | `python scripts/v1_validation.py` |

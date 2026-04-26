@@ -20,7 +20,7 @@ mod tests {
     #[test]
     fn test_build_ir_returns_dependency_nodes() {
         let code = b"import os\nimport sys\n";
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut tmp = tempfile::Builder::new().suffix(".py").tempfile().unwrap();
         tmp.write_all(code).unwrap();
         tmp.flush().unwrap();
         let nodes = build_ir(tmp.path().to_str().unwrap()).unwrap();
@@ -34,7 +34,7 @@ mod tests {
     #[test]
     fn test_build_ir_empty_file() {
         let code = b"x = 1\n";
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut tmp = tempfile::Builder::new().suffix(".py").tempfile().unwrap();
         tmp.write_all(code).unwrap();
         tmp.flush().unwrap();
         let nodes = build_ir(tmp.path().to_str().unwrap()).unwrap();

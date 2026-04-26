@@ -22,13 +22,34 @@ extension-module = ["pyo3/extension-module", "aegis-pyshim/extension-module"]
 [dependencies]
 pyo3 = { workspace = true }
 tree-sitter = "0.20"
-tree-sitter-typescript = "0.20"
 petgraph = "0.6.4"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tree-sitter-python = "0.20"
 serde_yaml = "0.9"
+
+# Tier 2 language grammars. Tree-sitter 0.20 series for ABI compat;
+# adding a language = adding one entry here + one adapter file +
+# one query file, no other changes (per multi_language_plan.md).
+tree-sitter-python = "0.20"
+tree-sitter-typescript = "0.20"
+tree-sitter-javascript = "0.20"
+tree-sitter-go = "0.20"
+tree-sitter-java = "0.20"
+tree-sitter-c-sharp = "0.20"
+tree-sitter-php = "0.20"
+tree-sitter-swift = "0.4"
+# Community-maintained — pinned to known-good versions; if a
+# breakage shows up, the registry meta-test in ast/registry.rs
+# fails fast on startup parse + query compile.
+# Pin to the last 0.3.x line that targets tree-sitter 0.20 (the
+# 0.3.6+ series jumped to tree-sitter 0.21–0.22 which is ABI-
+# incompatible with the rest of our grammars).
+tree-sitter-kotlin = "=0.3.4"
+# 0.0.4 uses `>=0.20.8` for tree-sitter which lets Cargo resolve to
+# 0.22 (incompatible). 0.0.3 pins `^0.20.8` strictly — locks us to
+# the tree-sitter 0.20 line that the rest of the grammars use.
+tree-sitter-dart = "=0.0.3"
 
 # V1.0 — pure-Rust types live in sibling crates; aegis-pyshim wraps
 # them as PyO3 classes and registers them into the `_core` module.

@@ -679,10 +679,28 @@ from-plan as a sub-bullet.
 - **V1.1** — Provider abstraction + first Rust impl — ⬜ not started
 - **V1.2** — Validator + Executor in Rust — ⬜ not started
 - **V1.3** — Pipeline loop + IterationEvent in Rust — ⬜ not started
-- **V1.4** — LanguageAdapter trait + Python adapter port — ⬜ not started
-- **V1.5** — TypeScript + JavaScript adapters — ⬜ not started
-- **V1.6** — Go + Java + C# adapters — ⬜ not started
-- **V1.7** — PHP + Swift + Kotlin + Dart adapters — ⬜ not started
+- **V1.4** — LanguageAdapter trait + Python adapter port — ✅ Done (2026-04-26)
+  - `crates/aegis-core/src/ast/{adapter.rs,registry.rs}` ship the trait + global singleton
+  - `analyze_file`, `get_imports`, `check_syntax`, `fan_out_signal`, `chain_depth_signal`
+    all dispatch by file extension via `LanguageRegistry::for_path`
+  - `aegis-core` no longer references `tree_sitter_python` outside `languages/python.rs`
+  - CLI walks every `supported_extensions()` entry, not just `.py`
+- **V1.5** — TypeScript + JavaScript adapters — ✅ Done (2026-04-26)
+  - `tree-sitter-javascript` Cargo dep added
+  - TypeScript adapter switched to `language_tsx()` so a single backend
+    parses both `.ts` and `.tsx`
+  - 8 extensions covered: `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`, `.jsx`
+- **V1.6** — Go + Java + C# adapters — ✅ Done (2026-04-26)
+  - 3 tree-sitter Cargo deps + 3 adapter files + 3 query files
+  - Default chain-depth walker extended to cover Java `method_invocation`/
+    `field_access`, C# `invocation_expression`/`member_access_expression`,
+    Go `selector_expression`/`index_expression`
+- **V1.7** — PHP + Swift + Kotlin + Dart adapters — ✅ Done (2026-04-26)
+  - PHP via `tree_sitter_php::language()` (the older API name on the 0.20 line)
+  - Kotlin pinned to `=0.3.4`, Dart pinned to `=0.0.3` — newer versions
+    target tree-sitter 0.22 which is ABI-incompatible with our 0.20
+    grammar set
+  - Java + Dart show 🟡 chain-depth in README pending per-adapter overrides
 - **V1.8** — Scenarios + verifiers in Rust — ⬜ not started
 - **V1.9** — Rust-native CLI + MCP server — ⬜ not started
 - **V1.10** — Python deletion — ⬜ not started

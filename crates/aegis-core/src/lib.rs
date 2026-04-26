@@ -15,10 +15,22 @@ fn ring0_status() -> PyResult<String> {
     Ok("Ring 0 Rust Core Initialized".to_string())
 }
 
+#[pyfunction]
+fn supported_languages() -> Vec<&'static str> {
+    ast::registry::LanguageRegistry::global().names()
+}
+
+#[pyfunction]
+fn supported_extensions() -> Vec<&'static str> {
+    ast::registry::LanguageRegistry::global().extensions()
+}
+
 #[pymodule]
 fn _core(_py: Python, m: &PyModule) -> PyResult<()> {
-    // Status
+    // Status + registry introspection
     m.add_function(wrap_pyfunction!(ring0_status, m)?)?;
+    m.add_function(wrap_pyfunction!(supported_languages, m)?)?;
+    m.add_function(wrap_pyfunction!(supported_extensions, m)?)?;
 
     // AST layer
     m.add_class::<ast::parser::AstMetrics>()?;

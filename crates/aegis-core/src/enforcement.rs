@@ -1,17 +1,35 @@
+//! Ring 0 syntax-validity check — language-agnostic via the
+//! registry. Returns one violation string per failing file with the
+//! same shape V0.x callers expect.
+
 use pyo3::prelude::*;
 use std::fs;
-use crate::ast::languages::python;
+
+use crate::ast::registry::LanguageRegistry;
 
 #[pyfunction]
 pub fn check_syntax(filepath: &str) -> PyResult<Vec<String>> {
     let code = fs::read_to_string(filepath)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
 
-    let mut parser = tree_sitter::Parser::new();
-    parser.set_language(python::language())
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let registry = LanguageRegistry::global();
+    let adapter = match registry.for_path(filepath) {
+        Some(a) => a,
+        None => {
+            // Unknown extension: no opinion. Higher layers (CLI,
+            // Python `Ring0Enforcer`) decide whether to skip silently
+            // or raise — Ring 0 just says "no syntax issues we can
+            // see" and lets the caller act on the unsupported case.
+            return Ok(vec![]);
+        }
+    };
 
-    let tree = parser.parse(&code, None)
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(adapter.tree_sitter_language())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let tree = parser
+        .parse(&code, None)
         .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("parse returned None"))?;
 
     if tree.root_node().has_error() {
@@ -29,29 +47,39 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    fn tmp_with(suffix: &str, body: &[u8]) -> tempfile::NamedTempFile {
+        let mut tmp = tempfile::Builder::new().suffix(suffix).tempfile().unwrap();
+        tmp.write_all(body).unwrap();
+        tmp.flush().unwrap();
+        tmp
+    }
+
     #[test]
-    fn test_valid_file() {
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        tmp.write_all(b"def hello():\n    return 42\n").unwrap();
+    fn test_valid_python_file() {
+        let tmp = tmp_with(".py", b"def hello():\n    return 42\n");
         assert!(check_syntax(tmp.path().to_str().unwrap()).unwrap().is_empty());
     }
 
     #[test]
-    fn test_invalid_file() {
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        tmp.write_all(b"def err(\n").unwrap();
+    fn test_invalid_python_file() {
+        let tmp = tmp_with(".py", b"def err(\n");
         let v = check_syntax(tmp.path().to_str().unwrap()).unwrap();
         assert_eq!(v.len(), 1);
         assert!(v[0].contains("[Ring 0]"));
     }
 
     #[test]
+    fn test_unknown_extension_returns_no_violations() {
+        let tmp = tmp_with(".whatever", b"this is not parseable code");
+        assert!(check_syntax(tmp.path().to_str().unwrap()).unwrap().is_empty());
+    }
+
+    #[test]
     fn test_high_fan_out_not_blocked() {
-        let imports: Vec<u8> = (0..20)
+        let body: Vec<u8> = (0..20)
             .flat_map(|i| format!("import mod_{}\n", i).into_bytes())
             .collect();
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        tmp.write_all(&imports).unwrap();
+        let tmp = tmp_with(".py", &body);
         assert!(check_syntax(tmp.path().to_str().unwrap()).unwrap().is_empty());
     }
 }
