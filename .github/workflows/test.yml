@@ -47,9 +47,17 @@ jobs:
             google-genai \
             google-generativeai
 
-      - name: Build and install aegis-core-rs (Rust extension)
-        working-directory: aegis-core-rs
-        run: maturin develop --release
+      - name: Build aegis-core-rs wheel and install
+        # `maturin develop` requires an active virtualenv (it injects the
+        # built extension into the venv's site-packages). GitHub Actions'
+        # setup-python doesn't create one, so develop fails with
+        # "Couldn't find a virtualenv or conda environment". The
+        # workaround is the explicit two-step that maturin's own error
+        # message suggests: build a wheel, then pip install it.
+        run: |
+          cd aegis-core-rs
+          maturin build --release --out dist/
+          pip install dist/*.whl
 
       - name: Run pytest
         env:
