@@ -11,8 +11,12 @@
 //! Rust-native pipeline) can call directly into Rust without
 //! depending on the Python executor.
 
-pub mod snapshot;
+pub mod executor;
 pub mod sequence;
+pub mod snapshot;
+pub mod validator;
 
+pub use executor::{ExecutionResult, Executor, ExecutorError, PatchResult};
+pub use sequence::{is_plan_repeat_stalemate, is_state_stalemate, is_thrashing};
 pub use snapshot::{Snapshot, SnapshotError};
-pub use sequence::{is_state_stalemate, is_thrashing, is_plan_repeat_stalemate};
+pub use validator::{ErrorKind, PlanValidator, ValidationError};

@@ -11,6 +11,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 aegis-decision = { path = "../aegis-decision" }
+aegis-ir = { path = "../aegis-ir" }
 
 [dev-dependencies]
 tempfile = "3"

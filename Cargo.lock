@@ -73,6 +73,7 @@ name = "aegis-runtime"
 version = "0.1.0"
 dependencies = [
  "aegis-decision",
+ "aegis-ir",
  "serde",
  "serde_json",
  "tempfile",

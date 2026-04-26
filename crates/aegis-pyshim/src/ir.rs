@@ -103,6 +103,13 @@ impl PyPatchKind {
     }
 }
 
+/// Convert a sibling-module Rust `PatchStatus` to its PyO3 wrapper.
+/// Used by the executor/validator wrappers when projecting results
+/// back to Python.
+pub(crate) fn patchstatus_to_py(s: PatchStatus) -> PyPatchStatus {
+    PyPatchStatus::from(s)
+}
+
 #[pyclass(name = "PatchStatus", module = "aegis._core")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PyPatchStatus {
@@ -427,6 +434,18 @@ pub struct PyPatchPlan {
 
 impl PyPatchPlan {
     fn from_inner(inner: PatchPlan) -> Self {
+        Self { inner }
+    }
+
+    /// Sibling pyshim modules (executor, validator) need a Rust-side
+    /// `&PatchPlan` to call `aegis-runtime` directly without a JSON
+    /// round-trip. Kept `pub(crate)` so external Python callers
+    /// can't reach into the type.
+    pub(crate) fn inner_ref(&self) -> &PatchPlan {
+        &self.inner
+    }
+
+    pub(crate) fn from_inner_pub(inner: PatchPlan) -> Self {
         Self { inner }
     }
 }

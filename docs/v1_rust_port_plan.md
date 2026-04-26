@@ -701,7 +701,7 @@ from-plan as a sub-bullet.
     practice no V1.x pipeline consumer needs it yet (Gemini-via-Python
     still works through `aegis/agents/gemini.py`). It lands when the
     V1.3 Rust pipeline has a real consumer for it.
-- **V1.2** — Validator + Executor in Rust — ✅ Partial+ (2026-04-26)
+- **V1.2** — Validator + Executor in Rust — ✅ Done (2026-04-26)
   - `crates/aegis-runtime/` — language-agnostic snapshot/rollback
     primitive (`Snapshot`) and the sequence-level detector helpers
   - `Snapshot::capture` / `restore` / `write_backup` — mirrors V0.x
@@ -711,23 +711,30 @@ from-plan as a sub-bullet.
     paths that didn't exist at snapshot time
   - 5 cargo tests pin every restore branch
   - PyShim exposes `aegis._core.Snapshot` with the same surface
-  - **IR-model port shipped (V1.2 follow-up):** `crates/aegis-ir/`
+  - **IR-model port shipped (V1.2 follow-up #1):** `crates/aegis-ir/`
     is the new home for `PatchKind`, `PatchStatus`, `Edit`, `Patch`,
     `PatchPlan`, `EditResult`, plus `apply_edit` / `apply_edits` /
     `is_ok`. The line-aware fallback joiner that fixed syntax_fix
     convergence (raw concat → newline-aware) is in
-    `aegis-ir/src/edit_engine.rs`. PyShim exposes everything as
-    `aegis._core.{PatchKind, PatchStatus, Edit, Patch, PatchPlan,
-    EditResult, apply_edit, apply_edits, is_ok, plan_to_dict,
-    plan_from_dict, patch_to_dict, patch_from_dict}`. Python
-    `aegis/ir/patch.py` and `aegis/shared/edit_engine.py` are now
-    thin re-exports — every existing call site (Validator, Executor,
-    Planner, Pipeline) keeps working unchanged. 18 cargo tests
-    cover the engine; all 256 Python tests still pass.
-  - **What's still NOT in Rust:** the `Executor` and `PlanValidator`
-    *classes* (file IO + plan structure validation, ~500 Python
-    LOC). They now have all their data-model dependencies in Rust;
-    porting the classes themselves is the next clean V1.2 unit.
+    `aegis-ir/src/edit_engine.rs`. Python `aegis/ir/patch.py` and
+    `aegis/shared/edit_engine.py` are thin re-exports.
+  - **Executor + PlanValidator classes shipped (V1.2 follow-up #2):**
+    `aegis_runtime::Executor` is the V0.x Python class one-for-one
+    (atomic apply, in-memory snapshot threaded through `apply_one`,
+    backup-dir write + GC of old backups, `rollback_result` for
+    after-the-fact undo). `aegis_runtime::PlanValidator` ports every
+    check from the Python class: schema, path-safety (lexical
+    resolution that doesn't require existence — needed for CREATE
+    targets), forbidden directories, scope, target_files commitment,
+    plus the virtual-FS simulation pass that catches cross-patch
+    staleness. PyShim exposes both as `aegis._core.{Executor,
+    ExecutionResult, PatchResult, PlanValidator, ValidationError}`
+    with the same attribute surfaces; Python `aegis/runtime/executor.py`
+    and `aegis/runtime/validator.py` are thin re-exports. 21 cargo
+    tests pin every branch (10 executor + 11 validator, including
+    the rollback-on-failure path, the create-then-modify in-memory
+    threading, the GC limit, and every ErrorKind variant). All 256
+    Python tests still pass.
 - **V1.3** — Pipeline loop + IterationEvent in Rust — ✅ Partial (2026-04-26)
   - Sequence-level detectors (`is_state_stalemate`, `is_thrashing`,
     `is_plan_repeat_stalemate`) ported to `aegis-runtime::sequence`
@@ -837,7 +844,7 @@ from-plan as a sub-bullet.
 | :--- | :--- | :--- |
 | V1.0 | ✅ | trace + decision data types, all Python tests still pass |
 | V1.1 | ✅ | OpenAI-compatible Rust provider; Python providers untouched (test rewrite gated on V1.3) |
-| V1.2 | ✅ Partial+ | `Snapshot` IO + IR model (`PatchPlan`/`Patch`/`Edit`) + `apply_edit` engine all in Rust; `Executor` + `PlanValidator` Python *classes* are the remaining V1.2 piece |
+| V1.2 | ✅ Done | `Snapshot` IO + IR model + `apply_edit` engine + `Executor` + `PlanValidator` all in Rust; Python modules are thin re-exports |
 | V1.3 | ✅ Partial | sequence detectors + `IterationEvent` shim + IR model ported; full Pipeline.run() coordination port still deferred (the small piece — Planner prompt construction stays Python) |
 | V1.4–V1.7 | ✅ | 10 languages, registry-driven dispatch, CLI auto-walks all extensions |
 | V1.8 | ⬜ | gated on V1.3-full + API quotas |
@@ -845,25 +852,25 @@ from-plan as a sub-bullet.
 | V1.10 | ⬜ | gated on V1.9 + 2-week soak |
 | V2.0 | ⬜ | gated on V1.10 + CI infra |
 
-The "partial" V1.2/V1.3 entries each now ship the load-bearing data
-contract (`PatchPlan` / `Patch` / `Edit` are Rust ground truth) plus
-the load-bearing logic (`apply_edit`'s line-aware fallback joiner is
-Rust ground truth). What remains for V1.2 full is `Executor` +
-`PlanValidator` Python *classes* — both a straightforward port now
-that all their data dependencies live in Rust. What remains for V1.3
-full is the Pipeline.run() coordination shell (~150 LOC, easily
-trait-callable from Python; the ~600 LOC of Planner prompt
-construction stays Python by design).
+V1.2 is now end-to-end Rust: data contract (`PatchPlan` / `Patch` /
+`Edit`), engine logic (`apply_edit`'s line-aware fallback joiner),
+and the two service classes (`Executor` for atomic apply +
+`PlanValidator` for the gate). V1.3 still has the same remaining
+shape: the Pipeline.run() coordination shell (~150 LOC) ports
+naturally to Rust as a trait callable from Python; the ~600 LOC of
+Planner prompt construction stays Python by design.
 
-**What this means for next-session-agent:** with the IR-model port
-shipped, the next clean unit of work is **`Executor` + `PlanValidator`
-in Rust**. Both classes now have all their data dependencies in
-`aegis-ir` + `aegis-runtime::Snapshot`; the port is structural, not
-algorithmic. After that, the V1.3 coordination shell (~150 LOC,
-trait-callable from Python so Planner prompts can stay Python) closes
-out V1.3 full. Then V1.8 / V1.9 / V1.10 / V2.0 unblock in sequence as
-their gates are met (API quotas, 2-week soak, CI infra — all
-real-world, not code).
+**What this means for next-session-agent:** with V1.2 done, the next
+clean unit of work is the **Pipeline.run() coordination shell**
+(V1.3 full). Every dependency it needs already lives in Rust:
+`aegis-ir` for the plan, `aegis-runtime::{Executor, PlanValidator,
+Snapshot, sequence detectors}` for the loop primitives,
+`aegis-providers::LLMProvider` for the LLM seam. The shell wires
+those together and emits an `IterationEvent` per turn — the loop's
+*coordination* is small and portable. The Planner stays Python
+(prompt construction is fundamentally Python-shaped). After V1.3
+full, V1.8 / V1.9 / V1.10 / V2.0 unblock in sequence as their
+real-world gates are met (API quotas, 2-week soak, CI infra).
 
 ---
 
