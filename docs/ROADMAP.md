@@ -84,7 +84,9 @@ agent has):
 | **V3.0** — Skeleton + contract tests | Crate exists, type scaffolding, 9 framing contract tests | ✅ Done (2026-04-27) |
 | **V3.1a** — Conversation skeleton from claw-code | `ConversationRuntime`, `ApiClient` / `ToolExecutor` traits, message types, scripted stubs | ✅ Done (2026-04-27) |
 | **V3.1b** — OpenAI-compat provider | `HttpClient` abstraction (UreqClient + StubHttpClient), `OpenAiCompatProvider` covering OpenRouter / Groq / Ollama / vLLM / llama.cpp / LMStudio / DashScope via `base_url` config; non-streaming, no-auto-retry on every error path | ✅ Done (2026-04-27) |
-| **V3.2** — Anthropic + Gemini providers + MCP client | Anthropic Messages format + Gemini format + claw-code `runtime/mcp_*` | ⬜ Next |
+| **V3.2a** — Anthropic Messages provider | `AnthropicProvider` — different wire format from OpenAI (system as top-level field, content blocks inside messages, tool_result as user-role messages, x-api-key auth, anthropic-version header). Thinking blocks dropped, no streaming. | ✅ Done (2026-04-27) |
+| **V3.2b** — MCP client | Adapt claw-code `runtime/mcp_*` so aegis-agent can call external MCP servers (including aegis-mcp itself for V3.3 pre-check) | ⬜ Next |
+| **V3.2c** — Gemini provider | Google's `generateContent` format | ⬜ |
 | **V3.3** — Aegis differentiation A + B | PreToolUse aegis-predict + cross-turn cost tracker | ⬜ |
 | **V3.4** — Aegis differentiation C | Verifier integration | ⬜ |
 | **V3.5** — Aegis differentiation D | Stalemate / thrashing at session level | ⬜ |

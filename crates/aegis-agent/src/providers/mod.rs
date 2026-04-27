@@ -15,8 +15,10 @@
 //! Adding a new provider is two files: a new module under this one
 //! that implements `ApiClient`, and a re-export here.
 
+pub mod anthropic;
 pub mod http;
 pub mod openai_compat;
 
+pub use anthropic::{AnthropicConfig, AnthropicProvider};
 pub use http::{HttpClient, HttpError, HttpResponse, RecordedRequest, StubHttpClient, UreqClient};
 pub use openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
