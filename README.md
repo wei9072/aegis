@@ -112,45 +112,11 @@ The loop is local, not global.
 
 ## Quickstart
 
-The example below runs without any API key — it wraps a stub LLM
-in the gateway, so you see the gate vocabulary fire on two known
-inputs (one passes, one is rejected).
+As of V1.10, Aegis is a single Rust workspace producing two
+binaries — `aegis` (CLI) and `aegis-mcp` (MCP stdio server). Zero
+Python at runtime.
 
-To wrap your own LLM, replace `StubLLM` with a class that calls
-your provider and implements the same `.generate(prompt, tools=None)
--> str` method. That single method **is the integration surface**.
-
-```python
-from aegis.agents.llm_adapter import LLMGateway
-
-
-class StubLLM:
-    def __init__(self, canned_response: str):
-        self.response = canned_response
-
-    def generate(self, prompt: str, tools=None) -> str:
-        return self.response
-
-
-# CASE 1 — valid Python passes every gate.
-gateway = LLMGateway(llm_provider=StubLLM("def add(a, b):\n    return a + b\n"))
-print("ALLOWED →", gateway.generate_and_validate("write add()", max_retries=1))
-for e in gateway.last_trace.events:
-    print(f"  {e.layer:14} {e.decision:8} {e.reason}")
-
-# CASE 2 — invalid syntax → Ring 0 emits BLOCK; gateway raises.
-gateway = LLMGateway(llm_provider=StubLLM("def add(a, b returns nothing"))
-try:
-    gateway.generate_and_validate("write add()", max_retries=1)
-except RuntimeError as exc:
-    print("BLOCKED →", str(exc)[:80])
-    for e in gateway.last_trace.events:
-        print(f"  {e.layer:14} {e.decision:8} {e.reason}")
-```
-
-**Build note.** As of V1.10, Aegis is a single Rust workspace
-producing two binaries — `aegis` (CLI) and `aegis-mcp` (MCP
-stdio server). Zero Python at runtime.
+### Install
 
 ```bash
 # Prerequisites: git + a Rust toolchain.
@@ -160,15 +126,71 @@ stdio server). Zero Python at runtime.
 
 git clone https://github.com/wei9072/aegis && cd aegis
 cargo build --release --workspace
-./target/release/aegis languages
-./target/release/aegis check path/to/file.py
 ```
 
-Install system-wide via `cargo install --path crates/aegis-cli`
-(and `--path crates/aegis-mcp` for the MCP server). Cross-platform
-release artifacts (Linux x86_64/aarch64, macOS x86_64/aarch64,
-Windows x86_64) ship via GitHub Releases — see V2.0 in
-[`docs/v1_rust_port_plan.md`](docs/v1_rust_port_plan.md).
+Install system-wide so `aegis` / `aegis-mcp` end up on `$PATH`:
+
+```bash
+cargo install --path crates/aegis-cli
+cargo install --path crates/aegis-mcp     # optional — MCP server
+```
+
+Cross-platform release artifacts (Linux x86_64/aarch64, macOS
+x86_64/aarch64, Windows x86_64) ship via GitHub Releases — see V2.0
+in [`docs/v1_rust_port_plan.md`](docs/v1_rust_port_plan.md).
+
+### Static analysis (no LLM, no API key)
+
+`aegis check` runs Ring 0 (syntax) + Ring 0.5 (structural signals
+— fan-out, max chain depth) on any supported source file:
+
+```bash
+aegis languages                       # list supported languages
+aegis check path/to/file.py           # human-readable signals
+aegis check path/to/file.py --json    # machine-readable
+```
+
+The intent: drop this into a pre-commit hook or CI gate so bad
+diffs never make it past the boundary you care about. See
+[`docs/integrations/`](docs/integrations/) for paste-ready examples.
+
+### LLM-backed multi-turn pipeline
+
+`aegis pipeline run` drives the Planner → Validator → Executor
+loop against your workspace. Provider config comes from environment
+variables — supports any OpenAI-compatible endpoint (OpenAI,
+OpenRouter, Groq):
+
+```bash
+export AEGIS_PROVIDER=openai          # or: openrouter | groq
+export AEGIS_MODEL=gpt-4o-mini        # any model the provider exposes
+export OPENAI_API_KEY=sk-...          # or AEGIS_API_KEY (provider-agnostic)
+
+aegis pipeline run \
+  --task "rename the foo helper to bar everywhere" \
+  --root . \
+  --max-iters 3
+```
+
+Every iteration prints a one-line summary (`iter 0 [abc12345] plan=continuing
+patches=2 applied=true rolled_back=false`); add `--json` for a
+machine-readable summary at the end. The loop stops when the
+planner declares done, signals stalemate, signals thrashing, or
+hits `--max-iters`. Cost-aware regression rollback fires
+automatically if structural signals get worse mid-loop.
+
+### MCP server (Cursor / Claude Code / your own agent)
+
+```bash
+aegis-mcp     # stdio JSON-RPC, MCP protocol 2025-06-18
+```
+
+Configure your MCP client per
+[`docs/integrations/mcp_design.md`](docs/integrations/mcp_design.md);
+the agent then calls `validate_change(path, new_content,
+old_content?)` mid-loop and gets a `{decision, reasons,
+signals_after, …}` verdict back. Pure observation — never coaches
+the agent (see [Design principles](#design-principles)).
 
 ---
 
@@ -193,11 +215,12 @@ Index + per-path detail: [`docs/integrations/`](docs/integrations/).
 
 | Layer | State | Notes |
 | :--- | :--- | :--- |
-| Execution Engine | ✅ | Pipeline + Executor + cost-aware regression rollback (V1) |
-| Policy Enforcement | ✅ | 8 in-pipeline gates: Ring 0/0.5, PolicyEngine, DeliveryRenderer, ToolCallValidator T1+T2, IntentClassifier, IntentBypassDetector |
-| Decision Trace | ✅ | `DecisionTrace` + 9 `DecisionPattern` + 5-pattern `TaskVerdict`; cross-model evidence in [`docs/v1_validation.md`](docs/v1_validation.md) |
-| Eval Harness | 🟡 | 15 deterministic scenarios + 4 multi-turn scenarios; minimal by design — adaptive eval is post-V2 |
-| Feedback Layer | ❌ | Out of scope by design — see [Non-goals](#non-goals) and [Critical Principle](docs/gap3_control_plane.md#critical-principle) |
+| Execution Engine | ✅ | Pipeline + Executor + cost-aware regression rollback. Native Rust loop in `aegis-runtime::native_pipeline` (V1.3 / V1.9). |
+| Policy Enforcement | ✅ | Ring 0 (syntax) + Ring 0.5 (structural signals — fan-out, max chain depth) shared by `aegis check` + `aegis pipeline run` + `aegis-mcp validate_change`. The V0.x Python-only gates (PolicyEngine, DeliveryRenderer, ToolCallValidator T1+T2, IntentClassifier, IntentBypassDetector) were not part of the Rust port and got removed in V1.10 — see plan doc. |
+| Decision Trace | ✅ | `DecisionTrace` + 10 `DecisionPattern` + 5-pattern `TaskVerdict`; cross-model evidence in [`docs/v1_validation.md`](docs/v1_validation.md) (Python-era data; V1.8 Rust re-validation is gated on API quotas). |
+| MCP server | ✅ | `aegis-mcp` — hand-rolled JSON-RPC 2.0 over stdio; one tool: `validate_change` per [`docs/integrations/mcp_design.md`](docs/integrations/mcp_design.md). |
+| Eval Harness | 🟡 | Deterministic scenario runner not yet ported to Rust. The Rust pipeline can be driven scenario-by-scenario via `aegis pipeline run`; batch sweeps need a new `aegis sweep` subcommand (V1.8 follow-up). |
+| Feedback Layer | ❌ | Out of scope by design — see [Non-goals](#non-goals) and [Critical Principle](docs/gap3_control_plane.md#critical-principle). Structurally enforced by `crates/aegis-decision/tests/contract.rs`. |
 
 ### Supported source languages (Ring 0 + Ring 0.5 signals)
 
