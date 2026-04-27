@@ -216,18 +216,30 @@ fn cmd_chat(
     use aegis_agent::testing::ScriptedToolExecutor;
     use aegis_agent::verifier::{AgentTaskVerifier, ShellVerifier, TestVerifier};
     use aegis_agent::{AgentConfig, ConversationRuntime, Session, StoppedReason};
+    use std::io::{IsTerminal, Read};
 
-    // Resolve prompt — flag → arg → stdin.
-    let prompt = match prompt {
-        Some(p) if !p.trim().is_empty() => p,
+    // Decide UX mode:
+    //   prompt arg supplied            → one-shot
+    //   no prompt + stdin is a tty     → interactive REPL
+    //   no prompt + stdin is a pipe    → read all stdin as one prompt
+    //                                    (preserves the previous shell-pipe contract)
+    enum Mode {
+        OneShot(String),
+        Interactive,
+    }
+    let mode = match prompt {
+        Some(p) if !p.trim().is_empty() => Mode::OneShot(p),
         _ => {
-            use std::io::Read;
-            let mut buf = String::new();
-            if std::io::stdin().read_to_string(&mut buf).is_err() || buf.trim().is_empty() {
-                eprintln!("aegis chat: no prompt provided (pass as arg or pipe via stdin)");
-                return ExitCode::from(2);
+            if std::io::stdin().is_terminal() {
+                Mode::Interactive
+            } else {
+                let mut buf = String::new();
+                if std::io::stdin().read_to_string(&mut buf).is_err() || buf.trim().is_empty() {
+                    eprintln!("aegis chat: no prompt provided (pass as arg or pipe via stdin)");
+                    return ExitCode::from(2);
+                }
+                Mode::OneShot(buf)
             }
-            buf
         }
     };
 
@@ -246,31 +258,38 @@ fn cmd_chat(
     };
 
     // Pick a provider from env vars. First match wins.
-    let provider: Box<dyn ApiClient> = if let Some(c) = OpenAiCompatConfig::from_env() {
-        eprintln!(
-            "aegis chat: provider = openai-compat ({} {})",
-            c.base_url, c.model
-        );
-        Box::new(OpenAiCompatProvider::new(c, Box::new(UreqClient::new())))
-    } else if let Some(c) = AnthropicConfig::from_env() {
-        eprintln!("aegis chat: provider = anthropic ({})", c.model);
-        Box::new(AnthropicProvider::new(c, Box::new(UreqClient::new())))
-    } else if let Some(c) = GeminiConfig::from_env() {
-        eprintln!("aegis chat: provider = gemini ({})", c.model);
-        Box::new(GeminiProvider::new(c, Box::new(UreqClient::new())))
-    } else {
-        eprintln!(
-            "aegis chat: no provider env vars set. Set one of:\n  \
-             AEGIS_OPENAI_BASE_URL + AEGIS_OPENAI_MODEL (+ AEGIS_OPENAI_API_KEY)\n  \
-             AEGIS_ANTHROPIC_API_KEY + AEGIS_ANTHROPIC_MODEL\n  \
-             AEGIS_GEMINI_API_KEY + AEGIS_GEMINI_MODEL"
-        );
-        return ExitCode::from(2);
-    };
+    let (provider, provider_label): (Box<dyn ApiClient>, String) =
+        if let Some(c) = OpenAiCompatConfig::from_env() {
+            let label = format!("openai-compat ({} {})", c.base_url, c.model);
+            (
+                Box::new(OpenAiCompatProvider::new(c, Box::new(UreqClient::new()))),
+                label,
+            )
+        } else if let Some(c) = AnthropicConfig::from_env() {
+            let label = format!("anthropic ({})", c.model);
+            (
+                Box::new(AnthropicProvider::new(c, Box::new(UreqClient::new()))),
+                label,
+            )
+        } else if let Some(c) = GeminiConfig::from_env() {
+            let label = format!("gemini ({})", c.model);
+            (
+                Box::new(GeminiProvider::new(c, Box::new(UreqClient::new()))),
+                label,
+            )
+        } else {
+            eprintln!(
+                "aegis chat: no provider env vars set. Set one of:\n  \
+                 AEGIS_OPENAI_BASE_URL + AEGIS_OPENAI_MODEL (+ AEGIS_OPENAI_API_KEY)\n  \
+                 AEGIS_ANTHROPIC_API_KEY + AEGIS_ANTHROPIC_MODEL\n  \
+                 AEGIS_GEMINI_API_KEY + AEGIS_GEMINI_MODEL"
+            );
+            return ExitCode::from(2);
+        };
+    eprintln!("aegis chat: provider = {provider_label}");
 
     // Optional verifier.
     let verifier: Option<Box<dyn AgentTaskVerifier>> = if let Some(cmd) = verifier_cmd {
-        // Custom shell command — split on whitespace.
         let mut parts = cmd.split_whitespace();
         match parts.next() {
             Some(program) => Some(Box::new(
@@ -279,7 +298,6 @@ fn cmd_chat(
             None => None,
         }
     } else if verify {
-        // Auto-detect (composite — every test suite must pass).
         match TestVerifier::auto_detect_composite(&workspace) {
             Some(v) => Some(Box::new(v)),
             None => {
@@ -300,7 +318,7 @@ fn cmd_chat(
     let mut rt = ConversationRuntime::new(
         Session::new(),
         provider,
-        ScriptedToolExecutor::new(), // CLI demo has no tools wired; real tools land in V3.6+
+        ScriptedToolExecutor::new(),
         system_prompt,
         vec![],
         AgentConfig {
@@ -315,24 +333,25 @@ fn cmd_chat(
         rt = rt.with_verifier(v);
     }
 
-    let result = rt.run_turn(prompt);
+    match mode {
+        Mode::OneShot(p) => run_one_shot(&mut rt, &p, json),
+        Mode::Interactive => run_repl(&mut rt),
+    }
+}
 
-    // Collect the assistant's final text response.
-    let response_text: String = rt
-        .session()
-        .messages
-        .last()
-        .map(|msg| {
-            msg.blocks
-                .iter()
-                .filter_map(|b| match b {
-                    aegis_agent::ContentBlock::Text { text } => Some(text.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default();
+fn run_one_shot<C, T>(
+    rt: &mut aegis_agent::ConversationRuntime<C, T>,
+    prompt: &str,
+    json: bool,
+) -> ExitCode
+where
+    C: aegis_agent::api::ApiClient,
+    T: aegis_agent::tool::ToolExecutor,
+{
+    use aegis_agent::StoppedReason;
+
+    let result = rt.run_turn(prompt);
+    let response_text = collect_last_assistant_text(rt);
 
     if json {
         let payload = serde_json::json!({
@@ -367,6 +386,164 @@ fn cmd_chat(
         StoppedReason::ProviderError(_) => ExitCode::from(2),
         _ => ExitCode::from(1),
     }
+}
+
+fn run_repl<C, T>(rt: &mut aegis_agent::ConversationRuntime<C, T>) -> ExitCode
+where
+    C: aegis_agent::api::ApiClient,
+    T: aegis_agent::tool::ToolExecutor,
+{
+    use aegis_agent::{Session, StoppedReason};
+    use std::io::{BufRead, Write};
+
+    println!();
+    println!("aegis chat — interactive mode");
+    println!(
+        "type your message; commands: /exit  /quit  /reset  /cost  /history  /help"
+    );
+    println!();
+
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    let mut last_exit = ExitCode::SUCCESS;
+
+    loop {
+        // Prompt + flush so it appears even when stdout is line-buffered.
+        print!("you> ");
+        let _ = stdout.flush();
+
+        let mut line = String::new();
+        let bytes = match stdin.lock().read_line(&mut line) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("aegis chat: read error: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        if bytes == 0 {
+            // EOF (Ctrl+D)
+            println!();
+            return last_exit;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Slash commands.
+        match trimmed {
+            "/exit" | "/quit" => {
+                println!("bye");
+                return last_exit;
+            }
+            "/help" => {
+                println!("/exit, /quit  — leave the session");
+                println!("/reset        — clear conversation history");
+                println!("/cost         — show current cost-tracker snapshot");
+                println!("/history      — show how many messages are buffered");
+                println!("/help         — this list");
+                continue;
+            }
+            "/reset" => {
+                // Replace the runtime's session with a fresh one. The
+                // public API doesn't expose a `set_session`, so we
+                // do it via `into_session` on a clone — for V3.6 we
+                // just print a note and let the user run a new
+                // process if they really need a hard reset.
+                println!("(reset not supported in-process yet — restart `aegis chat` for a clean session)");
+                continue;
+            }
+            "/cost" => {
+                let snap = rt.cost_tracker().snapshot();
+                if snap.is_empty() {
+                    println!("(no cost observations recorded)");
+                } else {
+                    for entry in &snap {
+                        println!(
+                            "  {}  baseline={:.2}  current={:.2}  regression={:.2}",
+                            entry.path.display(),
+                            entry.baseline,
+                            entry.current,
+                            entry.regression()
+                        );
+                    }
+                    println!(
+                        "  cumulative regression = {:.2}",
+                        rt.cost_tracker().cumulative_regression()
+                    );
+                }
+                continue;
+            }
+            "/history" => {
+                println!("({} messages in session)", rt.session().messages.len());
+                continue;
+            }
+            _ if trimmed.starts_with('/') => {
+                println!("unknown command: {trimmed}  (try /help)");
+                continue;
+            }
+            _ => {}
+        }
+
+        // Run the turn.
+        let result = rt.run_turn(trimmed.to_string());
+        let response_text = collect_last_assistant_text(rt);
+
+        if !response_text.is_empty() {
+            println!("aegis> {response_text}");
+        }
+        // Quiet status footer — only print when something interesting
+        // (not the boring PlanDoneNoVerifier case).
+        match &result.stopped_reason {
+            StoppedReason::PlanDoneNoVerifier => {}
+            StoppedReason::PlanDoneVerified => {
+                eprintln!("(verified, {} iterations)", result.iterations);
+            }
+            StoppedReason::PlanDoneVerifierRejected => {
+                eprintln!("(verifier rejected — see verdict)");
+                if let Some(v) = &result.task_verdict {
+                    if let Some(r) = &v.verifier_result {
+                        eprintln!("rationale: {}", r.rationale);
+                    }
+                }
+                last_exit = ExitCode::from(1);
+            }
+            StoppedReason::ProviderError(message) => {
+                eprintln!("provider error: {message}");
+                last_exit = ExitCode::from(2);
+            }
+            other => {
+                eprintln!("({:?}, {} iterations)", other, result.iterations);
+            }
+        }
+
+        // Touch Session import so unused warning doesn't fire if some
+        // build flag prunes the slash-command body.
+        let _: Option<&Session> = None;
+    }
+}
+
+fn collect_last_assistant_text<C, T>(rt: &aegis_agent::ConversationRuntime<C, T>) -> String
+where
+    C: aegis_agent::api::ApiClient,
+    T: aegis_agent::tool::ToolExecutor,
+{
+    rt.session()
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == aegis_agent::MessageRole::Assistant)
+        .map(|msg| {
+            msg.blocks
+                .iter()
+                .filter_map(|b| match b {
+                    aegis_agent::ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default()
 }
 
 fn cmd_check(files: &[PathBuf], json: bool) -> ExitCode {
