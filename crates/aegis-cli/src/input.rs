@@ -136,12 +136,45 @@ impl ChatInput {
     ///   - Cancel         on Ctrl+C (the chat loop stays alive; user
     ///                    just abandons the in-progress line)
     ///   - Exit           on Ctrl+D / EOF / unrecoverable IO error
+    ///
+    /// Multi-line: a trailing backslash at the end of a line marks
+    /// the input as continued — the backslash is stripped and the
+    /// editor re-prompts (with a `... ` indent) until the user
+    /// submits a line that doesn't end in backslash. Lines join
+    /// with `\n`, so pasting code blocks is no longer awkward.
+    /// Ctrl+C during continuation cancels the whole multi-line
+    /// buffer.
     pub fn read_line(&mut self, prompt: &str) -> ReadOutcome {
-        match self.editor.readline(prompt) {
-            Ok(line) => ReadOutcome::Submit(line),
-            Err(ReadlineError::Interrupted) => ReadOutcome::Cancel,
-            Err(ReadlineError::Eof) => ReadOutcome::Exit,
-            Err(_) => ReadOutcome::Exit,
+        const CONT_PROMPT: &str = "  ... ";
+        let mut buffer = String::new();
+        let mut current_prompt = prompt;
+
+        loop {
+            match self.editor.readline(current_prompt) {
+                Ok(line) => match line.strip_suffix('\\') {
+                    Some(stripped) => {
+                        // Continuation line — strip the trailing
+                        // backslash and keep going.
+                        if !buffer.is_empty() {
+                            buffer.push('\n');
+                        }
+                        buffer.push_str(stripped);
+                        current_prompt = CONT_PROMPT;
+                    }
+                    None => {
+                        // Final line — return whatever we have.
+                        if buffer.is_empty() {
+                            return ReadOutcome::Submit(line);
+                        }
+                        buffer.push('\n');
+                        buffer.push_str(&line);
+                        return ReadOutcome::Submit(buffer);
+                    }
+                },
+                Err(ReadlineError::Interrupted) => return ReadOutcome::Cancel,
+                Err(ReadlineError::Eof) => return ReadOutcome::Exit,
+                Err(_) => return ReadOutcome::Exit,
+            }
         }
     }
 }

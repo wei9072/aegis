@@ -68,6 +68,42 @@ pub fn resolve_resume(arg: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// One row of the `/sessions` listing.
+#[derive(Debug, Clone)]
+pub struct SessionMeta {
+    pub path: PathBuf,
+    pub modified: std::time::SystemTime,
+    pub size_bytes: u64,
+}
+
+/// All saved sessions, newest first by mtime. Returns `Vec` (not
+/// `Result`) — a missing or unreadable sessions dir = empty list.
+/// Cheap (`stat` only, no JSON parse), so safe to call from REPL.
+#[must_use]
+pub fn list_sessions() -> Vec<SessionMeta> {
+    let dir = sessions_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<SessionMeta> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                return None;
+            }
+            let meta = entry.metadata().ok()?;
+            Some(SessionMeta {
+                path,
+                modified: meta.modified().ok()?,
+                size_bytes: meta.len(),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out
+}
+
 /// Newest `*.json` under `sessions_dir()`, or `None` if dir is
 /// empty / missing.
 #[must_use]
@@ -142,5 +178,42 @@ mod tests {
     fn resolve_resume_with_missing_path_errors() {
         let err = resolve_resume("/definitely/not/a/real/file.json").unwrap_err();
         assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn list_sessions_returns_empty_when_dir_missing() {
+        // Point XDG_DATA_HOME at a temp dir that never had a sessions/
+        // subdir created — list_sessions must NOT panic.
+        let td = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_DATA_HOME", td.path());
+        assert!(list_sessions().is_empty());
+        std::env::remove_var("XDG_DATA_HOME");
+    }
+
+    #[test]
+    fn list_sessions_sorts_newest_first_and_skips_non_json() {
+        let td = tempfile::tempdir().unwrap();
+        let sess_dir = td.path().join("aegis").join("sessions");
+        std::fs::create_dir_all(&sess_dir).unwrap();
+        std::env::set_var("XDG_DATA_HOME", td.path());
+
+        // Three sessions written in order; later writes have later
+        // mtimes (filesystem mtime resolution is OS-dependent but
+        // separate writes always produce monotonic order on Linux).
+        for stem in ["a", "b", "c"] {
+            let p = sess_dir.join(format!("{stem}.json"));
+            Session::new().save_to(&p).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // A non-json file that should be skipped.
+        std::fs::write(sess_dir.join("note.txt"), "x").unwrap();
+
+        let listing = list_sessions();
+        std::env::remove_var("XDG_DATA_HOME");
+
+        assert_eq!(listing.len(), 3);
+        // Newest first → c, b, a
+        assert!(listing[0].path.ends_with("c.json"));
+        assert!(listing[2].path.ends_with("a.json"));
     }
 }

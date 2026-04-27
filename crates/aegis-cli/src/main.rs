@@ -166,14 +166,30 @@ enum Command {
         /// server's advertised tools alongside Read/Glob/Grep/Edit/Write.
         #[arg(long = "mcp", value_name = "COMMAND")]
         mcp: Vec<String>,
-        /// Resume a saved session. Accepts a path to a session file
-        /// or `latest` to pick the most recent file from the
-        /// sessions directory (`$XDG_DATA_HOME/aegis/sessions/`,
-        /// fallback `~/.local/share/aegis/sessions/`). The runtime
-        /// auto-saves every turn so subsequent invocations can
-        /// `--resume latest` to continue.
-        #[arg(long, value_name = "PATH_OR_LATEST")]
+        /// Resume a saved session. Default (`--resume` with no value)
+        /// is `latest` — picks the newest file from the sessions
+        /// directory (`$XDG_DATA_HOME/aegis/sessions/`, fallback
+        /// `~/.local/share/aegis/sessions/`). Pass an explicit path
+        /// to load a specific session. The runtime auto-saves every
+        /// turn so subsequent invocations can resume.
+        #[arg(
+            long,
+            value_name = "PATH_OR_LATEST",
+            num_args = 0..=1,
+            default_missing_value = "latest",
+        )]
         resume: Option<String>,
+        /// Print every tool call's input + per-call structural cost
+        /// delta inline in the REPL. Off by default — keeps the
+        /// turn output uncluttered. Helpful when investigating why
+        /// aegis rejected an edit or when a turn felt slow.
+        #[arg(long)]
+        verbose: bool,
+        /// Print a commented `~/.config/aegis/config.toml` template
+        /// to stdout and exit. No chat happens. Useful when you'd
+        /// rather edit the file by hand than use `aegis setup`.
+        #[arg(long)]
+        print_config_template: bool,
         /// Emit the full result as JSON.
         #[arg(long)]
         json: bool,
@@ -292,22 +308,42 @@ fn main() -> ExitCode {
             no_aegis,
             mcp,
             resume,
+            verbose,
+            print_config_template,
             json,
-        } => cmd_chat(
-            prompt,
-            system,
-            max_iters,
-            cost_budget,
-            workspace,
-            &permission_mode,
-            verify,
-            verifier_cmd,
-            read_only,
-            no_aegis,
-            mcp,
-            resume,
-            json,
-        ),
+        } => {
+            if print_config_template {
+                print!("{}", config::TEMPLATE);
+                return ExitCode::SUCCESS;
+            }
+            cmd_chat(
+                prompt,
+                system,
+                max_iters,
+                cost_budget,
+                workspace,
+                &permission_mode,
+                verify,
+                verifier_cmd,
+                read_only,
+                no_aegis,
+                mcp,
+                resume,
+                verbose,
+                json,
+            )
+        }
+    }
+}
+
+/// Friendly relative-age string for the `/sessions` listing.
+/// Coarse buckets are fine — this is glanceable UX, not a metric.
+fn human_age(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s ago"),
+        60..=3599 => format!("{}m ago", secs / 60),
+        3600..=86_399 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86_400),
     }
 }
 
@@ -325,6 +361,7 @@ fn cmd_chat(
     no_aegis: bool,
     mcp_servers: Vec<String>,
     resume: Option<String>,
+    verbose: bool,
     json: bool,
 ) -> ExitCode {
     use aegis_agent::aegis_predict::LocalAegisPredictor;
@@ -587,7 +624,7 @@ fn cmd_chat(
             // model emits it. The renderer prints raw chunks
             // (markdown rendering still happens at end of turn for
             // the formatted block).
-            run_repl(&mut rt)
+            run_repl(&mut rt, verbose)
         }
     }
 }
@@ -641,7 +678,10 @@ where
     }
 }
 
-fn run_repl<C, T>(rt: &mut aegis_agent::ConversationRuntime<C, T>) -> ExitCode
+fn run_repl<C, T>(
+    rt: &mut aegis_agent::ConversationRuntime<C, T>,
+    verbose: bool,
+) -> ExitCode
 where
     C: aegis_agent::api::ApiClient,
     T: aegis_agent::tool::ToolExecutor,
@@ -721,9 +761,46 @@ where
                 println!("  /cost         — current cost-tracker snapshot");
                 println!("  /history      — message count");
                 println!("  /scan         — Ring 0 + Ring 0.5 + cycle detection across the workspace");
+                println!("  /sessions     — list saved sessions (newest first)");
                 println!("  /save [path]  — save session (default: auto-save target)");
                 println!("  /load <path>  — load + replace current session");
                 println!("  /help         — this list");
+                continue;
+            }
+            "/sessions" => {
+                let listing = session_store::list_sessions();
+                if listing.is_empty() {
+                    println!(
+                        "{}",
+                        format!(
+                            "(no saved sessions in {})",
+                            session_store::sessions_dir().display()
+                        )
+                        .with(theme.quote)
+                    );
+                } else {
+                    let now = std::time::SystemTime::now();
+                    println!("  {} saved sessions (newest first):", listing.len());
+                    for (i, m) in listing.iter().take(20).enumerate() {
+                        let age = now
+                            .duration_since(m.modified)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        println!(
+                            "  {:>2}. {}  ({}, {} bytes)",
+                            i + 1,
+                            m.path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("?"),
+                            human_age(age),
+                            m.size_bytes,
+                        );
+                    }
+                    if listing.len() > 20 {
+                        println!("  ... and {} more (showing newest 20)", listing.len() - 20);
+                    }
+                }
                 continue;
             }
             "/reset" => {
@@ -862,6 +939,7 @@ where
         let streamed_buf_for_cb = streamed_buf.clone();
         let saw_stream_text: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let saw_stream_text_cb = saw_stream_text.clone();
+        let verbose_cb = verbose;
         let callback: Box<dyn FnMut(&aegis_agent::api::AssistantEvent) + Send> =
             Box::new(move |ev: &aegis_agent::api::AssistantEvent| match ev {
                 aegis_agent::api::AssistantEvent::TextDelta(text) => {
@@ -872,11 +950,25 @@ where
                         buf.push_str(text);
                     }
                 }
-                aegis_agent::api::AssistantEvent::ToolUse { name, .. } => {
-                    eprintln!(
-                        "\n  {} {name}",
-                        "↳ tool_use:".with(crossterm::style::Color::DarkGrey)
-                    );
+                aegis_agent::api::AssistantEvent::ToolUse { name, input, .. } => {
+                    let dim = crossterm::style::Color::DarkGrey;
+                    if verbose_cb {
+                        // Truncate to keep the line readable; users
+                        // can re-run with /history to see full
+                        // payloads.
+                        let mut snippet = input.clone();
+                        if snippet.len() > 200 {
+                            snippet.truncate(200);
+                            snippet.push_str(" …");
+                        }
+                        eprintln!(
+                            "\n  {} {name} {}",
+                            "↳ tool_use:".with(dim),
+                            snippet.with(dim)
+                        );
+                    } else {
+                        eprintln!("\n  {} {name}", "↳ tool_use:".with(dim));
+                    }
                 }
                 aegis_agent::api::AssistantEvent::MessageStop => {}
             });
@@ -969,6 +1061,18 @@ where
             other => {
                 eprintln!("  ({:?}, {} iterations)", other, result.iterations);
             }
+        }
+
+        if verbose {
+            // Per-turn cost delta — what aegis attributed to the
+            // tool calls in this turn. Only useful in verbose mode;
+            // /cost gives the same data on demand.
+            let cumulative = rt.cost_tracker().cumulative_regression();
+            eprintln!(
+                "  {} cumulative cost regression = {:.2}",
+                "↳".with(crossterm::style::Color::DarkGrey),
+                cumulative
+            );
         }
 
         // Auto-save the session after every turn so a crash / Ctrl-C
