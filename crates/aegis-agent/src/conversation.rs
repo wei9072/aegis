@@ -22,6 +22,7 @@ use crate::api::{ApiClient, ApiRequest, AssistantEvent, RuntimeError, ToolDefini
 use crate::cost::CostTracker;
 use crate::message::{ContentBlock, ConversationMessage, Session};
 use crate::predict::{NullPredictor, PreToolUsePredictor, PredictVerdict};
+use crate::stalemate::{StalemateDetector, StalemateVerdict};
 use crate::tool::ToolExecutor;
 use crate::verifier::AgentTaskVerifier;
 use crate::{AgentConfig, AgentTurnResult, StoppedReason};
@@ -64,6 +65,7 @@ pub struct ConversationRuntime<C, T> {
     cost_observer: Box<dyn CostObserver>,
     cost_tracker: CostTracker,
     verifier: Option<Box<dyn AgentTaskVerifier>>,
+    stalemate: StalemateDetector,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -91,6 +93,7 @@ where
             cost_observer: Box::new(NullCostObserver),
             cost_tracker: CostTracker::new(),
             verifier: None,
+            stalemate: StalemateDetector::new(),
         }
     }
 
@@ -294,6 +297,22 @@ where
                 if regression > budget {
                     return AgentTurnResult {
                         stopped_reason: StoppedReason::CostBudgetExceeded,
+                        iterations,
+                        task_verdict: None,
+                    };
+                }
+            }
+
+            // V3.5: feed the cost-total into the stalemate detector.
+            // Three successive iterations with the same total → the
+            // LLM is going in circles; terminate with a named reason
+            // rather than letting max_iterations swallow it silently.
+            let snap = self.cost_tracker.snapshot();
+            if !snap.is_empty() {
+                let total: f64 = snap.iter().map(|e| e.current).sum();
+                if let StalemateVerdict::StateStalemate = self.stalemate.record(total) {
+                    return AgentTurnResult {
+                        stopped_reason: StoppedReason::StalemateDetected,
                         iterations,
                         task_verdict: None,
                     };

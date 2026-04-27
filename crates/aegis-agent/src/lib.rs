@@ -37,6 +37,7 @@ pub mod mcp;
 pub mod message;
 pub mod predict;
 pub mod providers;
+pub mod stalemate;
 pub mod testing;
 pub mod tool;
 pub mod verifier;
