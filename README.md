@@ -207,6 +207,52 @@ old_content?)` mid-loop and gets a `{decision, reasons,
 signals_after, …}` verdict back. Pure observation — never coaches
 the agent (see [Design principles](#design-principles)).
 
+### `aegis chat` — interactive coding agent (V3)
+
+Built on the same primitives, `aegis chat` is a substrate-mode
+agent: pick any of three providers via env vars, drop into a REPL
+with line editing + slash commands + markdown rendering. Three
+modes auto-detected:
+
+```bash
+aegis chat "explain this concept"        # one-shot
+echo "task" | aegis chat                 # pipe → one-shot
+aegis chat                               # tty → interactive REPL
+```
+
+Provider env vars (first match wins):
+
+```bash
+# OpenAI-compat (covers OpenRouter / Groq / Ollama / vLLM / etc.)
+export AEGIS_OPENAI_BASE_URL=https://openrouter.ai/api/v1
+export AEGIS_OPENAI_API_KEY=sk-or-v1-...
+export AEGIS_OPENAI_MODEL=meta-llama/llama-3.3-70b-instruct
+
+# Anthropic
+export AEGIS_ANTHROPIC_API_KEY=sk-ant-...
+export AEGIS_ANTHROPIC_MODEL=claude-haiku-4-5
+
+# Gemini
+export AEGIS_GEMINI_API_KEY=AIza...
+export AEGIS_GEMINI_MODEL=gemini-2.5-flash
+```
+
+Common flags:
+
+```bash
+aegis chat --tools --workspace .                # add Read/Glob/Grep tools
+aegis chat --tools --mcp aegis-mcp              # mount aegis-mcp as a tool
+aegis chat --verify                             # auto-detect test runner
+aegis chat --cost-budget 5.0                    # terminate on cumulative regression
+aegis chat --permission-mode read-only          # safest sandbox
+```
+
+The four V3 differentiation points (PreToolUse aegis-predict,
+cross-turn cost tracking, verifier-driven done, stalemate detection)
+are wired in; full usage walkthrough in
+[`docs/v3_dogfood.md`](docs/v3_dogfood.md), design rationale in
+[`docs/v3_agent_design.md`](docs/v3_agent_design.md).
+
 ---
 
 ## Integrations

@@ -197,25 +197,37 @@ with aegis's gates is one of the four differentiation points.
 
 ---
 
-## Phase plan (V3.0 → V3.7)
+## Phase status (as shipped — all V3 phases ✅ Done 2026-04-27)
 
-| Phase | Content | Approx LOC | Time |
-|---|---|---|---|
-| **V3.0** — Skeleton | Crate exists; conversation main loop adapted from claw-code; minimal file_ops + bash tools; single provider (Anthropic) | borrow ~3000 + write ~500 | 1–2 weeks |
-| **V3.1** — Multi-provider + MCP client | Adapt all `api/providers/` + `runtime/mcp_*` | borrow ~3000 + write ~300 | 1 week |
-| **V3.2** — Aegis differentiation A + B | PreToolUse aegis-predict + cross-turn cost tracker | write ~600 | 1 week |
-| **V3.3** — Aegis differentiation C | Verifier integration (uses the batteries-included verifiers per ROADMAP backlog) | write ~400 | 1 week |
-| **V3.4** — Aegis differentiation D | Stalemate / thrashing at session level | write ~300 | 3–5 days |
-| **V3.5** — Hooks + permissions parity | Adapt claw-code hooks + permissions | borrow ~2000 | 3–5 days |
-| **V3.6** — Session + compaction | Adapt claw-code session + compact | borrow ~2000 | 1 week |
-| **V3.7** — Verification + dogfood | Full contract test pass + one dogfood demo (aegis-agent fixes a real aegis bug) | write ~500 | 1 week |
+| Phase | Content | Status |
+|---|---|---|
+| **V3.0** — Skeleton + contract tests | Crate scaffolding; 9 framing contract tests | ✅ Done |
+| **V3.1a** — Conversation skeleton | ConversationRuntime, ApiClient + ToolExecutor traits, message types, scripted stubs (adapted from claw-code) | ✅ Done |
+| **V3.1b** — OpenAI-compat provider | HttpClient abstraction + OpenAiCompatProvider (covers OpenRouter / Groq / Ollama / vLLM / llama.cpp / LMStudio / DashScope) | ✅ Done |
+| **V3.2a** — Anthropic Messages provider | Distinct wire format (top-level `system`, content blocks, `x-api-key` auth, `anthropic-version` header, flat tool definitions) | ✅ Done |
+| **V3.2b** — MCP client | JsonRpcTransport trait + StdioTransport / ScriptedTransport; McpClient (initialize/tools/list/tools/call); McpToolExecutor wraps as ToolExecutor; verified against real `aegis-mcp` binary | ✅ Done |
+| **V3.2c** — Gemini provider | `generateContent` format with `model` role, `parts[]`, `functionCall`, `systemInstruction`, `x-goog-api-key` | ✅ Done |
+| **V3.3** — Differentiation A + B | PreToolUsePredictor trait + AegisPredictor (calls aegis-mcp validate_change before file-write tools); CostTracker with cumulative regression + CostBudgetExceeded termination | ✅ Done |
+| **V3.4** — Differentiation C | AgentTaskVerifier trait + ShellVerifier / TestVerifier / BuildVerifier / CompositeVerifier; verifier overrules LLM-claimed done | ✅ Done |
+| **V3.5** — Differentiation D | StalemateDetector at session level (3 successive identical cost totals → StalemateDetected) | ✅ Done |
+| **V3.6** — Permissions + hooks | PermissionPolicy with three modes (ReadOnly / WorkspaceWrite / DangerFullAccess); PreToolUseHookPredictor (Claude-Code-compatible exit-2 = block) | ✅ Done |
+| **V3.7** — Session + compaction + chat_demo | Session serde + atomic save_to / load_from; compact_drop_oldest; chat_demo example wiring all 3 providers | ✅ Done |
+| **V3.8** — `aegis chat` CLI + REPL | `aegis chat` subcommand (one-shot / pipe / interactive REPL auto-detect via `IsTerminal`); markdown render + spinner + rustyline editor + slash-command tab-complete (adapted from claw-code's render.rs / input.rs); `/reset` clears session via reset_session(); ReadOnlyTools (Read/Glob/Grep) + `--tools` flag; MultiToolExecutor for combining sources; `--mcp` flag mounts MCP servers as additional tool sources; OpenAI-compat SSE streaming via `stream_with_callback`; per-event REPL rendering with markdown finalisation | ✅ Done |
 
-**Total:** ~14k LOC (~11k borrowed, ~2.6k aegis-specific). 8–10 weeks
-to V3.5 (usable hand); 12 weeks to V3.7 (verified product).
+**Final delivery:** ~7400 LOC (~4200 src + ~3200 tests), 295 cargo
+tests across the workspace, 11 attribution-comment-marked files
+adapted from claw-code (MIT). Total wall time: one day.
 
-This is **3× faster than building from zero** (the comparison case was
-6+ months) — the saving comes entirely from not re-deriving conversation
-/ tool / api / session scaffolding.
+The aggressive timeline only worked because claw-code (MIT) gave us
+**~11k LOC** of conversation / tool / api / session / hook
+scaffolding to borrow. Building from zero would still be the
+6+ month estimate.
+
+Real-LLM dogfood evidence: pending — see
+[`v3_dogfood.md`](v3_dogfood.md). The mechanism shipped; the claim
+that the four differentiation points actually surface in real
+agentic-development sessions will be added once the project owner
+runs against a real workspace + real provider.
 
 ---
 
@@ -230,11 +242,14 @@ implementation borrowing happens*:
 | `verifier_drives_done.rs` | `StoppedReason` must distinguish `PlanDoneVerified` / `PlanDoneVerifierRejected` / `PlanDoneNoVerifier`; cannot collapse to a generic `PlanDone`; result must carry `task_verdict` field | 4 |
 | `no_coaching_injection.rs` | Source has no `VerdictCoach` / `FeedbackInjector` / `fn prompt_from_verdict` etc. | 1 |
 
-**9 tests; all pass on the empty scaffold.** They start failing the
-moment a future PR introduces a forbidden shape. PR review then
-becomes: "the test failed — is the test wrong, or is your change
-violating the framing?" That conversation is what the trip-wire
-exists to surface.
+**Originally 9 tests; all pass on the empty scaffold.** As V3.1–V3.8
+landed, the source-text scans in `no_auto_retry.rs` and
+`no_coaching_injection.rs` got upgraded to walk the entire `src/`
+directory (rather than just `lib.rs`) so newly-added modules can't
+silently introduce a forbidden token. The trip-wire grows with the
+crate; PR review then becomes: "the test failed — is the test wrong,
+or is your change violating the framing?" That conversation is what
+the trip-wire exists to surface.
 
 These complement the existing
 `crates/aegis-decision/src/task.rs::tests::task_verdict_has_no_feedback_field`

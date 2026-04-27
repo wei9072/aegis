@@ -1,9 +1,19 @@
 # V3 dogfood — running aegis-agent against a real codebase
 
+> **⚠ Recipe only — evidence section pending real-LLM runs.** This
+> document captures the canonical setup + the three usage modes. The
+> "what actually happened in dogfood" section is intentionally empty
+> until the project owner has run `aegis chat` against a real
+> codebase with a real provider. Once that happens, append a
+> "## Findings" section with: scenarios attempted, where the agent
+> succeeded, where it surfaced one of the four V3 differentiation
+> point verdicts (predict-block / cost-budget / verifier-rejected /
+> stalemate), and any framing-relevant surprises.
+
 Once V3 (V3.0–V3.8 + the chat REPL polish) shipped, the natural test
 is to point `aegis chat --tools` at a real codebase and see what
-breaks. This document captures the recipe + a worked example
-against a small Python codebase (`fit-coche`).
+breaks. This document captures the recipe; the project owner will
+add the actual evidence below as it accumulates.
 
 ## Setup
 
