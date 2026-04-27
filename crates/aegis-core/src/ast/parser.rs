@@ -167,7 +167,7 @@ mod tests {
         tmp.flush().unwrap();
         let m = analyze_file(tmp.path().to_str().unwrap()).unwrap();
         assert_eq!(m.language, "typescript");
-        assert_eq!(m.has_syntax_error, false);
+        assert!(!m.has_syntax_error);
         assert!(m.fan_out >= 2);
     }
 

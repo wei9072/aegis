@@ -253,12 +253,12 @@ impl TerminalRenderer {
                         code_language.clone().with(self.color_theme.code_block_border)
                     )
                 };
-                let _ = write!(output, "{border}{lang_label}\n");
+                let _ = writeln!(output, "{border}{lang_label}");
             }
             Event::End(TagEnd::CodeBlock) => {
                 self.flush_code_block(code_buffer, code_language, output);
                 let border = format!("{}", "```".with(self.color_theme.code_block_border));
-                let _ = write!(output, "{border}\n");
+                let _ = writeln!(output, "{border}");
                 *in_code_block = false;
                 code_language.clear();
                 code_buffer.clear();

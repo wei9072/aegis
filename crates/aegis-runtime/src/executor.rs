@@ -395,7 +395,7 @@ impl Executor {
         }
         Err(ExecutorError::Io {
             path: backup_root,
-            source: io::Error::new(io::ErrorKind::Other, "backup dir name exhausted"),
+            source: io::Error::other("backup dir name exhausted"),
         })
     }
 

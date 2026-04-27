@@ -54,6 +54,12 @@ impl CostObserver for NullCostObserver {
     }
 }
 
+/// Per-event callback type for streaming mode. Box-erased so the
+/// runtime stays generic over `(C, T)` without leaking the closure
+/// type into call signatures. `Send` lets callers move callbacks
+/// across threads (e.g. into a background renderer task).
+pub type EventCallback = Box<dyn FnMut(&AssistantEvent) + Send>;
+
 /// Coordinates the model loop and tool execution.
 pub struct ConversationRuntime<C, T> {
     session: Session,
@@ -72,7 +78,7 @@ pub struct ConversationRuntime<C, T> {
     /// runtime invokes `stream_with_callback` and forwards each
     /// arriving `AssistantEvent` to this callback. Default = no-op
     /// (the runtime uses the non-streaming `stream` method).
-    event_callback: Option<Box<dyn FnMut(&AssistantEvent) + Send>>,
+    event_callback: Option<EventCallback>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -127,10 +133,7 @@ where
     /// Non-consuming variant of `with_event_callback`. Lets the REPL
     /// install a fresh callback per turn (callback closures capture
     /// per-turn rendering state) without rebuilding the runtime.
-    pub fn set_event_callback(
-        &mut self,
-        callback: Option<Box<dyn FnMut(&AssistantEvent) + Send>>,
-    ) {
+    pub fn set_event_callback(&mut self, callback: Option<EventCallback>) {
         self.event_callback = callback;
     }
 

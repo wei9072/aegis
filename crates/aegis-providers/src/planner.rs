@@ -111,8 +111,7 @@ impl<'a> LLMPlanner<'a> {
     }
 
     fn format_prompt(&self, ctx: &PlanContext) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        parts.push("# Aegis Refactor Planner".to_string());
+        let mut parts: Vec<String> = vec!["# Aegis Refactor Planner".to_string()];
         parts.push(
             "You are an architecture-aware refactoring planner. Produce a \
              structured PatchPlan (JSON) that makes incremental progress toward \

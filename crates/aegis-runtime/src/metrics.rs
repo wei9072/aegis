@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn kind_value_totals_sums_values() {
-        let items = vec![
+        let items = [
             ("fan_out", 15.0),
             ("fan_out", 8.0),
             ("chain_depth", 3.0),

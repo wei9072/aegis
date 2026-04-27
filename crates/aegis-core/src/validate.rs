@@ -62,7 +62,7 @@ impl ValidateVerdict {
         // Round-trip via serde so the field-presence rules
         // (`signals_before` / `regression_detail` omitted when None)
         // stay in one place.
-        serde_json::to_value(self).unwrap_or_else(|_| Value::Null)
+        serde_json::to_value(self).unwrap_or(Value::Null)
     }
 }
 

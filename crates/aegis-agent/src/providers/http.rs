@@ -85,11 +85,10 @@ pub fn friendly_http_status(url: &str, status: u16, body: &str) -> String {
             "hint: {host:?} rate-limited (429). Provider quota exceeded — \
              check your dashboard or use a different model."
         ),
-        413 => format!(
-            "hint: payload too large (413). The conversation history exceeds \
-             this model's context window. Use /compact or pick a model with a \
-             larger context."
-        ),
+        413 => "hint: payload too large (413). The conversation history exceeds \
+                this model's context window. Use /compact or pick a model with a \
+                larger context."
+            .to_string(),
         500..=599 => format!(
             "hint: {host:?} returned a server error ({status}). Provider-side \
              outage; retry later or switch provider."

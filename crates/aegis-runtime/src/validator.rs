@@ -122,7 +122,7 @@ impl PlanValidator {
     pub fn with_scope(mut self, scope: Vec<String>) -> Result<Self, String> {
         let resolved: Result<Vec<PathBuf>, String> = scope
             .into_iter()
-            .map(|s| self.resolve_under_root(&s).map_err(|e| e))
+            .map(|s| self.resolve_under_root(&s))
             .collect();
         self.scope = Some(resolved?);
         Ok(self)
