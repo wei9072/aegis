@@ -51,12 +51,13 @@ framing (each is a rejection valve, none is a goal-direction signal).
 
 ---
 
-## Current focus — V3 (substrate + hand)
+## V3 — substrate + hand (DONE 2026-04-27)
 
-**`aegis-agent` — a coding agent built on aegis primitives.** Started
-2026-04-27. Full design rationale in
-[`docs/v3_agent_design.md`](v3_agent_design.md); contract tests
-shipped today under `crates/aegis-agent/tests/`.
+**`aegis-agent` — a coding agent built on aegis primitives.**
+Full design rationale in
+[`docs/v3_agent_design.md`](v3_agent_design.md). All eight V3 phases
+(V3.0 through V3.7) shipped in one day. Workspace test count went
+from 140 → 260 (+120 from V3 work).
 
 Why V3 takes priority over V2 release polish:
 
@@ -86,12 +87,12 @@ agent has):
 | **V3.1b** — OpenAI-compat provider | `HttpClient` abstraction (UreqClient + StubHttpClient), `OpenAiCompatProvider` covering OpenRouter / Groq / Ollama / vLLM / llama.cpp / LMStudio / DashScope via `base_url` config; non-streaming, no-auto-retry on every error path | ✅ Done (2026-04-27) |
 | **V3.2a** — Anthropic Messages provider | `AnthropicProvider` — different wire format from OpenAI (system as top-level field, content blocks inside messages, tool_result as user-role messages, x-api-key auth, anthropic-version header). Thinking blocks dropped, no streaming. | ✅ Done (2026-04-27) |
 | **V3.2b** — MCP client | Hand-rolled JSON-RPC 2.0 over stdio. `JsonRpcTransport` trait abstraction (StdioTransport for subprocess, ScriptedTransport for tests). McpClient handles initialize handshake + tools/list + tools/call. McpToolExecutor wraps as ToolExecutor for the conversation runtime. End-to-end verified against real `aegis-mcp` binary. NO retry on any failure path. | ✅ Done (2026-04-27) |
-| **V3.2c** — Gemini provider | Google's `generateContent` format | ⬜ |
-| **V3.3** — Aegis differentiation A + B | PreToolUse aegis-predict + cross-turn cost tracker | ⬜ |
-| **V3.4** — Aegis differentiation C | Verifier integration | ⬜ |
-| **V3.5** — Aegis differentiation D | Stalemate / thrashing at session level | ⬜ |
-| **V3.6** — Hooks + permissions parity | Adapt claw-code hooks + permissions | ⬜ |
-| **V3.7** — Session + compaction + dogfood | Full contract test pass + one dogfood demo | ⬜ |
+| **V3.2c** — Gemini provider | Google's `generateContent` format — URL-embedded model, `model` role, `parts[]` blocks, `functionCall` parts, `systemInstruction` field, `x-goog-api-key` auth | ✅ Done (2026-04-27) |
+| **V3.3** — Differentiation A + B | PreToolUse aegis-predict (calls aegis-mcp validate_change before file-write tools; BLOCK skips execution + LLM sees structured reasons) + cross-turn cost tracker (per-file baseline + cumulative regression; CostBudgetExceeded terminates session) | ✅ Done (2026-04-27) |
+| **V3.4** — Differentiation C | Verifier integration: AgentTaskVerifier trait + ShellVerifier / TestVerifier / BuildVerifier / CompositeVerifier impls. When LLM stops emitting tool_use, verifier runs and overrides claim → PlanDoneVerified / PlanDoneVerifierRejected | ✅ Done (2026-04-27) |
+| **V3.5** — Differentiation D | StalemateDetector at session level (3 successive identical cost totals → StoppedReason::StalemateDetected; matches aegis-runtime threshold for cadence parity) | ✅ Done (2026-04-27) |
+| **V3.6** — Hooks + permissions parity | PermissionPolicy with three modes (ReadOnly / WorkspaceWrite / DangerFullAccess); PreToolUseHookPredictor for shell-command hooks compatible with Claude Code's protocol (exit 2 = block) | ✅ Done (2026-04-27) |
+| **V3.7** — Session + compaction + dogfood | Session serde + atomic save_to / load_from; compact_drop_oldest helper; chat_demo example wiring all 3 providers end-to-end | ✅ Done (2026-04-27) |
 
 ---
 
