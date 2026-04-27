@@ -62,8 +62,37 @@ pub enum AssistantEvent {
 /// Minimal streaming API contract required by the conversation loop.
 /// Implementors talk to a real LLM backend (Anthropic, OpenAI-compat,
 /// etc.) or to a stub for tests.
+///
+/// Two methods:
+///   - `stream` — non-streaming default. Returns the full
+///     `Vec<AssistantEvent>` once the model has finished. Backwards-
+///     compatible with V3.1–V3.5; existing impls only need this.
+///   - `stream_with_callback` — incremental delivery. Default impl
+///     calls `stream` then replays the events through `on_event` so
+///     non-streaming providers still drive the UI sensibly.
+///     Providers that genuinely stream (V3.8 OpenAI-compat SSE)
+///     override this method to invoke `on_event` per arriving chunk.
 pub trait ApiClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError>;
+
+    /// Optional incremental delivery. Default: call `stream`, then
+    /// replay events through the callback in order. Override when
+    /// the underlying transport actually streams.
+    ///
+    /// `on_event` is called once per `AssistantEvent` (including the
+    /// terminal `MessageStop`). If the callback panics it propagates
+    /// — providers do NOT swallow it.
+    fn stream_with_callback(
+        &mut self,
+        request: ApiRequest,
+        on_event: &mut dyn FnMut(&AssistantEvent),
+    ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        let events = self.stream(request)?;
+        for event in &events {
+            on_event(event);
+        }
+        Ok(events)
+    }
 }
 
 /// Blanket impl so callers can pass `Box<dyn ApiClient>` directly
@@ -72,6 +101,14 @@ pub trait ApiClient {
 impl<T: ApiClient + ?Sized> ApiClient for Box<T> {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         (**self).stream(request)
+    }
+
+    fn stream_with_callback(
+        &mut self,
+        request: ApiRequest,
+        on_event: &mut dyn FnMut(&AssistantEvent),
+    ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        (**self).stream_with_callback(request, on_event)
     }
 }
 

@@ -29,6 +29,7 @@ use crate::message::{ContentBlock, ConversationMessage, MessageRole};
 use crate::providers::http::HttpClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::cell::RefCell;
 
 // ---------- public config + provider ----------
 
@@ -102,33 +103,54 @@ impl OpenAiCompatProvider {
 
 impl ApiClient for OpenAiCompatProvider {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
-        let chat_request = build_chat_request(&self.config, &request);
+        // Non-streaming path. The streaming path lives in
+        // `stream_with_callback` and only triggers when the caller
+        // actually subscribes to events.
+        let chat_request = build_chat_request(&self.config, &request, false);
         let body = serde_json::to_string(&chat_request)
             .map_err(|e| RuntimeError::new(format!("serialise request failed: {e}")))?;
+        let response = self.do_post(&body)?;
+        let chat_response: ChatResponse = serde_json::from_str(&response.body)
+            .map_err(|e| RuntimeError::new(format!("parse response failed: {e}")))?;
+        parse_response_to_events(chat_response)
+    }
 
+    fn stream_with_callback(
+        &mut self,
+        request: ApiRequest,
+        on_event: &mut dyn FnMut(&AssistantEvent),
+    ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        // V3.8 — request `stream: true` and parse SSE chunks as
+        // they arrive. If the underlying HTTP impl can't stream
+        // (StubHttpClient returns the whole body at once), the
+        // parser still works on the assembled body — UX degrades
+        // gracefully to "all events at end of response".
+        let chat_request = build_chat_request(&self.config, &request, true);
+        let body = serde_json::to_string(&chat_request)
+            .map_err(|e| RuntimeError::new(format!("serialise request failed: {e}")))?;
+        let response = self.do_post(&body)?;
+        parse_sse_body(&response.body, on_event)
+    }
+}
+
+impl OpenAiCompatProvider {
+    fn do_post(
+        &self,
+        body: &str,
+    ) -> Result<crate::providers::http::HttpResponse, RuntimeError> {
         let endpoint = self.endpoint();
         let headers = self.auth_headers();
-
-        // Network IO. Per V3 framing — NO retry on transient errors.
-        // Failure goes straight back as RuntimeError; the agent
-        // surfaces it as StoppedReason::ProviderError; the caller
-        // (user / orchestrator) decides whether to start a new turn.
         let response = self
             .http
-            .post(&endpoint, &headers, &body)
+            .post(&endpoint, &headers, body)
             .map_err(|e| RuntimeError::new(format!("HTTP transport error: {e}")))?;
-
         if response.status >= 400 {
             return Err(RuntimeError::new(format!(
                 "HTTP {} from {}: {}",
                 response.status, endpoint, response.body
             )));
         }
-
-        let chat_response: ChatResponse = serde_json::from_str(&response.body)
-            .map_err(|e| RuntimeError::new(format!("parse response failed: {e}")))?;
-
-        parse_response_to_events(chat_response)
+        Ok(response)
     }
 }
 
@@ -141,6 +163,10 @@ struct ChatRequest {
     messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<ChatTool>>,
+    /// `true` triggers SSE response. Omitted when false to keep
+    /// payloads tiny and to match what existing tests pin.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    stream: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -221,7 +247,11 @@ struct ChatResponseToolCallFunction {
 
 // ---------- mapping: aegis-agent → OpenAI request ----------
 
-fn build_chat_request(config: &OpenAiCompatConfig, request: &ApiRequest) -> ChatRequest {
+fn build_chat_request(
+    config: &OpenAiCompatConfig,
+    request: &ApiRequest,
+    stream: bool,
+) -> ChatRequest {
     let mut messages = Vec::new();
 
     // System prompt collapses to a single OpenAI "system" message.
@@ -250,6 +280,7 @@ fn build_chat_request(config: &OpenAiCompatConfig, request: &ApiRequest) -> Chat
         max_tokens: config.max_tokens,
         messages,
         tools,
+        stream,
     }
 }
 
@@ -365,6 +396,156 @@ fn map_tool(tool: &ToolDefinition) -> ChatTool {
             parameters: tool.input_schema.clone(),
         },
     }
+}
+
+// ---------- SSE streaming response types ----------
+
+#[derive(Debug, Deserialize)]
+struct ChatStreamChunk {
+    #[serde(default)]
+    choices: Vec<ChatStreamChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatStreamChoice {
+    #[serde(default)]
+    delta: ChatStreamDelta,
+    #[serde(default)]
+    _finish_reason: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ChatStreamDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<ChatStreamToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatStreamToolCall {
+    #[serde(default)]
+    index: Option<u32>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<ChatStreamToolCallFunction>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatStreamToolCallFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+/// Parse a Server-Sent Events response body into AssistantEvents,
+/// invoking `on_event` per emitted event so the caller can render
+/// them incrementally.
+///
+/// SSE chunks come as `data: {...json...}\n\n` blocks. The terminal
+/// chunk is `data: [DONE]`. Inside each chunk, `choices[0].delta`
+/// carries text or tool_call fragments. Tool calls accumulate
+/// across chunks (the `index` field disambiguates parallel calls).
+fn parse_sse_body(
+    body: &str,
+    on_event: &mut dyn FnMut(&AssistantEvent),
+) -> Result<Vec<AssistantEvent>, RuntimeError> {
+    let mut emitted: Vec<AssistantEvent> = Vec::new();
+    let mut tool_calls: std::collections::BTreeMap<u32, AccumulatingToolCall> = Default::default();
+    let mut next_implicit_index: u32 = 0;
+
+    for raw_line in body.split('\n') {
+        let line = raw_line.trim_end_matches('\r');
+        let payload = match line.strip_prefix("data:") {
+            Some(rest) => rest.trim(),
+            None => continue,
+        };
+        if payload.is_empty() {
+            continue;
+        }
+        if payload == "[DONE]" {
+            break;
+        }
+        let chunk: ChatStreamChunk = match serde_json::from_str(payload) {
+            Ok(c) => c,
+            Err(_) => continue, // skip malformed chunks, mirrors OpenAI client tolerance
+        };
+        let choice = match chunk.choices.into_iter().next() {
+            Some(c) => c,
+            None => continue,
+        };
+        if let Some(text) = choice.delta.content {
+            if !text.is_empty() {
+                let ev = AssistantEvent::TextDelta(text);
+                on_event(&ev);
+                emitted.push(ev);
+            }
+        }
+        if let Some(calls) = choice.delta.tool_calls {
+            for call in calls {
+                let idx = call.index.unwrap_or_else(|| {
+                    let i = next_implicit_index;
+                    next_implicit_index += 1;
+                    i
+                });
+                let entry = tool_calls.entry(idx).or_default();
+                if let Some(id) = call.id {
+                    if entry.id.is_empty() {
+                        entry.id = id;
+                    }
+                }
+                if let Some(func) = call.function {
+                    if let Some(name) = func.name {
+                        if entry.name.is_empty() {
+                            entry.name = name;
+                        }
+                    }
+                    if let Some(args) = func.arguments {
+                        entry.arguments.push_str(&args);
+                    }
+                }
+            }
+        }
+    }
+
+    // Emit completed tool calls in index order.
+    for (_idx, call) in tool_calls.into_iter() {
+        if call.name.is_empty() {
+            continue;
+        }
+        let ev = AssistantEvent::ToolUse {
+            id: call.id,
+            name: call.name,
+            input: call.arguments,
+        };
+        on_event(&ev);
+        emitted.push(ev);
+    }
+
+    let stop = AssistantEvent::MessageStop;
+    on_event(&stop);
+    emitted.push(stop);
+
+    if emitted.len() == 1 {
+        // Only a MessageStop emitted — no content arrived. Treat as
+        // a malformed response (mirrors the non-streaming path's
+        // "no content" check).
+        return Err(RuntimeError::new(
+            "OpenAI SSE response had no content or tool_calls",
+        ));
+    }
+
+    let _ = RefCell::new(()); // silence unused-import warning if cfg trims
+    Ok(emitted)
+}
+
+#[derive(Default)]
+struct AccumulatingToolCall {
+    id: String,
+    name: String,
+    arguments: String,
 }
 
 // ---------- mapping: OpenAI response → AssistantEvent ----------

@@ -68,6 +68,11 @@ pub struct ConversationRuntime<C, T> {
     verifier: Option<Box<dyn AgentTaskVerifier>>,
     stalemate: StalemateDetector,
     permission_policy: Option<PermissionPolicy>,
+    /// Optional per-event callback (V3.8 streaming). When set, the
+    /// runtime invokes `stream_with_callback` and forwards each
+    /// arriving `AssistantEvent` to this callback. Default = no-op
+    /// (the runtime uses the non-streaming `stream` method).
+    event_callback: Option<Box<dyn FnMut(&AssistantEvent) + Send>>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -97,7 +102,36 @@ where
             verifier: None,
             stalemate: StalemateDetector::new(),
             permission_policy: None,
+            event_callback: None,
         }
+    }
+
+    /// Subscribe to per-event streaming. Useful for the chat REPL —
+    /// each `AssistantEvent::TextDelta` arrives as the LLM streams
+    /// it, so the user sees text appear instead of waiting for the
+    /// full response.
+    ///
+    /// For providers that don't truly stream (Anthropic / Gemini in
+    /// V3.8 — non-streaming impls), the default `ApiClient`
+    /// implementation replays the full event vec through the callback
+    /// once `stream` returns. UX degrades gracefully.
+    #[must_use]
+    pub fn with_event_callback(
+        mut self,
+        callback: Box<dyn FnMut(&AssistantEvent) + Send>,
+    ) -> Self {
+        self.event_callback = Some(callback);
+        self
+    }
+
+    /// Non-consuming variant of `with_event_callback`. Lets the REPL
+    /// install a fresh callback per turn (callback closures capture
+    /// per-turn rendering state) without rebuilding the runtime.
+    pub fn set_event_callback(
+        &mut self,
+        callback: Option<Box<dyn FnMut(&AssistantEvent) + Send>>,
+    ) {
+        self.event_callback = callback;
     }
 
     /// Apply a permission policy. Tool calls denied by the policy
@@ -196,7 +230,12 @@ where
                 tools: self.tools.clone(),
             };
 
-            let events = match self.api_client.stream(request) {
+            let stream_result = if let Some(cb) = self.event_callback.as_mut() {
+                self.api_client.stream_with_callback(request, cb.as_mut())
+            } else {
+                self.api_client.stream(request)
+            };
+            let events = match stream_result {
                 Ok(events) => events,
                 Err(error) => {
                     return AgentTurnResult {

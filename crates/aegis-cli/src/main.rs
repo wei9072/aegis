@@ -110,6 +110,14 @@ enum Command {
         /// chat mode otherwise.
         #[arg(long)]
         tools: bool,
+        /// Mount one or more MCP servers as additional tool sources.
+        /// Each value is a shell command (e.g. `aegis-mcp` or
+        /// `node my-server.js`). Tools advertised by the server
+        /// become callable by the LLM through aegis-agent's
+        /// MultiToolExecutor. Combine with --tools for built-in +
+        /// MCP simultaneously.
+        #[arg(long = "mcp", value_name = "COMMAND")]
+        mcp: Vec<String>,
         /// Emit the full result as JSON.
         #[arg(long)]
         json: bool,
@@ -190,6 +198,7 @@ fn main() -> ExitCode {
             verify,
             verifier_cmd,
             tools,
+            mcp,
             json,
         } => cmd_chat(
             prompt,
@@ -201,6 +210,7 @@ fn main() -> ExitCode {
             verify,
             verifier_cmd,
             tools,
+            mcp,
             json,
         ),
     }
@@ -216,10 +226,13 @@ fn cmd_chat(
     verify: bool,
     verifier_cmd: Option<String>,
     tools_enabled: bool,
+    mcp_servers: Vec<String>,
     json: bool,
 ) -> ExitCode {
     use aegis_agent::agent_tools::ReadOnlyTools;
     use aegis_agent::api::{ApiClient, ToolDefinition};
+    use aegis_agent::mcp::{McpClient, McpToolExecutor, StdioTransport};
+    use aegis_agent::multi_tool::{MultiToolExecutor, ToolSource};
     use aegis_agent::permission::{PermissionMode, PermissionPolicy};
     use aegis_agent::providers::{
         AnthropicConfig, AnthropicProvider, GeminiConfig, GeminiProvider, OpenAiCompatConfig,
@@ -328,16 +341,69 @@ fn cmd_chat(
 
     let system_prompt = system.map(|s| vec![s]).unwrap_or_default();
 
-    // Tool executor + tool definitions: empty by default (chat-only),
-    // ReadOnlyTools when --tools is set.
-    let (executor, tool_defs): (Box<dyn ToolExecutor>, Vec<ToolDefinition>) = if tools_enabled {
+    // Tool sources: collect built-ins + MCP servers, dispatch via
+    // MultiToolExecutor. Empty list → ScriptedToolExecutor (no tools).
+    let mut sources: Vec<ToolSource> = Vec::new();
+    if tools_enabled {
         eprintln!("aegis chat: read-only tools enabled (Read, Glob, Grep)");
-        (
+        sources.push(ToolSource::new(
+            "read_only",
             Box::new(ReadOnlyTools::new(workspace.clone())),
             ReadOnlyTools::definitions(),
-        )
-    } else {
+        ));
+    }
+    for spec in &mcp_servers {
+        // Spec is a shell command — split on whitespace, first token
+        // is the program, rest are args.
+        let mut parts = spec.split_whitespace();
+        let program = match parts.next() {
+            Some(p) => p,
+            None => {
+                eprintln!("aegis chat: --mcp value is empty, skipping");
+                continue;
+            }
+        };
+        let args: Vec<&str> = parts.collect();
+        let transport = match StdioTransport::spawn(program, &args) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("aegis chat: failed to spawn MCP server {spec:?}: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        let client = match McpClient::new(Box::new(transport)) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("aegis chat: MCP handshake failed for {spec:?}: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        eprintln!(
+            "aegis chat: mounted MCP server {spec:?} (server: {} v{})",
+            client.server_name, client.server_version
+        );
+        let executor = match McpToolExecutor::new(client) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("aegis chat: failed to load tool list from {spec:?}: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        let defs = executor.tool_definitions();
+        sources.push(ToolSource::new(
+            format!("mcp:{program}"),
+            Box::new(executor),
+            defs,
+        ));
+    }
+
+    let (executor, tool_defs): (Box<dyn ToolExecutor>, Vec<ToolDefinition>) = if sources.is_empty()
+    {
         (Box::new(ScriptedToolExecutor::new()), Vec::new())
+    } else {
+        let multi = MultiToolExecutor::new(sources);
+        let defs = multi.all_definitions();
+        (Box::new(multi), defs)
     };
 
     let mut rt = ConversationRuntime::new(
@@ -359,8 +425,19 @@ fn cmd_chat(
     }
 
     match mode {
-        Mode::OneShot(p) => run_one_shot(&mut rt, &p, json),
-        Mode::Interactive => run_repl(&mut rt),
+        Mode::OneShot(p) => {
+            // One-shot: streaming would interleave with the JSON
+            // output, so keep it non-streaming and print the full
+            // response at the end.
+            run_one_shot(&mut rt, &p, json)
+        }
+        Mode::Interactive => {
+            // REPL: subscribe to streaming so text appears as the
+            // model emits it. The renderer prints raw chunks
+            // (markdown rendering still happens at end of turn for
+            // the formatted block).
+            run_repl(&mut rt)
+        }
     }
 }
 
@@ -425,8 +502,7 @@ where
     use std::sync::Arc;
 
     let renderer = render::TerminalRenderer::new();
-    let theme = renderer.color_theme().clone();
-    let mut stderr = std::io::stderr();
+    let theme = *renderer.color_theme();
 
     let banner_title = format!("{}", "aegis chat".with(theme.aegis_brand).bold());
     println!();
@@ -535,36 +611,92 @@ where
             _ => {}
         }
 
-        // Spinner ticks on a background thread while the LLM thinks.
-        let spinner_running = Arc::new(AtomicBool::new(true));
-        let spin_flag = spinner_running.clone();
-        let spinner_theme = theme.clone();
-        let spinner_thread = std::thread::spawn(move || {
-            let mut spinner = render::Spinner::new();
-            let mut err = std::io::stderr();
-            while spin_flag.load(Ordering::Relaxed) {
-                let _ = spinner.tick("thinking…", &spinner_theme, &mut err);
-                std::thread::sleep(std::time::Duration::from_millis(80));
-            }
-            let _ = spinner.clear(&mut err);
-        });
+        // V3.8 — subscribe to streaming so text appears as the
+        // model emits it. We accumulate the streamed text into a
+        // buffer; once the turn completes, re-render the buffer as
+        // markdown for the final formatted block.
+        let prefix = format!("{}", "aegis>".with(theme.aegis_brand).bold());
+        println!("{prefix}");
+        print!("  ");
+        let _ = std::io::stdout().flush();
 
+        let streamed_buf: Arc<std::sync::Mutex<String>> =
+            Arc::new(std::sync::Mutex::new(String::new()));
+        let streamed_buf_for_cb = streamed_buf.clone();
+        let saw_stream_text: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let saw_stream_text_cb = saw_stream_text.clone();
+        let callback: Box<dyn FnMut(&aegis_agent::api::AssistantEvent) + Send> =
+            Box::new(move |ev: &aegis_agent::api::AssistantEvent| match ev {
+                aegis_agent::api::AssistantEvent::TextDelta(text) => {
+                    saw_stream_text_cb.store(true, Ordering::Relaxed);
+                    print!("{text}");
+                    let _ = std::io::stdout().flush();
+                    if let Ok(mut buf) = streamed_buf_for_cb.lock() {
+                        buf.push_str(text);
+                    }
+                }
+                aegis_agent::api::AssistantEvent::ToolUse { name, .. } => {
+                    eprintln!(
+                        "\n  {} {name}",
+                        "↳ tool_use:".with(crossterm::style::Color::DarkGrey)
+                    );
+                }
+                aegis_agent::api::AssistantEvent::MessageStop => {}
+            });
+
+        // Hand the callback to the runtime for this turn only. We
+        // re-build the runtime each turn? No — runtime persists, but
+        // the callback is tied to per-turn rendering. Use the
+        // builder method which replaces the field.
+        // (set + run + clear pattern)
+        rt.set_event_callback(Some(callback));
         let result = rt.run_turn(trimmed);
+        rt.set_event_callback(None);
 
-        spinner_running.store(false, Ordering::Relaxed);
-        let _ = spinner_thread.join();
-        let _ = stderr.flush();
-
-        let response_text = collect_last_assistant_text(rt);
-        if !response_text.is_empty() {
-            let prefix = format!("{}", "aegis>".with(theme.aegis_brand).bold());
+        // If streaming actually delivered text, end the line we've
+        // been writing into. Otherwise (Anthropic / Gemini today
+        // don't truly stream — they replay the full vec at the end),
+        // pull the final assistant text from the session and render
+        // it as markdown.
+        if saw_stream_text.load(Ordering::Relaxed) {
+            // Replace the raw streamed line with a markdown-rendered
+            // version for prettier final display.
+            println!();
+            let final_text = streamed_buf.lock().map(|s| s.clone()).unwrap_or_default();
+            // Move cursor up + clear lines covering the streamed
+            // raw text, then re-render with markdown styling. This
+            // keeps the streaming UX (text appears live) AND the
+            // markdown formatting (final block looks polished).
+            let raw_lines = (final_text.matches('\n').count() + 1) as u16;
+            use crossterm::cursor::MoveUp;
+            use crossterm::execute;
+            use crossterm::terminal::{Clear, ClearType};
+            let mut out = std::io::stdout();
+            let _ = execute!(out, MoveUp(raw_lines + 1), Clear(ClearType::FromCursorDown));
             println!("{prefix}");
-            // Render the response as markdown for prettier output.
-            let rendered = renderer.render_markdown(&response_text);
+            let rendered = renderer.render_markdown(&final_text);
             for line in rendered.lines() {
                 println!("  {line}");
             }
             println!();
+        } else {
+            // No streamed text — fall back to pulling final text from
+            // the session and markdown-rendering it.
+            let response_text = collect_last_assistant_text(rt);
+            // Erase the empty `aegis>\n  ` we printed pre-stream.
+            use crossterm::cursor::MoveUp;
+            use crossterm::execute;
+            use crossterm::terminal::{Clear, ClearType};
+            let mut out = std::io::stdout();
+            let _ = execute!(out, MoveUp(2), Clear(ClearType::FromCursorDown));
+            if !response_text.is_empty() {
+                println!("{prefix}");
+                let rendered = renderer.render_markdown(&response_text);
+                for line in rendered.lines() {
+                    println!("  {line}");
+                }
+                println!();
+            }
         }
 
         // Status footer — quiet on the boring path.

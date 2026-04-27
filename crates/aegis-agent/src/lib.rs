@@ -37,6 +37,7 @@ pub mod cost;
 pub mod hooks;
 pub mod mcp;
 pub mod message;
+pub mod multi_tool;
 pub mod permission;
 pub mod predict;
 pub mod providers;

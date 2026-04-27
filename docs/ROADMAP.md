@@ -93,6 +93,7 @@ agent has):
 | **V3.5** — Differentiation D | StalemateDetector at session level (3 successive identical cost totals → StoppedReason::StalemateDetected; matches aegis-runtime threshold for cadence parity) | ✅ Done (2026-04-27) |
 | **V3.6** — Hooks + permissions parity | PermissionPolicy with three modes (ReadOnly / WorkspaceWrite / DangerFullAccess); PreToolUseHookPredictor for shell-command hooks compatible with Claude Code's protocol (exit 2 = block) | ✅ Done (2026-04-27) |
 | **V3.7** — Session + compaction + dogfood | Session serde + atomic save_to / load_from; compact_drop_oldest helper; chat_demo example wiring all 3 providers end-to-end | ✅ Done (2026-04-27) |
+| **V3.8** — `aegis chat` CLI + REPL polish | `aegis chat` subcommand with one-shot / pipe / interactive REPL modes; markdown rendering + spinner + rustyline editor + slash-command tab completion (adapted from claw-code MIT); `/reset` clears session; ReadOnlyTools (Read/Glob/Grep) + `--tools` flag; MultiToolExecutor for combining sources; `--mcp` flag mounts MCP servers (including aegis-mcp) as additional tool sources; OpenAI-compat SSE streaming via `stream_with_callback` (non-streaming providers fall back to event-vec replay); per-event REPL rendering with markdown finalisation. Dogfood doc in [`v3_dogfood.md`](v3_dogfood.md). | ✅ Done (2026-04-27) |
 
 ---
 
