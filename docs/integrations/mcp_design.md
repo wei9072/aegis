@@ -1,15 +1,18 @@
-# MCP server design + minimum viable build
+# MCP server design + status
 
 The git-hook and GitHub-Action integrations protect at the **commit
 boundary**. They are post-hoc — by the time the hook fires, the
 LLM has already produced and saved its work.
 
-**Status (V0.x):** `validate_change` is implemented and shipped in
-the `aegis_mcp` package. `validate_diff` and `get_signals` from the
-design are deferred — added when external demand justifies them.
-Install with `pip install -e ".[mcp]"`, run with `aegis-mcp`. See
-[Configuration shape](#configuration-shape-illustrative) below for
-how to plug into Cursor / Claude Code.
+**Status (V1.10):** `validate_change` is shipped in the
+`aegis-mcp` Rust binary — hand-rolled JSON-RPC 2.0 over stdio,
+MCP protocol `2025-06-18`, ~250 LOC, zero Python at runtime.
+`validate_diff` and `get_signals` from the design are deferred
+until external demand justifies them.
+
+Install with `cargo install --path crates/aegis-mcp`, run with
+`aegis-mcp`. See [Configuration shape](#configuration-shape) below
+for how to plug into Cursor / Claude Code.
 
 The MCP server protects at the **decision boundary** — the agent
 calls Aegis *before* writing files, gets a verdict, and decides
@@ -17,11 +20,10 @@ what to do with it. This is the integration that fits Cursor,
 Claude Code, and any other MCP-aware client where the agent's
 loop is the unit of operation.
 
-This document pins the interface so an implementation (`aegis-mcp`)
-can be built without re-deriving the design. The build itself is
-deferred per
-[`docs/post_launch_discipline.md`](../post_launch_discipline.md) —
-build when external demand justifies the cost.
+This document pins the contract so future tools (`validate_diff`,
+`get_signals`) can be built consistently if real demand justifies
+them, per
+[`docs/post_launch_discipline.md`](../post_launch_discipline.md).
 
 ---
 
@@ -156,100 +158,117 @@ as auto-retry inside the pipeline.
 
 ---
 
-## Configuration shape (illustrative)
+## Configuration shape
 
-How a Claude Code / Cursor user would configure `aegis-mcp` once
-it's built:
+How a Claude Code / Cursor user wires up `aegis-mcp`:
 
 **Cursor** (`~/.cursor/mcp.json`):
-```jsonc
+```json
 {
   "mcpServers": {
     "aegis": {
-      "command": "aegis-mcp",
-      "args": ["serve"],
-      "env": {
-        "AEGIS_HOME": "/Users/me/code/aegis"
-      }
+      "command": "aegis-mcp"
     }
   }
 }
 ```
 
-**Claude Code** (`~/.claude/mcp_servers.json` or equivalent):
-```jsonc
+**Claude Code** (`.mcp.json` at project root, or `~/.claude.json`
+for global):
+```json
 {
-  "aegis": {
-    "command": "aegis-mcp",
-    "args": ["serve"]
+  "mcpServers": {
+    "aegis": {
+      "command": "aegis-mcp"
+    }
   }
 }
 ```
 
-After config, the agent automatically has the three tools available.
-No prompt-engineering needed; agents that support MCP discover and
-call tools opportunistically.
+`aegis-mcp` reads JSON-RPC over stdio; no flags or env vars are
+required. After config, restart the MCP client and `validate_change`
+becomes available to the agent automatically. Agents that support
+MCP discover and call tools opportunistically.
+
+### Optional: PreToolUse hook (Claude Code) for hard enforcement
+
+Soft prompting via CLAUDE.md asks the agent to call
+`mcp__aegis__validate_change` before edits — but the agent can
+ignore it. To **hard-enforce** that every Edit / Write / MultiEdit
+goes through `aegis check` first, drop a PreToolUse hook into
+`.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [{"type": "command", "command": ".claude/hooks/aegis-precheck.sh"}]
+      }
+    ]
+  }
+}
+```
+
+The hook synthesizes the post-edit content, runs `aegis check`
+on it, and exits non-zero (BLOCK) on Ring 0 / cost regression.
+A reference implementation is in
+[`templates/`](../../templates/).
 
 ---
 
-## Implementation sketch
+## Implementation
 
-When the build happens, `aegis-mcp` is roughly 200 lines of Python:
+The shipped server is in
+[`crates/aegis-mcp/`](../../crates/aegis-mcp/) — hand-rolled
+JSON-RPC 2.0 over stdio (~250 LOC, no `rmcp` dep). It links
+directly against `aegis-core` for Ring 0 + Ring 0.5 signal
+extraction.
 
-```python
-# aegis_mcp/server.py — illustrative, not the real implementation
-from mcp import Server  # python-mcp-sdk
-from aegis.enforcement.validator import Ring0Enforcer
-from aegis.policy.engine import PolicyEngine
-from aegis.analysis.signals import SignalLayer
+Entry-point logic for `validate_change` (paraphrased):
 
-server = Server("aegis")
-
-@server.tool("validate_change")
-def validate_change(path: str, new_content: str, old_content: str | None = None):
-    # 1. Write new_content to a temp file
-    # 2. Run Ring0Enforcer on it
-    # 3. Run SignalLayer extract → PolicyEngine evaluate
-    # 4. If old_content supplied: extract signals on both, compute regression
-    # 5. Aggregate into the verdict shape above and return
-    ...
-
-# ... validate_diff, get_signals same shape
-
-if __name__ == "__main__":
-    server.run_stdio()
+```rust
+// 1. Write new_content to a temp file with the right extension
+// 2. Run aegis-core::ast::analyze_file_native on it (Ring 0 syntax + Ring 0.5 signals)
+// 3. If old_content supplied:
+//      - same on a temp file for old_content
+//      - cost_after = sum(signals_after.values), cost_before = sum(signals_before.values)
+//      - regressed = cost_after > cost_before
+// 4. Map to {decision, reasons, signals_after, regression_detail}
+// 5. Return as JSON-RPC tool result
 ```
 
-The aegis-internal types (`Ring0Enforcer`, `SignalLayer`,
-`PolicyEngine`) all already exist. The MCP server is a thin
-adapter — no new decision logic.
+No new decision logic — the MCP server is a thin adapter over the
+same Ring 0 + Ring 0.5 + cost regression that `aegis check` and
+`aegis pipeline run` use.
+
+Install + run:
+
+```bash
+cargo install --path crates/aegis-mcp
+aegis-mcp        # starts MCP server on stdio
+```
+
+Then configure your MCP client per [Configuration shape](#configuration-shape)
+above.
 
 ---
 
 ## Status
 
-✅ **`validate_change` shipped in `aegis_mcp/server.py`.**
+✅ **`validate_change` shipped in `aegis-mcp` (V1.10).**
 🟡 `validate_diff` + `get_signals` deferred until external demand
    justifies them (per
    [`docs/post_launch_discipline.md`](../post_launch_discipline.md)
    — wait for an issue saying "I need them for X").
 
-The implementation is ~150 lines of Python wrapping existing aegis
-types (`Ring0Enforcer`, `SignalLayer`, `PolicyEngine`); the contract
-above is what got built. Tested at
-[`tests/test_mcp_server.py`](../../tests/test_mcp_server.py),
-including a structural test pinning the "reasons must be
-machine-parseable, not coaching" rule.
-
-Install + run:
-
-```bash
-pip install -e ".[mcp]"
-aegis-mcp        # starts MCP server on stdio
-```
-
-Then configure your MCP client per [Configuration shape](#configuration-shape-illustrative)
-above.
+The "reasons must be machine-parseable, not coaching" rule is
+structurally enforced — `validate_change`'s response shape carries
+no natural-language explanation field, and the
+`crates/aegis-decision/tests/contract.rs` test pins that
+`TaskVerdict` cannot grow `retry/feedback/hint/advice/guidance`
+fields.
 
 ---
 

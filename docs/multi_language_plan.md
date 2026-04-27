@@ -1,17 +1,20 @@
 # Multi-language support plan
 
-> **⚠️ SUPERSEDED — 2026-04-26.** This document has been folded
-> into [`docs/v1_rust_port_plan.md`](v1_rust_port_plan.md). The
-> per-language work originally planned here is now V1.4–V1.7 of
-> the Rust port (the `LanguageAdapter` trait moves into Rust
-> without a PyO3 boundary, which makes the implementation cleaner
-> than the originally-planned Python+Rust hybrid).
+> **⚠️ SUPERSEDED — V1.4–V1.7 of the Rust port shipped this work
+> in 2026-04-26.** All 10 Tier A languages (Python, TypeScript,
+> JavaScript, Go, Java, C#, PHP, Swift, Kotlin, Dart) are live in
+> the Rust workspace; run `aegis languages` for the live registry.
+> Per-phase status is at the bottom of this file.
 >
-> **Read `v1_rust_port_plan.md` for the canonical schedule.** This
-> file is preserved unmodified below as the design rationale for
-> the language abstractions (still valid: trait shape, per-language
-> checklist, risks, out-of-scope). Don't drive new work from this
-> file.
+> **What survives as canonical:** the `LanguageAdapter` trait shape
+> (now in `crates/aegis-core/src/ast/adapter.rs`), the per-language
+> checklist below, and the risks list. The Python module / `pytest`
+> / `pip install -e .` references throughout are V0.x history —
+> the Rust equivalents are `cargo test --workspace` and adapter
+> files under `crates/aegis-core/src/ast/languages/`.
+>
+> **Don't drive new work from this file.** For Tier B (Vue / Angular
+> / Flutter) follow-ups, see [`ROADMAP.md`](ROADMAP.md) backlog.
 
 ---
 

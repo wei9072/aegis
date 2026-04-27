@@ -1,7 +1,9 @@
 # Post-launch discipline — what Aegis does NOT do (yet)
 
-Aegis V0.x is open. The design philosophy is sharp, the mechanism
-is shipped, the V1.6 evidence is in. The hard part now is
+Aegis V1.10 ships as a single Rust workspace, zero Python at
+runtime. The design philosophy is sharp, the mechanism is shipped,
+the Python-era V1.6 evidence is preserved in
+[`v1_validation.md`](v1_validation.md). The hard part now is
 **resisting the urge to add features** before the framework gets
 validated by real-world use.
 
@@ -25,12 +27,13 @@ The discipline is from a roadmap conversation summarised as:
 
 ### 1. No new features
 
-The 8 in-pipeline gates + multi-turn pipeline + Layer C verifier +
-V1.1 stalemate / thrashing detection + V1.5 5-family evidence +
-V1.6 stalemate verification ship one **complete, testable
-mechanism**. Adding new gate types, new decision patterns, new
-verifier classes, etc. *before* external users have stress-tested
-the existing surface produces:
+The 6 surviving gates (Ring 0 syntax, Ring 0.5 fan-out + chain
+depth, cost regression, PlanValidator, Executor + Snapshot,
+Stalemate / Thrashing detector) + Layer C verifier contract +
+V1.5 5-family evidence + V1.6 stalemate verification ship one
+**complete, testable mechanism**. Adding new gate types, new
+decision patterns, new verifier classes, etc. *before* external
+users have stress-tested the existing surface produces:
 
 - **Premature complexity** — features no real user asked for, but
   whose maintenance cost is real.
@@ -43,49 +46,57 @@ question: *did a real user hit a wall that this PR removes?* If
 the answer is "this would be useful for hypothetical X", the PR
 should become a discussion thread instead.
 
-### 2. No abstraction extraction (no `aegis-core` yet)
+### 2. No domain-agnostic framework extraction
 
 [`docs/future_abstraction.md`](future_abstraction.md) documents the
-framework-vs-plugin split that *will eventually* exist. It also
-documents the three trigger conditions that must **all** be met
-before extraction starts:
+framework-vs-plugin split that *will eventually* exist (the
+code-generation specifics in `crates/aegis-runtime` and
+`crates/aegis-providers` separate from the truly domain-independent
+loop primitives in `crates/aegis-trace` + `crates/aegis-decision`).
+It also documents the three trigger conditions that must **all**
+be met before extraction starts:
 
 1. V2 feature-complete (Gap 3 implemented; Adaptive Policy at least
    prototyped)
-2. At least one second-domain pilot exists
+2. At least one second-domain pilot exists (database migration,
+   canary deploy, etc.)
 3. The pilot exposed ≥1 friction point telling us which abstraction
    is wrong
 
-Until all three trigger, **no `aegis-core` package, no plugin
-registry, no domain-agnostic API**. Extracting earlier freezes
-accidental code-gen specifics into the framework contract.
+Until all three trigger, **no separate `aegis-framework` crate, no
+plugin registry, no domain-agnostic public API**. The current
+crate split (`aegis-trace` / `aegis-decision` / `aegis-runtime`
+/ etc.) already telegraphs the future shape; extracting earlier
+would freeze accidental code-gen specifics into the framework
+contract.
 
 ### 3. No policy learning / scoring / trust score
 
-[`ROADMAP.md` §4.3](ROADMAP.md) describes Adaptive Policy — a
-trust-score system that would learn which decision patterns to
-trigger differently based on past behavior. It's intentionally
-deferred to V2+ because it requires *training data* that only
-exists once Gap 1, Gap 2, and Gap 3 have collected enough real
-traffic.
+Adaptive Policy — a trust-score system that would learn which
+decision patterns to trigger differently based on past behavior —
+is **explicitly off the roadmap**. It would shift Aegis from
+"rejector" to "optimizer". See [ROADMAP.md](ROADMAP.md)'s
+"Explicitly NOT on the roadmap" section.
 
-PRs that add learned policy / scoring / ranking layers before this
-data exists will be declined. The data has to come first.
+PRs that add learned policy / scoring / ranking layers will be
+declined regardless of how much data accumulates. The framing is
+the constraint.
 
 ### 4. No SDK / REST API / UI / dashboard
 
-Aegis V0.x has two surfaces: Python library (the product) and CLI
-(the demo wrapper). That's it.
+Aegis V1.10 has two surfaces: the `aegis` CLI binary and the
+`aegis-mcp` stdio MCP server. That's it.
 
-A proper SDK across multiple languages, a hosted REST API for
-non-Python callers, a UI for browsing decision traces, a dashboard
+A polished SDK across multiple languages, a hosted REST API for
+remote callers, a UI for browsing decision traces, a dashboard
 for run history — all are reasonable products to build *on top of*
 Aegis. They are **not Aegis itself**. They live in separate
-projects, called by Aegis's API.
+projects that shell out to `aegis` or talk to `aegis-mcp` over
+stdio.
 
 If a consumer wants Aegis exposed via REST or a UI, that's a
-wrapper repository they own. The Aegis core stays as a Python
-library + CLI only.
+wrapper repository they own. The Aegis core stays as a Rust
+binary + MCP server only.
 
 ### 5. No auto-retry / verifier-feedback loop
 
@@ -107,10 +118,11 @@ work into an optimizer that bends invariants in pursuit of
 satisfying an external goal. **That's the opposite of why Aegis
 exists.**
 
-Test enforcement: `tests/test_task_verifier.py::test_task_verdict_has_no_feedback_field`
-fails on any field name containing `retry / feedback / hint /
-advice / guidance`. PR authors who want to weaken this test owe a
-framing-level conversation before the merge.
+Test enforcement: `crates/aegis-decision/tests/contract.rs`
+fails on any `TaskVerdict` field name containing `retry / feedback
+/ hint / advice / guidance`, and pins `TaskVerifier` as a
+single-method trait. PR authors who want to weaken these tests owe
+a framing-level conversation before the merge.
 
 ---
 
@@ -122,21 +134,18 @@ contributors:
 - **Integration examples** ([issue draft](launch/issue_integration_examples.md))
   — Aegis embedded inside an existing agent / CI / IDE plugin.
 - **Thrashing case evidence** ([issue draft](launch/issue_thrashing_call.md))
-  — real Aegis runs producing `THRASHING_DETECTED` traces.
-- **Build friction reports** ([issue draft](launch/issue_rust_build_friction.md))
-  — specific OS + workflow reports of where Rust extension setup
-  failed.
-- **New scenario contributions** — adding a `tests/scenarios/<name>/`
-  directory with input + scenario.py + verifier.py. Even
-  scenarios where the model-of-the-day fails are useful, because
-  they characterize the failure mode in the decision-pattern
-  vocabulary.
+  — real `aegis pipeline run` traces producing `THRASHING_DETECTED`.
+- **Cross-platform install reports** — specific OS + workflow
+  reports of where `cargo install --path crates/aegis-cli` fails.
+- **New language adapters** — one Cargo dep + one adapter file
+  under `crates/aegis-core/src/ast/languages/` + one `.scm` query.
+  Per-language checklist is in
+  [`multi_language_plan.md`](multi_language_plan.md).
 - **Documentation fixes** — anything in `docs/` or `README.md` that
   misrepresents the current state.
-- **Provider additions** — new `LLMProvider` subclass for a model
-  family not yet covered (e.g. Anthropic via the Anthropic SDK,
-  Mistral, Cohere, etc.). Mirror the shape of
-  `aegis/agents/groq.py`.
+- **Provider additions** — new `LLMProvider` impl in
+  `crates/aegis-providers/` for a model family not yet covered
+  (e.g. Anthropic, Mistral, Cohere). Mirror `OpenAIChatProvider`.
 
 ---
 

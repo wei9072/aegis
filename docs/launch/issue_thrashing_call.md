@@ -29,11 +29,11 @@ executor reverts — and then on the *next* iteration the same thing
 happens again.
 
 When that pattern is detected, Aegis emits `THRASHING_DETECTED`
-([decision_pattern.py][1]) and terminates the loop with the reason
-`"thrashing detected — 2 consecutive regression rollbacks; further
-iterations would burn budget"`.
+([decision pattern crate][1]) and terminates the loop with the
+reason `"thrashing detected — 2 consecutive regression rollbacks;
+further iterations would burn budget"`.
 
-[1]: https://github.com/wei9072/aegis/blob/main/aegis/runtime/decision_pattern.py
+[1]: https://github.com/wei9072/aegis/blob/main/crates/aegis-decision/src/pattern.rs
 
 ### Why we don't have evidence yet
 
@@ -65,20 +65,23 @@ Any of the following is useful evidence:
 
 ```bash
 git clone https://github.com/wei9072/aegis && cd aegis
-pip install -e .  # (build instructions in README)
+cargo install --path crates/aegis-cli --locked
 
-# Drop your scenario in tests/scenarios/<name>/ then:
-PYTHONPATH=. python scripts/v1_validation.py \
-    --scenarios <your-scenario> \
-    --models openrouter:<your-model>:free \
-    --runs 5
-
-# Snapshots land in tests/scenarios/<name>/runs/*.json
+# Run a real pipeline against your task on a small workspace where
+# you suspect the LLM will keep making cost-regressing patches.
+export AEGIS_PROVIDER=openrouter
+export AEGIS_MODEL=<your-model>
+export OPENROUTER_API_KEY=...
+aegis pipeline run \
+  --task "<a task you suspect causes regression>" \
+  --root <small-test-workspace> \
+  --max-iters 5 \
+  --json > thrashing_run.json
 ```
 
-If any run's `observed_patterns` array contains
-`"thrashing_detected"`, that's the evidence we need. Attach the JSON
-file (or paste the relevant excerpt).
+If `thrashing_run.json` contains an iteration with
+`"decision_pattern": "thrashing_detected"`, that's the evidence
+we need. Attach the JSON file (or paste the relevant excerpt).
 
 ### Why this is open-call instead of dev-team-fixes-it
 
@@ -89,13 +92,13 @@ teaching models what is good, it rejects outcomes that make the
 system worse." That framing implies: validation comes from real
 traffic, not from synthetic test cases.
 
-The thrashing detector works in unit tests
-([tests/test_decision_pattern.py][2]) but unit tests can't tell us
-whether real-world LLM behavior exercises this code path. If your
-agent pipelines through Aegis and you see thrashing fire, please
-share — that's how the framework gets validated.
+The thrashing detector works in cargo tests
+([crates/aegis-runtime/src/loop_step.rs][2]) but unit tests can't
+tell us whether real-world LLM behavior exercises this code path.
+If your agent pipelines through Aegis and you see thrashing fire,
+please share — that's how the framework gets validated.
 
-[2]: https://github.com/wei9072/aegis/blob/main/tests/test_decision_pattern.py
+[2]: https://github.com/wei9072/aegis/blob/main/crates/aegis-runtime/src/loop_step.rs
 
 ### What success looks like
 

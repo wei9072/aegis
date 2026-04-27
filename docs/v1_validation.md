@@ -1,24 +1,30 @@
 # V1 validation evidence
 
+> **⚠ Python-era data preserved as historical evidence.** All sweep
+> numbers below were collected on the V0.x Python pipeline before
+> the V1.10 Rust port. The sweep scripts (`scripts/v1_validation.py`,
+> `scripts/v1_aggregate.py`) and the Python test suite have been
+> deleted. The **framing** in this document is canonical and still
+> applies; the **layer evidence** (L1–L5 + Layer C) was correct
+> at the time it was collected and is preserved as the V1
+> close-out record. Re-validation against the Rust pipeline is
+> tracked as V1.8 in [`v1_rust_port_plan.md`](v1_rust_port_plan.md)
+> — gated on LLM API budget, not code.
+
 This document is the V1 charter close-out: the V1 push shipped the
-mechanism (8 in-pipeline gates + DecisionTrace + multi-turn rollback
+mechanism (in-pipeline gates + DecisionTrace + multi-turn rollback
 loop), but the **claim** — "Aegis is a decision-system that observes,
 judges, rolls back, and re-plans" — needs evidence across five
 orthogonal layers, not just unit tests.
 
-The data here was gathered by `scripts/v1_validation.py` — a sweep of
-4 scenarios × 5 runs × 3 model families (60 runs total) — and
-aggregated by `scripts/v1_aggregate.py` from
-`tests/scenarios/<name>/runs/*.json`. Snapshots from the dev sessions
-that *built* V1 are archived under `runs_pre_v1/` so the data here is
-exclusively post-V1-mechanism.
-
-Reproducing the sweep:
-
-```bash
-PYTHONPATH=. python scripts/v1_validation.py
-PYTHONPATH=. python scripts/v1_aggregate.py > docs/v1_validation_runs.md
-```
+The data here was gathered by the V0.x `scripts/v1_validation.py`
+— a sweep of 4 scenarios × 5 runs × 3 model families (60 runs
+total) — and aggregated by `scripts/v1_aggregate.py` from
+`tests/scenarios/<name>/runs/*.json`. Snapshots from the dev
+sessions that *built* V1 were archived under `runs_pre_v1/` so the
+data is exclusively post-V1-mechanism. Both the scripts and the
+snapshots were deleted as part of the V1.10 Python deletion;
+the aggregate findings below are what survives.
 
 ---
 

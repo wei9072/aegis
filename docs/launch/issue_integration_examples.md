@@ -11,55 +11,52 @@ Copy the body below into a new GitHub issue. Suggested labels:
 
 ## Body
 
-The four scripts in [`examples/`](../../examples/) cover the core
-library patterns (multi-turn pipeline, single-call gateway, custom
-verifier, decision-trace consumption). They're deliberately
-minimal — single-file, copy-runnable, no external integration.
+V1.10 ships two binaries (`aegis` + `aegis-mcp`) and three
+ready-to-use integration paths (pre-commit hook, GitHub Action,
+MCP server) — see [`docs/integrations/`](../integrations/) for
+paste-ready templates.
 
-The next layer of evidence the project needs is **integration
-examples** — Aegis embedded inside something else. We'd like to
-collect 3-5 of these as `examples/integration/` so future readers
-can see realistic shapes:
+The next layer of evidence the project needs is **real-world
+integration examples** — Aegis embedded inside something
+non-template that exercises one of the paths under real traffic.
+We'd like to collect 3-5 of these so future readers can see
+realistic shapes:
 
 ### Wanted shapes
 
-1. **Wrap an existing AI coding agent.** Aider, Claude Code,
-   Cursor, custom orchestrators — anything that has its own
-   plan-execute loop. Show how Aegis's gateway / pipeline plugs in
-   as a control layer. Bonus points if the agent's behavior changes
-   visibly when Aegis rejects a step.
+1. **Wrap an existing AI coding agent (real PreToolUse / MCP).**
+   Claude Code, Cursor, Aider, custom orchestrators — anything
+   that calls `aegis-mcp validate_change` mid-loop or runs the
+   PreToolUse hook on every Edit/Write. Bonus points if the
+   agent's behavior changes visibly when Aegis rejects a step.
 
-2. **Run as a CI gate.** GitHub Actions / GitLab CI / Jenkins
-   workflow that runs Aegis against an LLM-proposed PR diff before
-   merging. Decision pattern → CI status check. Even a no-op skeleton
-   is useful as a starting point.
+2. **Run as a CI gate on a real repo.** Take the GitHub Action
+   template from
+   [`docs/integrations/github_action.md`](../integrations/github_action.md)
+   and report what broke / what surprised you on a real PR
+   workload.
 
-3. **MCP server.** Aegis exposed as an MCP tool, so any
-   MCP-supporting IDE (Claude Code, Cursor, etc.) can call it as a
-   sandboxed code-modification layer. We've sketched this in the
-   roadmap but no implementation yet.
+3. **Pre-commit hook on a polyglot repo.** Take the template
+   from
+   [`docs/integrations/git_pre_commit.md`](../integrations/git_pre_commit.md)
+   and report whether the multi-language coverage is right for
+   your repo, what false positives you hit, etc.
 
-4. **Pre-commit / lint integration.** No-LLM use of Aegis's
-   structural checks (`Ring0Enforcer`, `SignalLayer`) as a
-   pre-commit hook. Aegis already supports this via
-   `examples/02_gateway_single_call.py`'s underlying APIs but a
-   dedicated example would help.
-
-5. **Your own domain.** If you're trying to use Aegis for something
-   that isn't code-gen — database migration, config rollout, RL
-   policy iteration, etc. — share the integration even if it's
-   half-finished. See
+4. **Your own domain.** If you're trying to use Aegis for
+   something that isn't code-gen — database migration, config
+   rollout, RL policy iteration, etc. — share the integration
+   even if it's half-finished. See
    [`docs/future_abstraction.md`](../future_abstraction.md) for
    how non-code domains map to Aegis's primitives.
 
 ### How to contribute
 
-- **Quick & dirty** — paste your script in this issue, even if it's
-  rough. We'll figure out together whether it becomes an upstreamed
-  example or stays as a reference.
-- **Polished** — open a PR adding a directory under
-  `examples/integration/<your-shape>/` with a README explaining the
-  what / why / how-to-run.
+- **Quick & dirty** — paste your wrapper / config in this issue,
+  even if it's rough. We'll figure out together whether it
+  becomes an upstreamed template or stays as a reference.
+- **Polished** — open a PR adding a section to the relevant
+  doc under [`docs/integrations/`](../integrations/) with a
+  worked example.
 
 ### What we're NOT looking for
 

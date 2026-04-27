@@ -58,8 +58,23 @@ Otherwise, the system rolls back to Sₙ.
 ```
 
 Cost-aware rollback is the only cross-iteration consistent criterion.
-Other checks (validation, policy, structural constraints)
-act as local guards, not global direction signals.
+Other checks (validation, structural constraints) act as local
+guards, not global direction signals.
+
+### What actually gets checked (V1.10, six layers)
+
+| Layer | Checks | Where it runs |
+| :--- | :--- | :--- |
+| **Ring 0** — syntax | tree-sitter parse; ERROR / MISSING node → BLOCK | `aegis check`, MCP, pipeline |
+| **Ring 0.5** — structural signals | `fan_out` (unique imports), `max_chain_depth` (longest method chain) — numeric only | `aegis check`, MCP, pipeline |
+| **Cost regression** | `sum(signals_after) > sum(signals_before)` → BLOCK / ROLLBACK | MCP (when `old_content` given), pipeline (every iter) |
+| **PlanValidator** | path safety / scope / dangerous_path / virtual-FS simulation | `aegis pipeline run` only |
+| **Executor + Snapshot** | atomic apply with backup-dir rollback | `aegis pipeline run` only |
+| **Stalemate / Thrashing detector** | sequence-level; halts the loop with a named reason | `aegis pipeline run` only |
+
+`aegis check` and the MCP server expose the first three layers
+(single-file judgement); the multi-turn pipeline adds the last
+three (cross-iteration loop control).
 
 ---
 
@@ -215,11 +230,11 @@ Index + per-path detail: [`docs/integrations/`](docs/integrations/).
 
 | Layer | State | Notes |
 | :--- | :--- | :--- |
-| Execution Engine | ✅ | Pipeline + Executor + cost-aware regression rollback. Native Rust loop in `aegis-runtime::native_pipeline` (V1.3 / V1.9). |
-| Policy Enforcement | ✅ | Ring 0 (syntax) + Ring 0.5 (structural signals — fan-out, max chain depth) shared by `aegis check` + `aegis pipeline run` + `aegis-mcp validate_change`. The V0.x Python-only gates (PolicyEngine, DeliveryRenderer, ToolCallValidator T1+T2, IntentClassifier, IntentBypassDetector) were not part of the Rust port and got removed in V1.10 — see plan doc. |
-| Decision Trace | ✅ | `DecisionTrace` + 10 `DecisionPattern` + 5-pattern `TaskVerdict`; cross-model evidence in [`docs/v1_validation.md`](docs/v1_validation.md) (Python-era data; V1.8 Rust re-validation is gated on API quotas). |
+| Execution Engine | ✅ | Pipeline + Executor + cost-aware regression rollback. Native Rust loop in `aegis-runtime::native_pipeline`. |
+| Static analysis | ✅ | Ring 0 (syntax) + Ring 0.5 (`fan_out`, `max_chain_depth`) shared by `aegis check` + `aegis pipeline run` + `aegis-mcp validate_change`. |
+| Decision Trace | ✅ | `DecisionTrace` + 10-value `DecisionPattern` + 5-value `TaskVerdict`; Python-era cross-model evidence in [`docs/v1_validation.md`](docs/v1_validation.md). Rust re-validation is gated on LLM API budget (V1.8). |
 | MCP server | ✅ | `aegis-mcp` — hand-rolled JSON-RPC 2.0 over stdio; one tool: `validate_change` per [`docs/integrations/mcp_design.md`](docs/integrations/mcp_design.md). |
-| Eval Harness | 🟡 | Deterministic scenario runner not yet ported to Rust. The Rust pipeline can be driven scenario-by-scenario via `aegis pipeline run`; batch sweeps need a new `aegis sweep` subcommand (V1.8 follow-up). |
+| Cross-model sweep harness | 🟡 | `aegis pipeline run` works scenario-by-scenario; batch sweep (`aegis sweep`) is V1.8 backlog — gated on API budget. |
 | Feedback Layer | ❌ | Out of scope by design — see [Non-goals](#non-goals) and [Critical Principle](docs/gap3_control_plane.md#critical-principle). Structurally enforced by `crates/aegis-decision/tests/contract.rs`. |
 
 ### Supported source languages (Ring 0 + Ring 0.5 signals)
@@ -248,9 +263,9 @@ LLM provider). Run `aegis languages` for the live registry.
 AST shape; per-language overrides are the planned fix path
 (`LanguageAdapter::max_chain_depth`).
 
-Adding a language is one Cargo dep + one adapter file + one
-`.scm` query — see
-[`docs/multi_language_plan.md#per-language-work-checklist`](docs/multi_language_plan.md#per-language-work-checklist).
+Adding a language is one Cargo dep + one adapter file under
+`crates/aegis-core/src/ast/languages/` + one `.scm` query —
+checklist in [`docs/multi_language_plan.md#per-language-work-checklist`](docs/multi_language_plan.md#per-language-work-checklist).
 
 ---
 
@@ -265,5 +280,7 @@ Adding a language is one Cargo dep + one adapter file + one
 
 MIT — see [`LICENSE`](LICENSE).
 
-V0.x — interface is stable, package structure (`pyproject.toml` /
-PyPI wheels) is not yet.
+V1.10 — Rust workspace, zero Python at runtime. Cross-platform
+release artifacts (Homebrew, npm, GitHub Releases) are templated
+under [`packaging/`](packaging/); activation is the V2.0 milestone
+in [`docs/v1_rust_port_plan.md`](docs/v1_rust_port_plan.md).

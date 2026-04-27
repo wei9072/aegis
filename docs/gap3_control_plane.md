@@ -1,19 +1,27 @@
 # Gap 3 — Control Plane (design, not implementation)
 
+> **Code blocks below are Python-syntax for readability — the
+> actual implementation will land in Rust (`crates/aegis-runtime/`
+> or a new `crates/aegis-control/`). The trait shape, the
+> `should_stop` / `StopVerdict` / `HumanVerdict` semantics, and
+> the Critical Principle are language-agnostic and survive the
+> Rust port unchanged.**
+
 This document defines the *interface* between the pipeline (which
 detects) and the controller (which decides what to do about
-detection). It does not specify implementation. Code lands after the
-V1.5 sweep produces evidence about *which* detection points humans
-actually need to be in the loop for.
+detection). It does not specify implementation. Code lands after
+the V1.5 sweep produces evidence about *which* detection points
+humans actually need to be in the loop for.
 
-The doc exists now (before V1.5 sweep finishes) because Gap 1
-([V1.1 — stalemate / thrashing detection][1]) deliberately built
-detection *and* termination into `pipeline._run_loop` together. That
-coupling is a known technical debt — `_step` returns a
-`terminate_reason` and the loop returns immediately, mixing
-observation with control. Gap 3 is the structural fix. Writing code
-before nailing the interface risks producing a first-pass HITL that
-needs to be torn out for the same reason.
+The doc was written when Gap 1 (stalemate / thrashing detection)
+deliberately built detection *and* termination into the loop
+together — the V0.x `pipeline._run_loop` mixed observation with
+control via `_step → terminate_reason`. The Rust port preserved
+that coupling in `aegis-runtime::loop_step::step_decision` for
+parity. Gap 3 is the structural fix: the controller becomes
+caller-injected, not loop-internal. Writing code before nailing
+the interface risks producing a first-pass HITL that needs to be
+torn out for the same reason.
 
 [1]: ./v1_validation.md#layer-by-layer-reading
 
@@ -300,7 +308,8 @@ section before any implementation work begins.
 2. **Update §3 (escalation policy) with evidence.** Triggers that
    never fire in real traffic don't need default escalation rules.
 3. **Implement `StopVerdict` + `NextAction` enums** in
-   `aegis/runtime/control.py`. Pure data, no logic.
+   `crates/aegis-runtime/src/control.rs` (or a new `aegis-control`
+   crate). Pure data, no logic.
 4. **Add `should_stop=` parameter to `pipeline.run()`.** Default
    `None`. Refactor `_step` so its `terminate_reason` becomes
    a derived `StopVerdict` produced *only* when `should_stop` is

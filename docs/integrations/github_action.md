@@ -24,6 +24,17 @@ on:
     branches: [main]
     paths:
       - "**/*.py"
+      - "**/*.ts"
+      - "**/*.tsx"
+      - "**/*.js"
+      - "**/*.jsx"
+      - "**/*.go"
+      - "**/*.java"
+      - "**/*.cs"
+      - "**/*.php"
+      - "**/*.swift"
+      - "**/*.kt"
+      - "**/*.dart"
 
 jobs:
   ring0:
@@ -31,43 +42,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # --- Build Aegis from source (V0.x — no PyPI yet) ---
-      # When PyPI wheels ship, replace these three steps with:
-      #   pip install aegis-control-plane
+      # --- Install Aegis from a pinned source build ---
+      # When V2.0 release artifacts ship, replace these with
+      # `wget` of the pre-built linux-x86_64 tarball.
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/checkout@v4
         with:
           repository: wei9072/aegis
           path: _aegis
+          ref: main          # pin to a commit SHA for reproducibility
 
-      - name: Install Aegis
-        # Single-step install via maturin mixed-mode (configured in
-        # the cloned aegis repo's pyproject.toml). Builds the Rust
-        # extension AND installs the Python package AND registers
-        # the `aegis` CLI on PATH.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            _aegis/target
+          key: ${{ runner.os }}-aegis-${{ hashFiles('_aegis/Cargo.lock') }}
+
+      - name: Install aegis CLI
         working-directory: _aegis
-        run: pip install -e .
+        run: cargo install --path crates/aegis-cli --locked
 
-      # --- Run Ring 0 against the PR's changed Python files ---
+      # --- Run Ring 0 against the PR's changed source files ---
       - name: Run Aegis check on PR diff
         run: |
-          # Files changed in this PR (excluding deletions).
+          EXT_PATTERN='\.(py|pyi|ts|tsx|mts|cts|js|mjs|cjs|jsx|go|java|cs|php|phtml|swift|kt|kts|dart)$'
           files=$(git diff --name-only --diff-filter=ACM \
                     "${{ github.event.pull_request.base.sha }}" \
                     "${{ github.event.pull_request.head.sha }}" \
-                  | grep '\.py$' || true)
+                  | grep -E "$EXT_PATTERN" || true)
           if [ -z "$files" ]; then
-            echo "No Python changes — skipping."
+            echo "No supported source changes — skipping."
             exit 0
           fi
-          PYTHONPATH=_aegis python -m aegis.cli check $files
+          echo "$files" | xargs aegis check
 ```
 
 That's it. Push the workflow file, every subsequent PR gets a
@@ -81,10 +91,10 @@ Successful run:
 
 ```
 ✓ Aegis Ring 0 passed
-   Checked 4 Python files; no Ring 0 violations.
+   Checked 4 source files; no Ring 0 violations.
 ```
 
-Failed run (e.g. PR introduces a syntax error):
+Failed run (PR introduces a syntax error):
 
 ```
 ✗ Aegis Ring 0 failed
@@ -98,14 +108,14 @@ verdict before approving.
 
 ## Pinning the Aegis version
 
-The workflow above clones `wei9072/aegis@HEAD`. For reproducible
-PR checks, pin a specific commit:
+The workflow above clones `wei9072/aegis@main`. For reproducible
+PR checks, pin to a commit SHA or a release tag:
 
 ```yaml
       - uses: actions/checkout@v4
         with:
           repository: wei9072/aegis
-          ref: 3efff25  # or a tag once we cut releases
+          ref: v0.1.0        # or a commit SHA
           path: _aegis
 ```
 
@@ -113,36 +123,17 @@ Renovate / Dependabot can bump this like any other dependency.
 
 ---
 
-## Caching the Rust build
-
-The workflow as shown rebuilds the Rust extension on every PR.
-Cache it for ~10× faster subsequent runs:
-
-```yaml
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            _aegis/aegis-core-rs/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('_aegis/aegis-core-rs/Cargo.lock') }}
-```
-
-Insert this between "Set up Rust toolchain" and "Install Aegis".
-
----
-
 ## What Aegis doesn't gate (yet)
 
 Same as the pre-commit hook:
 
-- Ring 0 only (no cost-aware regression — needs HEAD-vs-PR-tip
-  signal comparison; future work)
+- Ring 0 only (no cost-aware regression — would need a
+  base-vs-head signal comparison; tracked as backlog in
+  [`ROADMAP.md`](../ROADMAP.md))
 - No LLM-backed gates run in CI (those need API keys + would slow
   the PR check unacceptably)
 
-For agents that iterate on code in CI (e.g., AI-assisted refactor
+For agents that iterate on code in CI (e.g. AI-assisted refactor
 bots), the [MCP server](mcp_design.md) is the right surface — the
 agent calls Aegis turn-by-turn during its run, not just at PR
 submission.
@@ -163,16 +154,18 @@ Settings → Branches → Branch protection rule → main →
 
 ---
 
-## Future cleanup
+## Future cleanup (post-V2.0 release)
 
-When PyPI wheels ship:
+Once `aegis` ships as a pre-built binary on GitHub Releases, the
+install steps shrink to ~3 lines:
 
 ```yaml
-      - run: pip install aegis-control-plane
-      - run: |
-          files=$(git diff --name-only --diff-filter=ACM ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }} | grep '\.py$' || true)
-          [ -n "$files" ] && aegis check $files
+      - name: Install aegis
+        run: |
+          wget -q -O- https://github.com/wei9072/aegis/releases/latest/download/aegis-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          sudo mv aegis /usr/local/bin/
 ```
 
-10 lines instead of 30. The current verbose form is V0.x install
-friction, not a permanent design choice.
+Drop the cargo cache, the `dtolnay/rust-toolchain` setup, and the
+checkout of the `_aegis` repo entirely. The current verbose form
+is V1.10 install friction, not a permanent design choice.

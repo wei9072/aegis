@@ -2,39 +2,42 @@
 
 The fastest way to add Aegis to your workflow: a shell hook that
 runs every time you `git commit`. If your AI tool just produced
-something that fails Ring 0 (syntax error, circular dependency,
-etc.), the commit is blocked and you see why.
+something that fails Ring 0 (syntax error) or that you want to
+check for structural signals, the commit is blocked and you see
+why.
 
-**Workflow change for you:** install the hook once. After that,
-zero — Aegis only surfaces when it actually catches something.
+**Workflow change for you:** install `aegis` once, drop the hook
+into your repo. After that, zero — Aegis only surfaces when it
+actually catches something.
 
 ---
 
-## V0.x install workaround
+## One-time setup
 
-Aegis doesn't have a PyPI package yet (tracked at
-[`docs/launch/issue_rust_build_friction.md`](../launch/issue_rust_build_friction.md)).
-Until it does, point the hook at a local clone of the repo via
-an environment variable.
-
-### One-time setup
+Build and install the CLI somewhere on `$PATH`. Either install
+system-wide via cargo:
 
 ```bash
-# 1. Install Aegis somewhere stable (single command — builds Rust + Python).
-git clone https://github.com/wei9072/aegis ~/code/aegis
-cd ~/code/aegis
-python -m venv .venv && source .venv/bin/activate
-pip install -e .
-
-# 2. Tell your shell where Aegis lives, so the hook can find it.
-echo 'export AEGIS_HOME=~/code/aegis' >> ~/.bashrc
-source ~/.bashrc
+git clone https://github.com/wei9072/aegis ~/aegis
+cd ~/aegis
+cargo install --path crates/aegis-cli
 ```
 
-Prerequisites (Rust toolchain, Python 3.10+) covered in
-[`AGENTS.md`](../../AGENTS.md#setup--the-canonical-install-sequence).
+Or grab a pre-built binary from
+[GitHub Releases](https://github.com/wei9072/aegis/releases) once
+V2.0 publishes (Linux x86_64/aarch64, macOS x86_64/aarch64,
+Windows x86_64).
 
-### Per-project hook
+Verify:
+
+```bash
+aegis languages              # prints the 10 supported languages
+aegis check Cargo.toml       # zero-signal smoke test on any file
+```
+
+---
+
+## Per-project hook
 
 In each project where you want Aegis enforcement, drop this into
 `.git/hooks/pre-commit`:
@@ -43,25 +46,20 @@ In each project where you want Aegis enforcement, drop this into
 #!/usr/bin/env bash
 # .git/hooks/pre-commit — block commits that fail Aegis Ring 0.
 #
-# Catches: syntax errors, circular dependency introductions, and
-# anything else Ring 0 enforces. Runs in <1 second on small diffs.
+# Catches: syntax errors in any of 10 supported languages.
+# Runs in <1 second on small diffs.
 
 set -euo pipefail
 
-if [ -z "${AEGIS_HOME:-}" ]; then
-  echo "AEGIS_HOME not set; skipping Aegis check."
-  exit 0
-fi
+# All extensions Aegis can parse.  Run `aegis languages` for the
+# live registry.
+EXT_PATTERN='\.(py|pyi|ts|tsx|mts|cts|js|mjs|cjs|jsx|go|java|cs|php|phtml|swift|kt|kts|dart)$'
 
-# Only check Python files that are about to be committed.
-files=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' || true)
-if [ -z "$files" ]; then
-  exit 0
-fi
+files=$(git diff --cached --name-only --diff-filter=ACM | grep -E "$EXT_PATTERN" || true)
+[ -z "$files" ] && exit 0
 
-# Activate the Aegis venv and run Ring 0 enforcer on each file.
-source "$AEGIS_HOME/.venv/bin/activate"
-echo "$files" | (cd "$AEGIS_HOME" && PYTHONPATH=. xargs -I{} python -m aegis.cli check "$OLDPWD/{}")
+# `aegis check` exits non-zero on Ring 0 violations.
+echo "$files" | xargs aegis check
 ```
 
 Make it executable:
@@ -70,15 +68,14 @@ Make it executable:
 chmod +x .git/hooks/pre-commit
 ```
 
-That's it. From now on, any commit that touches a `.py` file runs
-through Aegis Ring 0 first.
+That's it. From now on, any commit that touches a supported source
+file runs through Aegis Ring 0 first.
 
 ---
 
 ## What it catches
 
-Run `aegis check` on a file with a syntax error and you'll see
-output like:
+Run `aegis check` on a file with a syntax error:
 
 ```
 broken.py:1: [Ring 0] Syntax error detected: expected ':' (line 1)
@@ -87,27 +84,26 @@ broken.py:1: [Ring 0] Syntax error detected: expected ':' (line 1)
 The commit fails with the same message. Fix the file, re-add it,
 re-commit.
 
-For a commit that introduces a circular dependency between modules:
-
-```
-moduleA.py: [Ring 0] Circular dependency: moduleA → moduleB → moduleA
-```
-
 ---
 
-## What it does NOT catch (yet)
+## What it does NOT catch
 
-The pre-commit hook today only runs Ring 0 (single-file structural
-checks). It does **not**:
+The pre-commit hook only runs Ring 0 (per-file syntax check). It
+does **not**:
 
 - Run cost-aware regression detection (would need a HEAD-vs-staged
-  comparison; tracked as future work).
-- Catch policy violations (e.g. fan_out spikes); only the `block`
-  half of PolicyEngine, not the `warn` half.
-- Run any LLM-backed gate (Tier-2 ToolCallValidator, IntentBypass).
+  comparison; achievable with a slightly fancier hook that runs
+  `aegis check` on both versions and diffs the signals — open an
+  issue if you want a worked example).
+- Trigger on Ring 0.5 signal values alone — `fan_out=22` doesn't
+  fail the hook on its own. Use the [MCP server](mcp_design.md)
+  for cost-regression enforcement against a baseline.
+- Run any LLM-backed gate. The pre-commit hook is deterministic +
+  zero-API-key by design.
 
-For multi-turn refactor protection, see the
-[MCP integration design](mcp_design.md) — that's where the full
+For multi-turn refactor protection (where the LLM iterates and
+each iteration's cost should be compared to the previous), see
+the [MCP integration](mcp_design.md) — that's where the full
 pipeline (with regression rollback) belongs, because it's
 turn-by-turn, not commit-by-commit.
 
@@ -129,21 +125,25 @@ message).
 
 ---
 
-## Future cleanup
+## Variations
 
-When Aegis ships PyPI wheels, the hook collapses to:
+### JSON output for tooling
 
 ```bash
-#!/usr/bin/env bash
-files=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' || true)
-[ -n "$files" ] && echo "$files" | xargs aegis check
+echo "$files" | xargs aegis check --json > .aegis-precommit.json
 ```
 
-No `AEGIS_HOME`, no venv activation, no PYTHONPATH. This is the
-target shape; the install-friction issue is what's keeping us
-honest about V0.x.
+Each entry has `ok: bool`, `signals: [{name, value}, ...]`. Pipe
+it into `jq` if you want custom failure logic (e.g. "only fail if
+fan_out > 30").
 
-If you hit problems with the workaround above, please report them
-at [`docs/launch/issue_rust_build_friction.md`](../launch/issue_rust_build_friction.md)
-— specific OS / Python / shell reports help us prioritise the
-PyPI work.
+### Single-language-only project
+
+Trim the extension pattern to just what you ship — e.g. for a
+TypeScript-only repo:
+
+```bash
+EXT_PATTERN='\.(ts|tsx|mts|cts)$'
+```
+
+No other change needed.

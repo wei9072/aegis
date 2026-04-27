@@ -1,12 +1,13 @@
 # Future abstraction — Aegis as a domain-independent decision system
 
 This document is **prior art for a future extraction**, not a
-present-day commitment. Aegis V1.5 ships a working code-generation
-decision system. The framework underneath that system is
-domain-independent enough to be extracted — but extracting it now
-would be premature optimization. This file records what the split
-looks like so that **when** extraction happens, the work is mostly
-mechanical renaming rather than re-derivation.
+present-day commitment. Aegis V1.10 ships a working code-generation
+decision system as a Rust workspace. The framework underneath that
+system is domain-independent enough to be extracted — but
+extracting it now would be premature optimization. This file
+records what the split looks like so that **when** extraction
+happens, the work is mostly mechanical renaming rather than
+re-derivation.
 
 If you are reading this and tempted to start the refactor, read
 [§ When this document becomes actionable](#when-this-document-becomes-actionable)
@@ -16,29 +17,28 @@ first.
 
 ## The split — framework vs plugin
 
-Aegis V1.5 already separates two layers, even if the directory tree
-doesn't make it obvious:
+Aegis V1.10's Rust workspace already separates two layers, even
+if the crate tree doesn't make it obvious:
 
 ### Framework layer (domain-independent)
 
-| Module | Responsibility | Why it's framework |
+| Crate / module | Responsibility | Why it's framework |
 | :--- | :--- | :--- |
-| `aegis/runtime/trace.py` — `DecisionTrace`, `DecisionEvent`, 4 verbs (`PASS`/`BLOCK`/`WARN`/`OBSERVE`) | Records every gate's verdict | The vocabulary doesn't care what the gate is judging |
-| `aegis/runtime/decision_pattern.py` — `DecisionPattern` enum (9 values), `derive_pattern()` | Names per-iteration shapes | `APPLIED_DONE` / `REGRESSION_ROLLBACK` / `STALEMATE_DETECTED` are abstract loop-state concepts, not code-specific |
-| `aegis/runtime/task_verifier.py` — `TaskPattern` enum (5 values), `TaskVerdict`, `TaskVerifier` Protocol | Names task-level outcomes | `SOLVED` / `INCOMPLETE` / `ABANDONED` are task concepts, not code concepts |
-| `aegis/runtime/pipeline.py` — `IterationEvent`, `PipelineResult`, `_run_loop`, `_step`, `_is_state_stalemate`, `_is_thrashing` | Loop control + sequence-level meta-decisions | Plan→Validate→Execute→Re-analyze is a generic decision-system pattern; stalemate / thrashing detectors operate on history lists alone |
-| Layer A/B/C isolation rules + negative-space framing | Architectural contract | Reread the framework note in `aegis_core_framing_negative_space` memory — these are philosophy, not implementation |
+| `crates/aegis-trace` — `DecisionTrace`, `DecisionEvent`, 4 verbs (`PASS`/`BLOCK`/`WARN`/`OBSERVE`) | Records every gate's verdict | The vocabulary doesn't care what the gate is judging |
+| `crates/aegis-decision::pattern` — `DecisionPattern` enum (10 values), `derive_pattern()` | Names per-iteration shapes | `APPLIED_DONE` / `REGRESSION_ROLLBACK` / `STALEMATE_DETECTED` are abstract loop-state concepts, not code-specific |
+| `crates/aegis-decision::task` — `TaskPattern` enum (5 values), `TaskVerdict`, `TaskVerifier` trait | Names task-level outcomes | `SOLVED` / `INCOMPLETE` / `ABANDONED` are task concepts, not code concepts |
+| `crates/aegis-runtime::{loop_step,native_pipeline,sequence}` — `IterationEvent`, `PipelineResult`, `run_pipeline`, `step_decision`, `is_state_stalemate`, `is_thrashing` | Loop control + sequence-level meta-decisions | Plan→Validate→Execute→Re-analyze is a generic decision-system pattern; stalemate / thrashing detectors operate on history lists alone |
+| Layer A/B/C isolation rules + negative-space framing | Architectural contract | Philosophy, not implementation — survives the Rust port unchanged |
 
 ### Plugin layer (code-generation specific)
 
-| Module | What's domain-specific |
+| Crate / module | What's domain-specific |
 | :--- | :--- |
-| `aegis/analysis/signals.py` + Rust `aegis-core-rs` | "Structural signals" (fan_out / max_chain_depth / cycle) only make sense for Python code |
-| `aegis/ir/patch.py`, `aegis/runtime/validator.py`, `aegis/runtime/executor.py` | `PatchPlan` data model + anchor matching + diff application + filesystem rollback |
-| `aegis/agents/planner.py`, `aegis/agents/llm_adapter.py`, providers under `aegis/agents/` | LLM as planner; serializing plans to/from LLM completions |
-| `aegis/policy/engine.py`, `aegis/intent/`, `aegis/toolcall/`, `aegis/delivery/`, `aegis/enforcement/` | Code-quality–specific gates (Ring 0 syntax, fan_out policy, intent classifier on natural-language prompts, etc.) |
-| `aegis/runtime/pipeline.py::_regressed`, `_total_cost`, `_regression_detail` | Currently sums `Signal` values — the cost function is plugged in via Signal type |
-| Per-scenario verifiers under `tests/scenarios/*/verifier.py` | Each verifier knows what "task done" means for its specific scenario |
+| `crates/aegis-core::{ast,signals}` | "Structural signals" (fan_out / max_chain_depth / cycle) only make sense for source code |
+| `crates/aegis-ir` — `PatchPlan`, `Patch`, `Edit`, `apply_edit`, line-aware fallback joiner | Data model + diff application for source-file mutations |
+| `crates/aegis-runtime::{validator,executor}` — `PlanValidator`, `Executor`, `Snapshot` | Anchor matching + filesystem rollback |
+| `crates/aegis-providers` — `LLMProvider` trait + `OpenAIChatProvider` + `LLMPlanner` | LLM as planner; serializing plans to/from LLM completions |
+| `crates/aegis-runtime::metrics` — `total_cost`, `regressed`, `regression_detail` | Sums numeric signal values; the cost function shape stays domain-agnostic, the signals plug in per-domain |
 
 ---
 
@@ -109,11 +109,14 @@ class DecisionSystem(Generic[State, Plan]):
 `StopVerdict` (Gap 3) all stay as-is — they're already
 domain-independent.
 
-The current `aegis/runtime/pipeline.py::_run_loop` is roughly 90% of
-this implementation already. Extraction would be: pull out the loop,
-parameterise the five protocols, move what stays into a new
-`aegis-core` package, leave the rest in `aegis-codegen` as the first
-plugin.
+The current `crates/aegis-runtime/src/native_pipeline.rs::run_pipeline`
+is already ~90% of this implementation; the `Planner` and
+`ContextBuilder` traits are already injected. Extraction would be:
+keep the loop where it is, parameterise the remaining executor /
+validator / cost-function via traits the same way, move the
+domain-agnostic crates (`aegis-trace`, `aegis-decision`, the
+loop-only parts of `aegis-runtime`) into a new `aegis-framework`
+crate, and leave the rest as `aegis-codegen` (the first plugin).
 
 ---
 
@@ -177,15 +180,15 @@ framework into wrong-shaped problems:
 ## Preserve-the-shape actions to take in current code
 
 These are small now, painful later. None of them block V2; treat as
-"do opportunistically when touching the relevant file."
+"do opportunistically when touching the relevant crate."
 
 | Action | Why | Status |
 | :--- | :--- | :--- |
-| Keep `aegis/runtime/decision_pattern.py` and `aegis/runtime/task_verifier.py` free of `Signal` / `PatchPlan` imports | These are the cleanest framework candidates today; let them stay clean | ✓ already clean |
+| Keep `crates/aegis-decision` free of `Signal` / `PatchPlan` imports | This is the cleanest framework candidate today; let it stay clean | ✓ already clean |
 | `IterationEvent.signal_value_totals` will rename to `state_cost_totals` at extraction. Either dual-name now or open backlog. | Most leaky abstraction in the framework module today. The word "signal" is plugin-specific | ⚠ open — defer until extraction |
 | Gap 3's `should_stop(event) -> StopVerdict` API | Already framework-shaped (operates on `IterationEvent`, returns abstract verdict). No domain leakage. | ✓ design pinned in `gap3_control_plane.md` |
-| Continue distinguishing `aegis/runtime/` (framework candidate) from `aegis/agents/` + `aegis/tools/` + `aegis/analysis/` + `aegis/policy/` + `aegis/intent/` + `aegis/toolcall/` + `aegis/delivery/` + `aegis/enforcement/` (plugin) | The directory split already telegraphs the future package split | ✓ ongoing |
-| Avoid adding new `Signal` imports to anything in `aegis/runtime/` | Same as row 1, applied prospectively | guideline |
+| Continue distinguishing `aegis-trace` / `aegis-decision` (framework candidates) from `aegis-core` / `aegis-ir` / `aegis-providers` / `aegis-runtime::{validator,executor}` (plugin candidates) | The crate split already telegraphs the future framework split | ✓ ongoing |
+| Avoid adding new `Signal` imports to anything in `aegis-trace` or `aegis-decision` | Same as row 1, applied prospectively | guideline |
 
 ---
 
@@ -222,16 +225,17 @@ shape is ready, do not extract speculatively.
 
 If/when extraction happens:
 
-- `aegis-core` — the framework (currently `aegis/runtime/` minus
-  `executor.py` minus `validator.py` minus the regression helpers
-  that import `Signal`)
-- `aegis-codegen` — current Aegis as the first plugin (everything
-  else)
-- Subsequent plugins: `aegis-dbmigrate`, `aegis-canary`, etc.
+- `aegis-framework` — the framework (currently `aegis-trace` +
+  `aegis-decision` + the loop-only parts of `aegis-runtime`)
+- `aegis-codegen` — current Aegis as the first plugin (`aegis-core`
+  + `aegis-ir` + `aegis-providers` + the executor/validator parts
+  of `aegis-runtime`)
+- Subsequent plugins: `aegis-dbmigrate`, `aegis-canary`, etc., each
+  as their own Cargo workspace member or separate repo.
 
-Repository topology probably moves to a monorepo with `packages/`
-subdirs, or three separate repos with `aegis-core` as a Python
-package dep.
+The repository likely stays as a Cargo workspace (already a
+monorepo); the split is at the crate boundary, not the repo
+boundary.
 
 ---
 
