@@ -7,6 +7,7 @@ name = "aegis-cli"
 version = "0.1.0"
 dependencies = [
  "aegis-core",
+ "aegis-decision",
  "aegis-ir",
  "aegis-providers",
  "aegis-runtime",
@@ -58,10 +59,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-mcp"
+version = "0.1.0"
+dependencies = [
+ "aegis-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aegis-providers"
 version = "0.1.0"
 dependencies = [
  "aegis-ir",
+ "aegis-runtime",
  "serde",
  "serde_json",
  "thiserror",
@@ -86,6 +97,7 @@ dependencies = [
 name = "aegis-runtime"
 version = "0.1.0"
 dependencies = [
+ "aegis-core",
  "aegis-decision",
  "aegis-ir",
  "serde",

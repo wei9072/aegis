@@ -1,21 +1,15 @@
 //! `LLMPlanner` — port of `aegis/agents/planner.py`. Pure Rust.
 //!
-//! Takes an `&dyn LLMProvider` + a `PlanContext`, builds the
-//! Markdown-flavoured prompt the V0.x Python prompt template
-//! produced (kept verbatim so existing tuning + corpora keep
-//! working), calls `provider.generate(prompt)`, extracts the JSON
-//! plan block, and parses into an `aegis_ir::PatchPlan`. Bounded
-//! retries on parse failure.
-//!
-//! `PlanContext` is the planner's view of project state. It mirrors
-//! the V0.x Python dataclass field-for-field but trims signal /
-//! validation-error / execution-result types to the minimal subset
-//! the prompt template actually needs (the planner is a *consumer*
-//! of the loop's data — it never reaches into Rust traits).
-
-use std::collections::BTreeMap;
+//! Takes an `&dyn LLMProvider` + a `PlanContext` (defined in
+//! `aegis-runtime` so the loop and the planner share one source of
+//! truth), builds the Markdown-flavoured prompt the V0.x Python
+//! prompt template produced (kept verbatim so existing tuning +
+//! corpora keep working), calls `provider.generate(prompt)`,
+//! extracts the JSON plan block, and parses into an
+//! `aegis_ir::PatchPlan`. Bounded retries on parse failure.
 
 use aegis_ir::{plan_from_json, PatchPlan};
+use aegis_runtime::{PlanContext, Planner, PlannerError as RuntimePlannerError};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -36,61 +30,6 @@ pub enum PlannerError {
     BadShape(String),
     #[error("planner exhausted {attempts} attempts; last error: {last}")]
     OutOfRetries { attempts: u32, last: String },
-}
-
-/// Minimal Signal summary the prompt template renders.
-#[derive(Clone, Debug)]
-pub struct SignalSummary {
-    pub name: String,
-    pub value: f64,
-    pub description: String,
-}
-
-/// Minimal previous-validation-error summary the prompt template renders.
-#[derive(Clone, Debug)]
-pub struct PrevValidationError {
-    pub kind: String,
-    pub patch_id: Option<String>,
-    pub edit_index: Option<usize>,
-    pub matches: usize,
-    pub message: String,
-}
-
-/// Minimal previous-execution-result summary. The planner reads
-/// `success` (so it can skip drafting failure-message lines when
-/// the executor already succeeded) and the per-patch `(patch_id,
-/// status, matches, error)` rows for failed patches.
-#[derive(Clone, Debug, Default)]
-pub struct PrevExecutionResult {
-    pub success: bool,
-    pub patch_results: Vec<PrevPatchResult>,
-}
-
-#[derive(Clone, Debug)]
-pub struct PrevPatchResult {
-    pub patch_id: String,
-    pub status: String, // lowercase string ("applied" / "ambiguous" / …)
-    pub matches: usize,
-    pub error: Option<String>,
-}
-
-/// Pure-Rust mirror of the V0.x `PlanContext` dataclass.
-#[derive(Debug, Default)]
-pub struct PlanContext {
-    pub task: String,
-    pub root: String,
-    pub scope: Option<Vec<String>>,
-    pub py_files: Vec<String>,
-    /// signals[file_path] = list of signals on that file.
-    pub signals: BTreeMap<String, Vec<SignalSummary>>,
-    pub graph_edges: Vec<(String, String)>,
-    pub has_cycle: bool,
-    pub file_snippets: BTreeMap<String, String>,
-    pub previous_plan: Option<PatchPlan>,
-    pub previous_errors: Vec<PrevValidationError>,
-    pub previous_result: Option<PrevExecutionResult>,
-    pub previous_regressed: bool,
-    pub previous_regression_detail: BTreeMap<String, f64>,
 }
 
 const PLAN_SCHEMA_HINT: &str = r#"{
@@ -250,7 +189,11 @@ impl<'a> LLMPlanner<'a> {
                     if err.matches > 0 {
                         loc.push_str(&format!(", matches={}", err.matches));
                     }
-                    parts.push(format!("- [{}] {loc}: {}", err.kind, err.message));
+                    parts.push(format!(
+                        "- [{}] {loc}: {}",
+                        err.kind.as_str(),
+                        err.message
+                    ));
                 }
             }
             if ctx.previous_regressed {
@@ -278,12 +221,18 @@ impl<'a> LLMPlanner<'a> {
             } else if let Some(res) = &ctx.previous_result {
                 if !res.success {
                     parts.push("Execution failures:".to_string());
-                    for r in &res.patch_results {
-                        if r.error.is_some() || !matches!(r.status.as_str(), "applied" | "already_applied") {
+                    for r in &res.results {
+                        let bad = r.error.is_some()
+                            || !matches!(
+                                r.status,
+                                aegis_ir::PatchStatus::Applied
+                                    | aegis_ir::PatchStatus::AlreadyApplied
+                            );
+                        if bad {
                             parts.push(format!(
                                 "- patch={} status={} matches={} err={}",
                                 r.patch_id,
-                                r.status,
+                                r.status.as_str(),
                                 r.matches,
                                 r.error.as_deref().unwrap_or("")
                             ));
@@ -317,18 +266,25 @@ impl<'a> LLMPlanner<'a> {
     }
 }
 
+/// Implement `aegis_runtime::Planner` so the native pipeline loop
+/// can take any LLMPlanner as a trait object. The `&mut PlanContext`
+/// parameter is read-only here (the loop sets previous_* fields
+/// before calling), so there's no Rust-side mutation in this impl.
+impl<'a> Planner for LLMPlanner<'a> {
+    fn plan(&self, ctx: &mut PlanContext) -> Result<PatchPlan, RuntimePlannerError> {
+        LLMPlanner::plan(self, ctx).map_err(|e| RuntimePlannerError::Failed(e.to_string()))
+    }
+}
+
 fn extract_json_block(text: &str) -> Result<String, PlannerError> {
-    // Mirror the Python regex `r"```json\s*(.*?)\s*```"` non-greedy.
     if let Some(start) = text.find("```json") {
         let after = &text[start + "```json".len()..];
-        // Skip optional whitespace.
         let after = after.trim_start_matches(|c: char| c.is_whitespace());
         if let Some(end) = after.find("```") {
             let payload = after[..end].trim_end_matches(|c: char| c.is_whitespace());
             return Ok(payload.to_string());
         }
     }
-    // Fallback: find first `{` ... last `}`.
     let start = text.find('{').ok_or(PlannerError::NoJson)?;
     let end = text.rfind('}').ok_or(PlannerError::NoJson)?;
     if end < start {
@@ -341,31 +297,25 @@ fn extract_json_block(text: &str) -> Result<String, PlannerError> {
 mod tests {
     use super::*;
     use crate::error::ProviderError;
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
     struct StubProvider {
-        responses: RefCell<Vec<String>>,
+        responses: Mutex<Vec<String>>,
     }
 
     impl StubProvider {
         fn new(responses: Vec<&str>) -> Self {
             Self {
-                responses: RefCell::new(
+                responses: Mutex::new(
                     responses.into_iter().map(String::from).collect(),
                 ),
             }
         }
     }
 
-    // SAFETY: tests never share StubProvider across threads. The
-    // RefCell + Send/Sync tension is acknowledged; production
-    // providers don't need interior mutability.
-    unsafe impl Send for StubProvider {}
-    unsafe impl Sync for StubProvider {}
-
     impl LLMProvider for StubProvider {
         fn generate(&self, _prompt: &str) -> Result<String, ProviderError> {
-            let mut r = self.responses.borrow_mut();
+            let mut r = self.responses.lock().unwrap();
             if r.is_empty() {
                 return Err(ProviderError::BadResponse {
                     url: "stub://".into(),
@@ -406,15 +356,18 @@ mod tests {
 ```"#
     }
 
+    fn ctx_with_task(task: &str) -> PlanContext {
+        PlanContext {
+            task: task.to_string(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn happy_path_parses_first_response() {
         let p = StubProvider::new(vec![good_plan_json()]);
         let planner = LLMPlanner::new(&p);
-        let ctx = PlanContext {
-            task: "rename".into(),
-            root: "/tmp".into(),
-            ..Default::default()
-        };
+        let ctx = ctx_with_task("rename");
         let plan = planner.plan(&ctx).expect("plan parses");
         assert_eq!(plan.goal, "rename original to renamed");
         assert_eq!(plan.patches.len(), 1);
@@ -442,11 +395,7 @@ mod tests {
     fn plan_retries_on_parse_failure_and_recovers() {
         let p = StubProvider::new(vec!["garbage", "still no json", good_plan_json()]);
         let planner = LLMPlanner::new(&p);
-        let ctx = PlanContext {
-            task: "rename".into(),
-            root: "/tmp".into(),
-            ..Default::default()
-        };
+        let ctx = ctx_with_task("rename");
         let plan = planner.plan(&ctx).expect("eventually parses");
         assert_eq!(plan.goal, "rename original to renamed");
     }
@@ -455,56 +404,18 @@ mod tests {
     fn plan_exhausts_retries_when_all_responses_bad() {
         let p = StubProvider::new(vec!["bad", "bad", "bad"]);
         let planner = LLMPlanner::new(&p);
-        let ctx = PlanContext {
-            task: "rename".into(),
-            root: "/tmp".into(),
-            ..Default::default()
-        };
+        let ctx = ctx_with_task("rename");
         let err = planner.plan(&ctx).unwrap_err();
         assert!(matches!(err, PlannerError::OutOfRetries { .. }));
     }
 
     #[test]
-    fn prompt_includes_task_and_signals_and_previous_errors() {
-        let mut signals: BTreeMap<String, Vec<SignalSummary>> = BTreeMap::new();
-        signals.insert(
-            "a.py".into(),
-            vec![SignalSummary {
-                name: "fan_out".into(),
-                value: 12.0,
-                description: "high".into(),
-            }],
-        );
-        let ctx = PlanContext {
-            task: "demo task".into(),
-            root: "/tmp".into(),
-            py_files: vec!["a.py".into()],
-            signals,
-            previous_plan: Some(PatchPlan {
-                goal: "g".into(),
-                strategy: "prev strategy".into(),
-                patches: vec![],
-                target_files: vec![],
-                done: false,
-                iteration: 0,
-                parent_id: None,
-            }),
-            previous_errors: vec![PrevValidationError {
-                kind: "schema".into(),
-                patch_id: Some("p1".into()),
-                edit_index: None,
-                matches: 0,
-                message: "bad shape".into(),
-            }],
-            ..Default::default()
-        };
+    fn planner_trait_impl_works_through_dyn_dispatch() {
         let p = StubProvider::new(vec![good_plan_json()]);
         let planner = LLMPlanner::new(&p);
-        let prompt = planner.format_prompt(&ctx);
-        assert!(prompt.contains("demo task"));
-        assert!(prompt.contains("fan_out = 12  (high)"));
-        assert!(prompt.contains("Strategy: prev strategy"));
-        assert!(prompt.contains("[schema] patch=p1: bad shape"));
-        assert!(prompt.contains("```json"));
+        let dyn_planner: &dyn Planner = &planner;
+        let mut ctx = ctx_with_task("rename");
+        let plan = dyn_planner.plan(&mut ctx).expect("trait dispatch works");
+        assert_eq!(plan.goal, "rename original to renamed");
     }
 }

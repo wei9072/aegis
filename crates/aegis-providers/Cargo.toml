@@ -15,5 +15,8 @@ thiserror = { workspace = true }
 # to async.
 ureq = { version = "2.10", default-features = false, features = ["tls"] }
 
-# V1.9 — LLMPlanner needs the IR types it produces.
+# V1.9 — LLMPlanner needs the IR types it produces and the
+# PlanContext / Signal / ValidationError / ExecutionResult shapes
+# the loop in aegis-runtime owns.
 aegis-ir = { path = "../aegis-ir" }
+aegis-runtime = { path = "../aegis-runtime" }

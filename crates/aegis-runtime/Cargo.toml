@@ -11,6 +11,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 
+aegis-core = { path = "../aegis-core" }
 aegis-decision = { path = "../aegis-decision" }
 aegis-ir = { path = "../aegis-ir" }
 

@@ -810,7 +810,7 @@ from-plan as a sub-bullet.
     `tests/scenarios/`. Their Python verifier classes (~50 LOC each)
     can be ported when V1.3 lands; the scenario *data* (initial state
     + task prompt) is already language-portable JSON+files.
-- **V1.9** — Rust-native CLI + MCP server — ✅ Partial (2026-04-27)
+- **V1.9** — Rust-native CLI + MCP server — ✅ Done (2026-04-27)
   - **Cycle-break landed:** the `_core` cdylib moved from
     `aegis-core` to `aegis-pyshim`. Pre-V1.9 `aegis-core` depended
     on `aegis-pyshim` (cyclic from pyshim's perspective);
@@ -839,16 +839,36 @@ from-plan as a sub-bullet.
     output) and `aegis languages` (registry introspection).
     Smoke-verified on Linux x86_64. **Zero Python at runtime** —
     links directly against `aegis-core` rlib + the other crates.
-  - **What's still NOT here:** `aegis pipeline run` and `aegis-mcp`
-    binary subcommand. Both need an HTTP-bound `LLMProvider` plus
-    wiring the Rust LLMPlanner + Rust ContextBuilder + Rust
-    `step_decision` into a binary entry point. The components are
-    all in place — `aegis-providers::OpenAIChatProvider` works,
-    `aegis-providers::LLMPlanner` works, `aegis-pyshim::context::build_context`
-    works (in pyshim — needs lifting to a Rust-only home for
-    binary use). Estimated 2-3 sessions of straightforward wiring;
-    blocking neither V1.10 nor V2.0 substantively (V1.10's gate is
-    a soak, V2.0's gate is CI infra — both real-world, not code).
+  - **`PlanContext` + helpers moved to `aegis-runtime`:** the
+    pyshim-only PyPlanContext was duplicated; now `aegis-runtime`
+    owns `PlanContext`, `Signal`, `build_workspace_context`,
+    `WorkspaceContextBuilder` as pure Rust. `aegis-providers`
+    depends on `aegis-runtime` for these (one-way, no cycle).
+  - **`Planner` + `ContextBuilder` traits in `aegis-runtime`:**
+    `aegis-providers::LLMPlanner` implements `Planner`; the
+    default `WorkspaceContextBuilder` implements `ContextBuilder`.
+    Native loop takes `&dyn Planner` + `&dyn ContextBuilder`.
+  - **Native `run_pipeline` in `aegis-runtime::native_pipeline`:**
+    pure-Rust loop body — same coordination as
+    `aegis-pyshim::pipeline::run_loop` but with no PyO3 boundary.
+    4 cargo tests pin happy path / NOOP_DONE / validation failure
+    / planner error.
+  - **`aegis pipeline run` subcommand:** `aegis-cli` now has a
+    full `pipeline run --task --root --scope --max-iters --json`
+    that wires `LLMPlanner` + `WorkspaceContextBuilder` +
+    `run_pipeline`. Provider config via env vars
+    (`AEGIS_PROVIDER`, `AEGIS_MODEL`, `AEGIS_API_KEY` /
+    per-provider key envs).
+  - **`aegis-mcp` binary shipped:** `crates/aegis-mcp/` ships the
+    Rust MCP server. Hand-rolled JSON-RPC 2.0 over stdio (~250
+    LOC vs. dragging in `rmcp`). One tool: `validate_change`,
+    matching the V0.x Python contract pinned in
+    `docs/integrations/mcp_design.md`. Smoke-verified —
+    `initialize`, `tools/list`, `tools/call` all produce
+    well-formed responses.
+  - **End state:** `aegis` and `aegis-mcp` binaries both build and
+    run with **zero Python at runtime**. Cross-platform builds +
+    distribution are the V2.0 gate (CI infra).
 - **V1.10** — Python deletion — ⬜ deferred (gate: real-world soak only)
   - **Why deferred:** deleting `aegis/` Python without an
     independently-validated Rust replacement would brick every
@@ -924,7 +944,7 @@ from-plan as a sub-bullet.
 | V1.3 | ✅ Done | full Pipeline.run() body in Rust via `aegis._core.run_loop`; LLMPlanner + _build_context passed in as Python seams; legacy Python loop preserved as `_legacy_run_loop_kept_for_diff` for safety net |
 | V1.4–V1.7 | ✅ | 10 languages, registry-driven dispatch, CLI auto-walks all extensions |
 | V1.8 | ⬜ | gated on API quotas (no code blockers) |
-| V1.9 | ✅ Partial | cycle-break + Rust ContextBuilder + Rust LLMPlanner + `aegis-cli` binary (zero Python at runtime); `aegis pipeline run` + `aegis-mcp` binary still pending |
+| V1.9 | ✅ Done | cycle-break + Rust ContextBuilder + Rust LLMPlanner + native `run_pipeline` + `aegis-cli` (`check`, `languages`, `pipeline run`) + `aegis-mcp` binary — zero Python at runtime on both binaries |
 | V1.10 | ⬜ | gated on real-world 2-week soak (every Python module already a thin re-export; deletion checklist in V1.10 entry) |
 | V2.0 | ⬜ | gated on real-world CI infra (binary builds; workspace publishable; setup checklist in V2.0 entry) |
 

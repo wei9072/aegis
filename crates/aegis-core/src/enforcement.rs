@@ -9,8 +9,14 @@ use crate::ast::registry::LanguageRegistry;
 
 #[pyfunction]
 pub fn check_syntax(filepath: &str) -> PyResult<Vec<String>> {
-    let code = fs::read_to_string(filepath)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+    check_syntax_native(filepath).map_err(pyo3::exceptions::PyIOError::new_err)
+}
+
+/// Pure-Rust counterpart to `check_syntax`. Returns
+/// `Result<Vec<String>, String>` so non-PyO3 callers (the
+/// `aegis-mcp` binary) can use it.
+pub fn check_syntax_native(filepath: &str) -> Result<Vec<String>, String> {
+    let code = fs::read_to_string(filepath).map_err(|e| e.to_string())?;
 
     let registry = LanguageRegistry::global();
     let adapter = match registry.for_path(filepath) {
@@ -27,10 +33,10 @@ pub fn check_syntax(filepath: &str) -> PyResult<Vec<String>> {
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(adapter.tree_sitter_language())
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        .map_err(|e| e.to_string())?;
     let tree = parser
         .parse(&code, None)
-        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("parse returned None"))?;
+        .ok_or_else(|| "parse returned None".to_string())?;
 
     if tree.root_node().has_error() {
         Ok(vec![format!(

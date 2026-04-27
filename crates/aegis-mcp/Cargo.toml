@@ -1,21 +1,16 @@
 [package]
-name = "aegis-cli"
+name = "aegis-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "aegis"
+name = "aegis-mcp"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 aegis-core = { path = "../aegis-core" }
-aegis-decision = { path = "../aegis-decision" }
-aegis-ir = { path = "../aegis-ir" }
-aegis-providers = { path = "../aegis-providers" }
-aegis-runtime = { path = "../aegis-runtime" }
