@@ -16,6 +16,7 @@ members = [
     "crates/aegis-runtime",
     "crates/aegis-cli",
     "crates/aegis-mcp",
+    "crates/aegis-agent",
 ]
 
 [workspace.package]
