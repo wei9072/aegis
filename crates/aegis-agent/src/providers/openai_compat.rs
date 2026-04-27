@@ -26,7 +26,7 @@
 
 use crate::api::{ApiClient, ApiRequest, AssistantEvent, RuntimeError, ToolDefinition};
 use crate::message::{ContentBlock, ConversationMessage, MessageRole};
-use crate::providers::http::HttpClient;
+use crate::providers::http::{friendly_http_status, HttpClient};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
@@ -145,9 +145,10 @@ impl OpenAiCompatProvider {
             .post(&endpoint, &headers, body)
             .map_err(|e| RuntimeError::new(format!("HTTP transport error: {e}")))?;
         if response.status >= 400 {
-            return Err(RuntimeError::new(format!(
-                "HTTP {} from {}: {}",
-                response.status, endpoint, response.body
+            return Err(RuntimeError::new(friendly_http_status(
+                &endpoint,
+                response.status,
+                &response.body,
             )));
         }
         Ok(response)

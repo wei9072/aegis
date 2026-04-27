@@ -28,6 +28,7 @@ mod config;
 mod input;
 mod render;
 mod session_store;
+mod setup;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -97,6 +98,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// Interactive wizard that writes ~/.config/aegis/config.toml
+    /// so you don't have to memorise env-var names.
+    ///
+    /// Walks you through provider choice (OpenAI-compat / Anthropic
+    /// / Gemini), base URL preset (OpenRouter / Groq / Ollama / …),
+    /// model name, and which env var holds your API key. Writes the
+    /// TOML file; does NOT export anything to your shell.
+    Setup,
 
     /// V3 coding agent — full agent surface with aegis core gates
     /// always-on by default.
@@ -235,6 +245,13 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Check { files, json } => cmd_check(&files, json),
         Command::Languages { json } => cmd_languages(json),
+        Command::Setup => match setup::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("aegis setup: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Command::Scan {
             workspace,
             top,
