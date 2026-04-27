@@ -51,6 +51,7 @@ fn live_openai_compat_returns_text_response() {
         AgentConfig {
             max_iterations_per_turn: 1,
             session_cost_budget: None,
+            workspace_root: None,
         },
     );
 

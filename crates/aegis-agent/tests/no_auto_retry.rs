@@ -47,7 +47,11 @@ const FORBIDDEN_SOURCE_TOKENS: &[&str] = &[
 /// Hand-listed allowed field names for `AgentConfig`. If a future
 /// PR adds a forbidden one, both this list and the struct must
 /// change — surfacing the framing question to PR review.
-const ALLOWED_AGENT_CONFIG_FIELDS: &[&str] = &["max_iterations_per_turn", "session_cost_budget"];
+const ALLOWED_AGENT_CONFIG_FIELDS: &[&str] = &[
+    "max_iterations_per_turn",
+    "session_cost_budget",
+    "workspace_root",
+];
 
 /// Hand-listed allowed field names for `AgentTurnResult`.
 const ALLOWED_AGENT_TURN_RESULT_FIELDS: &[&str] =
@@ -125,4 +129,5 @@ fn agent_config_constructible_without_retry_args() {
     let cfg = aegis_agent::AgentConfig::default();
     assert_eq!(cfg.max_iterations_per_turn, 0);
     assert!(cfg.session_cost_budget.is_none());
+    assert!(cfg.workspace_root.is_none());
 }

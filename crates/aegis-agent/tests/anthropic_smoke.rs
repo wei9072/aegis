@@ -38,6 +38,7 @@ fn live_anthropic_returns_text_response() {
         AgentConfig {
             max_iterations_per_turn: 1,
             session_cost_budget: None,
+            workspace_root: None,
         },
     );
 

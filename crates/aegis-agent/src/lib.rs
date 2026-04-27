@@ -39,6 +39,7 @@ pub mod predict;
 pub mod providers;
 pub mod testing;
 pub mod tool;
+pub mod verifier;
 
 pub use api::{ApiClient, ApiRequest, AssistantEvent, RuntimeError, ToolDefinition};
 pub use conversation::ConversationRuntime;
@@ -63,6 +64,11 @@ pub struct AgentConfig {
     /// structural cost exceeds this, the session terminates with
     /// `StoppedReason::CostBudgetExceeded`.
     pub session_cost_budget: Option<f64>,
+
+    /// Workspace path passed to the verifier (V3.4) when the LLM
+    /// signals "done". Required if a verifier is wired in; ignored
+    /// otherwise.
+    pub workspace_root: Option<std::path::PathBuf>,
 }
 
 /// Why a turn ended. Every variant is observation, not direction —

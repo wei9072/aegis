@@ -19,6 +19,7 @@ fn cfg(max_iters: u32) -> AgentConfig {
     AgentConfig {
         max_iterations_per_turn: max_iters,
         session_cost_budget: None,
+            workspace_root: None,
     }
 }
 

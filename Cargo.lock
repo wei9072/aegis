@@ -15,6 +15,7 @@ dependencies = [
  "aegis-decision",
  "serde",
  "serde_json",
+ "tempfile",
  "ureq",
 ]
 

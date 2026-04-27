@@ -23,8 +23,10 @@ use crate::cost::CostTracker;
 use crate::message::{ContentBlock, ConversationMessage, Session};
 use crate::predict::{NullPredictor, PreToolUsePredictor, PredictVerdict};
 use crate::tool::ToolExecutor;
+use crate::verifier::AgentTaskVerifier;
 use crate::{AgentConfig, AgentTurnResult, StoppedReason};
 
+use aegis_decision::{TaskPattern, TaskVerdict};
 use serde_json::Value;
 
 /// Optional callback invoked after every tool execution to give the
@@ -61,6 +63,7 @@ pub struct ConversationRuntime<C, T> {
     predictor: Box<dyn PreToolUsePredictor>,
     cost_observer: Box<dyn CostObserver>,
     cost_tracker: CostTracker,
+    verifier: Option<Box<dyn AgentTaskVerifier>>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -87,6 +90,7 @@ where
             predictor: Box::new(NullPredictor),
             cost_observer: Box::new(NullCostObserver),
             cost_tracker: CostTracker::new(),
+            verifier: None,
         }
     }
 
@@ -104,6 +108,22 @@ where
     #[must_use]
     pub fn with_cost_observer(mut self, observer: Box<dyn CostObserver>) -> Self {
         self.cost_observer = observer;
+        self
+    }
+
+    /// Inject a task-level verifier (V3.4 differentiation #3).
+    /// When the LLM signals "done" by emitting no further tool_use,
+    /// the verifier runs against `config.workspace_root`. Its
+    /// verdict overrides the LLM's claim:
+    /// - `passed: true`  → `StoppedReason::PlanDoneVerified`
+    /// - `passed: false` → `StoppedReason::PlanDoneVerifierRejected`
+    ///
+    /// No verifier configured → `StoppedReason::PlanDoneNoVerifier`
+    /// (the LLM's word is taken at face value, but distinguished from
+    /// the verifier-confirmed case so callers know which it was).
+    #[must_use]
+    pub fn with_verifier(mut self, verifier: Box<dyn AgentTaskVerifier>) -> Self {
+        self.verifier = Some(verifier);
         self
     }
 
@@ -185,15 +205,44 @@ where
 
             self.session.push(assistant_message);
 
-            // No more tool calls — LLM signals "done". V3.4 will run
-            // the verifier here and map to PlanDoneVerified /
-            // PlanDoneVerifierRejected. For V3.1 we have no verifier,
-            // so the only reachable variant is PlanDoneNoVerifier.
+            // LLM signals "done" by emitting no further tool_use.
+            // V3.4: if a verifier is wired in, its verdict is the
+            // source of truth. Verdict goes to AgentTurnResult.task_verdict
+            // for the user; it's NEVER converted into a coaching
+            // string for the next prompt (no_coaching_injection.rs).
             if pending_tool_uses.is_empty() {
+                let (stopped_reason, task_verdict) = match &self.verifier {
+                    None => (StoppedReason::PlanDoneNoVerifier, None),
+                    Some(verifier) => {
+                        let workspace = self
+                            .config
+                            .workspace_root
+                            .clone()
+                            .unwrap_or_else(|| std::path::PathBuf::from("."));
+                        let result = verifier.verify(&workspace);
+                        let verdict = TaskVerdict {
+                            pattern: if result.passed {
+                                TaskPattern::Solved
+                            } else {
+                                TaskPattern::Incomplete
+                            },
+                            verifier_result: Some(result.clone()),
+                            pipeline_done: true,
+                            iterations_run: iterations,
+                            error: String::new(),
+                        };
+                        let reason = if result.passed {
+                            StoppedReason::PlanDoneVerified
+                        } else {
+                            StoppedReason::PlanDoneVerifierRejected
+                        };
+                        (reason, Some(verdict))
+                    }
+                };
                 return AgentTurnResult {
-                    stopped_reason: StoppedReason::PlanDoneNoVerifier,
+                    stopped_reason,
                     iterations,
-                    task_verdict: None,
+                    task_verdict,
                 };
             }
 

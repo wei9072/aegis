@@ -86,6 +86,7 @@ fn provider_plus_runtime_handles_text_then_tool_then_text() {
         AgentConfig {
             max_iterations_per_turn: 5,
             session_cost_budget: None,
+            workspace_root: None,
         },
     );
 
@@ -136,6 +137,7 @@ fn http_error_during_runtime_terminates_with_provider_error_no_retry() {
         AgentConfig {
             max_iterations_per_turn: 5,
             session_cost_budget: None,
+            workspace_root: None,
         },
     );
 
