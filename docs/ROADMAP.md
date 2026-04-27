@@ -82,8 +82,9 @@ agent has):
 | Phase | Content | Status |
 |---|---|---|
 | **V3.0** — Skeleton + contract tests | Crate exists, type scaffolding, 9 framing contract tests | ✅ Done (2026-04-27) |
-| **V3.1** — Borrow conversation + single provider | Adapt `claw-code/runtime/conversation.rs` + `api/providers/anthropic` | ⬜ Next |
-| **V3.2** — Multi-provider + MCP client | Adapt rest of `api/providers/` + `runtime/mcp_*` | ⬜ |
+| **V3.1a** — Conversation skeleton from claw-code | `ConversationRuntime`, `ApiClient` / `ToolExecutor` traits, message types, scripted stubs | ✅ Done (2026-04-27) |
+| **V3.1b** — OpenAI-compat provider | `HttpClient` abstraction (UreqClient + StubHttpClient), `OpenAiCompatProvider` covering OpenRouter / Groq / Ollama / vLLM / llama.cpp / LMStudio / DashScope via `base_url` config; non-streaming, no-auto-retry on every error path | ✅ Done (2026-04-27) |
+| **V3.2** — Anthropic + Gemini providers + MCP client | Anthropic Messages format + Gemini format + claw-code `runtime/mcp_*` | ⬜ Next |
 | **V3.3** — Aegis differentiation A + B | PreToolUse aegis-predict + cross-turn cost tracker | ⬜ |
 | **V3.4** — Aegis differentiation C | Verifier integration | ⬜ |
 | **V3.5** — Aegis differentiation D | Stalemate / thrashing at session level | ⬜ |

@@ -18,7 +18,7 @@
 //! cross-turn cost tracking, verifier-driven done, stalemate detection)
 //! land in V3.2–V3.5; this phase is the loop skeleton only.
 
-use crate::api::{ApiClient, ApiRequest, AssistantEvent, RuntimeError};
+use crate::api::{ApiClient, ApiRequest, AssistantEvent, RuntimeError, ToolDefinition};
 use crate::message::{ContentBlock, ConversationMessage, Session};
 use crate::tool::ToolExecutor;
 use crate::{AgentConfig, AgentTurnResult, StoppedReason};
@@ -29,6 +29,7 @@ pub struct ConversationRuntime<C, T> {
     api_client: C,
     tool_executor: T,
     system_prompt: Vec<String>,
+    tools: Vec<ToolDefinition>,
     config: AgentConfig,
 }
 
@@ -43,6 +44,7 @@ where
         api_client: C,
         tool_executor: T,
         system_prompt: Vec<String>,
+        tools: Vec<ToolDefinition>,
         config: AgentConfig,
     ) -> Self {
         Self {
@@ -50,6 +52,7 @@ where
             api_client,
             tool_executor,
             system_prompt,
+            tools,
             config,
         }
     }
@@ -90,6 +93,7 @@ where
             let request = ApiRequest {
                 system_prompt: self.system_prompt.clone(),
                 messages: self.session.messages.clone(),
+                tools: self.tools.clone(),
             };
 
             let events = match self.api_client.stream(request) {

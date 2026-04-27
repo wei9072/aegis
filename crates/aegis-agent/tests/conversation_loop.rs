@@ -26,7 +26,7 @@ fn cfg(max_iters: u32) -> AgentConfig {
 fn single_text_response_terminates_with_plan_done_no_verifier() {
     let api = ScriptedApiClient::new().push_text_then_done("hello back");
     let tools = ScriptedToolExecutor::new();
-    let mut rt = ConversationRuntime::new(Session::new(), api, tools, vec![], cfg(5));
+    let mut rt = ConversationRuntime::new(Session::new(), api, tools, vec![], vec![], cfg(5));
 
     let result = rt.run_turn("hello");
 
@@ -46,7 +46,7 @@ fn tool_call_then_text_response_two_iterations() {
         .push_tool_call("call_1", "echo", "{\"text\":\"hi\"}")
         .push_text_then_done("done");
     let tools = ScriptedToolExecutor::new().with_ok("echo", "hi");
-    let mut rt = ConversationRuntime::new(Session::new(), api, tools, vec![], cfg(5));
+    let mut rt = ConversationRuntime::new(Session::new(), api, tools, vec![], vec![], cfg(5));
 
     let result = rt.run_turn("please echo hi");
 
@@ -71,7 +71,7 @@ fn tool_failure_flows_back_to_llm_no_auto_retry() {
         .push_tool_call("call_1", "broken_tool", "{}")
         .push_text_then_done("I tried but the tool failed; stopping.");
     let tools = ScriptedToolExecutor::new().with_err("broken_tool", "boom");
-    let mut rt = ConversationRuntime::new(Session::new(), api, tools, vec![], cfg(5));
+    let mut rt = ConversationRuntime::new(Session::new(), api, tools, vec![], vec![], cfg(5));
 
     let result = rt.run_turn("try the broken tool");
 
@@ -101,7 +101,7 @@ fn iteration_budget_caps_runaway_tool_loops() {
         .push_tool_call("c2", "echo", "{}")
         .push_tool_call("c3", "echo", "{}");
     let tools = ScriptedToolExecutor::new().with_ok("echo", "hi");
-    let mut rt = ConversationRuntime::new(Session::new(), api, tools, vec![], cfg(2));
+    let mut rt = ConversationRuntime::new(Session::new(), api, tools, vec![], vec![], cfg(2));
 
     let result = rt.run_turn("loop forever");
 
@@ -115,7 +115,7 @@ fn iteration_budget_caps_runaway_tool_loops() {
 fn provider_error_surfaces_as_stopped_reason_no_retry() {
     let api = ScriptedApiClient::new().push_error("HTTP 503");
     let tools = ScriptedToolExecutor::new();
-    let mut rt = ConversationRuntime::new(Session::new(), api, tools, vec![], cfg(5));
+    let mut rt = ConversationRuntime::new(Session::new(), api, tools, vec![], vec![], cfg(5));
 
     let result = rt.run_turn("hi");
 

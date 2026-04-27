@@ -32,10 +32,11 @@
 pub mod api;
 pub mod conversation;
 pub mod message;
+pub mod providers;
 pub mod testing;
 pub mod tool;
 
-pub use api::{ApiClient, ApiRequest, AssistantEvent, RuntimeError};
+pub use api::{ApiClient, ApiRequest, AssistantEvent, RuntimeError, ToolDefinition};
 pub use conversation::ConversationRuntime;
 pub use message::{ContentBlock, ConversationMessage, MessageRole, Session};
 pub use tool::{ToolError, ToolExecutor};

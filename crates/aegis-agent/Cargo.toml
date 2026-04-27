@@ -10,3 +10,4 @@ description = "V3 — coding agent built on aegis primitives. See docs/v3_agent_
 aegis-decision = { path = "../aegis-decision" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ureq = { version = "2.10", features = ["json"] }
