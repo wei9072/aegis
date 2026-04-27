@@ -19,9 +19,36 @@
 //! land in V3.2–V3.5; this phase is the loop skeleton only.
 
 use crate::api::{ApiClient, ApiRequest, AssistantEvent, RuntimeError, ToolDefinition};
+use crate::cost::CostTracker;
 use crate::message::{ContentBlock, ConversationMessage, Session};
+use crate::predict::{NullPredictor, PreToolUsePredictor, PredictVerdict};
 use crate::tool::ToolExecutor;
 use crate::{AgentConfig, AgentTurnResult, StoppedReason};
+
+use serde_json::Value;
+
+/// Optional callback invoked after every tool execution to give the
+/// runtime a chance to observe per-file cost. Receives the tool name
+/// + raw input string and returns `(path, cost)` pairs to record
+/// into the cost tracker. The default impl returns `None` (skip
+/// cost tracking entirely).
+pub trait CostObserver: Send {
+    fn observe(&mut self, tool_name: &str, input: &str) -> Vec<(std::path::PathBuf, f64)>;
+}
+
+/// No-op cost observer — cost tracking off until the user wires
+/// something real (the V3.3+ aegis observer ports `aegis-core`'s
+/// signal extraction here).
+pub struct NullCostObserver;
+impl CostObserver for NullCostObserver {
+    fn observe(
+        &mut self,
+        _tool_name: &str,
+        _input: &str,
+    ) -> Vec<(std::path::PathBuf, f64)> {
+        Vec::new()
+    }
+}
 
 /// Coordinates the model loop and tool execution.
 pub struct ConversationRuntime<C, T> {
@@ -31,6 +58,9 @@ pub struct ConversationRuntime<C, T> {
     system_prompt: Vec<String>,
     tools: Vec<ToolDefinition>,
     config: AgentConfig,
+    predictor: Box<dyn PreToolUsePredictor>,
+    cost_observer: Box<dyn CostObserver>,
+    cost_tracker: CostTracker,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -54,7 +84,27 @@ where
             system_prompt,
             tools,
             config,
+            predictor: Box::new(NullPredictor),
+            cost_observer: Box::new(NullCostObserver),
+            cost_tracker: CostTracker::new(),
         }
+    }
+
+    /// Inject a `PreToolUsePredictor`. Default is `NullPredictor`
+    /// which allows everything.
+    #[must_use]
+    pub fn with_predictor(mut self, predictor: Box<dyn PreToolUsePredictor>) -> Self {
+        self.predictor = predictor;
+        self
+    }
+
+    /// Inject a `CostObserver` that runs after each tool execution
+    /// to feed the per-session cost tracker. Default is
+    /// `NullCostObserver` (cost tracking off).
+    #[must_use]
+    pub fn with_cost_observer(mut self, observer: Box<dyn CostObserver>) -> Self {
+        self.cost_observer = observer;
+        self
     }
 
     pub fn session(&self) -> &Session {
@@ -63,6 +113,10 @@ where
 
     pub fn into_session(self) -> Session {
         self.session
+    }
+
+    pub fn cost_tracker(&self) -> &CostTracker {
+        &self.cost_tracker
     }
 
     /// Run one user turn through the model. Loops on tool_use until
@@ -148,10 +202,31 @@ where
             // agency decides what to do next iteration. The runtime
             // never coaches.
             for (tool_use_id, tool_name, input) in pending_tool_uses {
-                let (output, is_error) = match self.tool_executor.execute(&tool_name, &input) {
-                    Ok(output) => (output, false),
-                    Err(error) => (error.message().to_string(), true),
+                // V3.3 differentiation #1: PreToolUse aegis-predict.
+                // Ask the predictor whether this call should run.
+                // BLOCK becomes a synthetic tool_result the LLM sees
+                // (no actual tool execution, no fix suggestion).
+                let predict_verdict = self.predictor.predict(&tool_name, &input);
+                let (output, is_error) = match predict_verdict {
+                    PredictVerdict::Block { reason } => (reason, true),
+                    PredictVerdict::Allow => match self.tool_executor.execute(&tool_name, &input) {
+                        Ok(output) => (output, false),
+                        Err(error) => (error.message().to_string(), true),
+                    },
                 };
+
+                // V3.3 differentiation #2: cross-turn cost tracking.
+                // After (attempted) execution, ask the cost observer
+                // for any per-file cost it can attribute to this
+                // call. Observer returns empty list when it can't
+                // attribute — that's fine.
+                if !is_error {
+                    let observations = self.cost_observer.observe(&tool_name, &input);
+                    for (path, cost) in observations {
+                        self.cost_tracker.observe(path, cost);
+                    }
+                }
+
                 let result_message = ConversationMessage::tool_result(
                     tool_use_id,
                     tool_name,
@@ -160,8 +235,31 @@ where
                 );
                 self.session.push(result_message);
             }
+
+            // V3.3: between iterations, check the session cost budget.
+            // If exceeded, terminate immediately — no retry, no
+            // coaching string back to the LLM. The user (or upstream
+            // orchestrator) decides whether to start a fresh session.
+            if let Some(budget) = self.config.session_cost_budget {
+                let regression = self.cost_tracker.cumulative_regression();
+                if regression > budget {
+                    return AgentTurnResult {
+                        stopped_reason: StoppedReason::CostBudgetExceeded,
+                        iterations,
+                        task_verdict: None,
+                    };
+                }
+            }
         }
     }
+}
+
+#[allow(dead_code)]
+/// Helper used by tests to peek at cost-observation parsing logic
+/// (currently inlined; this stub keeps the import linkable if
+/// future refactors externalise it).
+fn _value_of_path(_v: &Value) -> Option<String> {
+    None
 }
 
 /// Collapse a stream of events into one assistant message.

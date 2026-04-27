@@ -29,10 +29,13 @@
 //! `crates/aegis-decision/src/task.rs::tests::task_verdict_has_no_feedback_field`
 //! for the sibling contract guarding `TaskVerdict`.
 
+pub mod aegis_predict;
 pub mod api;
 pub mod conversation;
+pub mod cost;
 pub mod mcp;
 pub mod message;
+pub mod predict;
 pub mod providers;
 pub mod testing;
 pub mod tool;
