@@ -21,6 +21,7 @@
 use crate::api::{ApiClient, ApiRequest, AssistantEvent, RuntimeError, ToolDefinition};
 use crate::cost::CostTracker;
 use crate::message::{ContentBlock, ConversationMessage, Session};
+use crate::permission::{PermissionDecision, PermissionPolicy};
 use crate::predict::{NullPredictor, PreToolUsePredictor, PredictVerdict};
 use crate::stalemate::{StalemateDetector, StalemateVerdict};
 use crate::tool::ToolExecutor;
@@ -66,6 +67,7 @@ pub struct ConversationRuntime<C, T> {
     cost_tracker: CostTracker,
     verifier: Option<Box<dyn AgentTaskVerifier>>,
     stalemate: StalemateDetector,
+    permission_policy: Option<PermissionPolicy>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -94,7 +96,18 @@ where
             cost_tracker: CostTracker::new(),
             verifier: None,
             stalemate: StalemateDetector::new(),
+            permission_policy: None,
         }
+    }
+
+    /// Apply a permission policy. Tool calls denied by the policy
+    /// short-circuit before reaching the predictor or executor.
+    /// Default = no policy (everything allowed at this layer; the
+    /// predictor / executor still get a chance).
+    #[must_use]
+    pub fn with_permission_policy(mut self, policy: PermissionPolicy) -> Self {
+        self.permission_policy = Some(policy);
+        self
     }
 
     /// Inject a `PreToolUsePredictor`. Default is `NullPredictor`
@@ -254,17 +267,29 @@ where
             // agency decides what to do next iteration. The runtime
             // never coaches.
             for (tool_use_id, tool_name, input) in pending_tool_uses {
-                // V3.3 differentiation #1: PreToolUse aegis-predict.
-                // Ask the predictor whether this call should run.
-                // BLOCK becomes a synthetic tool_result the LLM sees
-                // (no actual tool execution, no fix suggestion).
-                let predict_verdict = self.predictor.predict(&tool_name, &input);
-                let (output, is_error) = match predict_verdict {
-                    PredictVerdict::Block { reason } => (reason, true),
-                    PredictVerdict::Allow => match self.tool_executor.execute(&tool_name, &input) {
-                        Ok(output) => (output, false),
-                        Err(error) => (error.message().to_string(), true),
-                    },
+                // V3.6: permission gate first — if the user's mode
+                // doesn't allow this tool, deny before consulting
+                // the predictor or executor (no point asking
+                // aegis-mcp about a write that's already banned).
+                let permission = match &self.permission_policy {
+                    Some(policy) => policy.authorize(&tool_name),
+                    None => PermissionDecision::Allow,
+                };
+                let (output, is_error) = match permission {
+                    PermissionDecision::Deny { reason } => (reason, true),
+                    PermissionDecision::Allow => {
+                        // V3.3 differentiation #1: PreToolUse aegis-predict.
+                        let predict_verdict = self.predictor.predict(&tool_name, &input);
+                        match predict_verdict {
+                            PredictVerdict::Block { reason } => (reason, true),
+                            PredictVerdict::Allow => {
+                                match self.tool_executor.execute(&tool_name, &input) {
+                                    Ok(output) => (output, false),
+                                    Err(error) => (error.message().to_string(), true),
+                                }
+                            }
+                        }
+                    }
                 };
 
                 // V3.3 differentiation #2: cross-turn cost tracking.
