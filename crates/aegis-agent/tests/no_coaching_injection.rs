@@ -38,12 +38,40 @@ const FORBIDDEN_SOURCE_TOKENS: &[&str] = &[
 ];
 
 #[test]
-fn lib_source_has_no_coaching_apis() {
-    let source = include_str!("../src/lib.rs");
+fn crate_source_has_no_coaching_apis() {
+    let source = collect_all_crate_source();
     for forbidden in FORBIDDEN_SOURCE_TOKENS {
         assert!(
             !source.contains(forbidden),
-            "aegis-agent lib.rs contains forbidden coaching token {forbidden:?}"
+            "aegis-agent src/ contains forbidden coaching token {forbidden:?}"
         );
+    }
+}
+
+/// Walk the crate's `src/` directory and concatenate every `.rs`
+/// file's contents. Used by source-text contract scans so adding
+/// a new module never silently bypasses the trip-wire.
+fn collect_all_crate_source() -> String {
+    let mut out = String::new();
+    let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    walk_rs(&src_dir, &mut out);
+    out
+}
+
+fn walk_rs(dir: &std::path::Path, out: &mut String) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_rs(&path, out);
+        } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                out.push_str(&content);
+                out.push('\n');
+            }
+        }
     }
 }

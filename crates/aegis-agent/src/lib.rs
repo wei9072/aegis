@@ -29,6 +29,17 @@
 //! `crates/aegis-decision/src/task.rs::tests::task_verdict_has_no_feedback_field`
 //! for the sibling contract guarding `TaskVerdict`.
 
+pub mod api;
+pub mod conversation;
+pub mod message;
+pub mod testing;
+pub mod tool;
+
+pub use api::{ApiClient, ApiRequest, AssistantEvent, RuntimeError};
+pub use conversation::ConversationRuntime;
+pub use message::{ContentBlock, ConversationMessage, MessageRole, Session};
+pub use tool::{ToolError, ToolExecutor};
+
 use aegis_decision::TaskVerdict;
 use serde::{Deserialize, Serialize};
 
