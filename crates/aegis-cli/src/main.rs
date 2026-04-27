@@ -70,6 +70,34 @@ enum Command {
         sub: PipelineSub,
     },
 
+    /// Scan an entire workspace — Ring 0 + Ring 0.5 across every
+    /// supported file, plus import-graph cycle detection. Parallel
+    /// (rayon) + persistent mtime+size cache (`<workspace>/.aegis-cache/`)
+    /// so re-scans on a maintained codebase finish in <1s.
+    Scan {
+        /// Workspace root to scan. Defaults to current directory.
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+        /// Top-N highest-cost files to print in the summary.
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+        /// Skip the persistent cache. Forces a full rescan even if
+        /// nothing has changed since last run.
+        #[arg(long)]
+        no_cache: bool,
+        /// Skip cross-file import-graph cycle detection.
+        #[arg(long)]
+        no_cycles: bool,
+        /// After scan, also auto-detect + run the project's test
+        /// suite (Cargo.toml → `cargo test`, pyproject.toml →
+        /// `pytest`, etc.) and append the verdict.
+        #[arg(long)]
+        verify: bool,
+        /// Emit the report as JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// V3 coding agent — full agent surface with aegis core gates
     /// always-on by default.
     ///
@@ -207,6 +235,14 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Check { files, json } => cmd_check(&files, json),
         Command::Languages { json } => cmd_languages(json),
+        Command::Scan {
+            workspace,
+            top,
+            no_cache,
+            no_cycles,
+            verify,
+            json,
+        } => cmd_scan(workspace, top, no_cache, no_cycles, verify, json),
         Command::Pipeline { sub } => match sub {
             PipelineSub::Run {
                 task,
@@ -668,6 +704,7 @@ where
                 println!("  /reset        — clear conversation history");
                 println!("  /cost         — current cost-tracker snapshot");
                 println!("  /history      — message count");
+                println!("  /scan         — Ring 0 + Ring 0.5 + cycle detection across the workspace");
                 println!("  /save [path]  — save session (default: auto-save target)");
                 println!("  /load <path>  — load + replace current session");
                 println!("  /help         — this list");
@@ -708,6 +745,40 @@ where
                     "  {} messages in session",
                     rt.session().messages.len()
                 );
+                continue;
+            }
+            "/scan" => {
+                use aegis_core::scan::{scan_workspace, ScanOptions};
+                // Use the workspace the runtime was configured with;
+                // fall back to "." if none.
+                let ws = std::env::current_dir().unwrap_or_else(|_| ".".into());
+                eprintln!("  scanning {} ...", ws.display());
+                let report = scan_workspace(&ws, &ScanOptions::default());
+                println!(
+                    "  {} files / cost {:.0} / {} cycles / {} syntax-err  ({} ms, {}h/{}m cache)",
+                    report.files_scanned,
+                    report.total_cost,
+                    report.cyclic_dependencies.len(),
+                    report.files_with_syntax_errors,
+                    report.duration_ms,
+                    report.cache_stats.hits,
+                    report.cache_stats.misses,
+                );
+                if !report.cyclic_dependencies.is_empty() {
+                    println!("  {} import cycles:", report.cyclic_dependencies.len());
+                    for cycle in &report.cyclic_dependencies {
+                        let parts: Vec<String> =
+                            cycle.iter().map(|p| p.display().to_string()).collect();
+                        println!("    - {}", parts.join(" → "));
+                    }
+                }
+                let n = 5.min(report.files.len());
+                if n > 0 {
+                    println!("  top {n} by cost:");
+                    for f in report.top_n_by_cost(n) {
+                        println!("    {:>5.0}  {}", f.cost, f.relative_path.display());
+                    }
+                }
                 continue;
             }
             cmd if cmd == "/save" || cmd.starts_with("/save ") => {
@@ -918,6 +989,165 @@ where
                 .join("")
         })
         .unwrap_or_default()
+}
+
+fn cmd_scan(
+    workspace: PathBuf,
+    top: usize,
+    no_cache: bool,
+    no_cycles: bool,
+    verify: bool,
+    json: bool,
+) -> ExitCode {
+    use aegis_core::scan::{scan_workspace, ScanOptions};
+
+    let opts = ScanOptions {
+        use_cache: !no_cache,
+        detect_cycles: !no_cycles,
+        ..ScanOptions::default()
+    };
+
+    let report = scan_workspace(&workspace, &opts);
+
+    // Optional verifier — runs after the scan, results appended to
+    // the report. aegis-cli already depends on aegis-agent so we
+    // can use the auto-detect TestVerifier directly.
+    let verifier_result = if verify {
+        use aegis_agent::verifier::{AgentTaskVerifier, TestVerifier};
+        match TestVerifier::auto_detect_composite(&workspace) {
+            Some(v) => Some(v.verify(&workspace)),
+            None => {
+                eprintln!(
+                    "aegis scan: --verify requested but no project marker found in {} \
+                     (Cargo.toml / pyproject.toml / package.json / go.mod). Skipping.",
+                    workspace.display()
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    if json {
+        let payload = serde_json::json!({
+            "report": report,
+            "verifier": verifier_result.as_ref().map(|r| serde_json::json!({
+                "passed": r.passed,
+                "rationale": r.rationale,
+            })),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+    } else {
+        print_scan_report_human(&report, top, verifier_result.as_ref());
+    }
+
+    let scan_clean = report.files_with_syntax_errors == 0
+        && report.cyclic_dependencies.is_empty();
+    let verify_clean = verifier_result.as_ref().map(|r| r.passed).unwrap_or(true);
+    if scan_clean && verify_clean {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn print_scan_report_human(
+    report: &aegis_core::scan::ScanReport,
+    top: usize,
+    verifier: Option<&aegis_decision::VerifierResult>,
+) {
+    println!();
+    println!("aegis scan — {}", report.root.display());
+    println!("  files scanned        : {}", report.files_scanned);
+    if report.files_skipped_io_error > 0 {
+        println!(
+            "  files skipped (IO)   : {}",
+            report.files_skipped_io_error
+        );
+    }
+    if report.truncated_count > 0 {
+        println!(
+            "  files truncated cap  : {} (raise --max-files if you need them all)",
+            report.truncated_count
+        );
+    }
+    println!("  total cost           : {:.0}", report.total_cost);
+    println!(
+        "  files with syntax err: {}",
+        report.files_with_syntax_errors
+    );
+    println!(
+        "  import graph         : {} nodes / {} edges / {} cycles",
+        report.import_graph.nodes,
+        report.import_graph.edges,
+        report.import_graph.cycle_count
+    );
+    println!(
+        "  cache                : {} hits / {} misses / {} stale  (took {} ms)",
+        report.cache_stats.hits,
+        report.cache_stats.misses,
+        report.cache_stats.stale,
+        report.duration_ms
+    );
+
+    if !report.cyclic_dependencies.is_empty() {
+        println!();
+        println!("== import cycles ==");
+        for (i, cycle) in report.cyclic_dependencies.iter().enumerate() {
+            print!("  {}.", i + 1);
+            for (j, p) in cycle.iter().enumerate() {
+                if j > 0 {
+                    print!(" → ");
+                }
+                print!(" {}", p.display());
+            }
+            println!();
+        }
+    }
+
+    let viol = report.syntax_violations();
+    if !viol.is_empty() {
+        println!();
+        println!("== syntax violations ==");
+        for f in &viol {
+            for v in &f.syntax_violations {
+                println!("  {}: {}", f.relative_path.display(), v);
+            }
+        }
+    }
+
+    if !report.files.is_empty() {
+        let n = top.min(report.files.len());
+        if n > 0 {
+            println!();
+            println!("== top {} by cost ==", n);
+            for f in report.top_n_by_cost(n) {
+                let signal_summary: Vec<String> = f
+                    .signals
+                    .iter()
+                    .filter(|(_, v)| *v > 0.0)
+                    .map(|(name, value)| format!("{name}={value:.0}"))
+                    .collect();
+                println!(
+                    "  {:>5.0}  {}  {}",
+                    f.cost,
+                    f.relative_path.display(),
+                    signal_summary.join(" ")
+                );
+            }
+        }
+    }
+
+    if let Some(r) = verifier {
+        println!();
+        println!("== verifier ==");
+        println!(
+            "  {} — {}",
+            if r.passed { "PASSED" } else { "FAILED" },
+            r.rationale
+        );
+    }
 }
 
 fn cmd_check(files: &[PathBuf], json: bool) -> ExitCode {

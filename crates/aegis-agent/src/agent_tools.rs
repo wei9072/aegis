@@ -97,6 +97,21 @@ impl ReadOnlyTools {
                     "required": ["pattern"]
                 }),
             ),
+            ToolDefinition::new(
+                "Scan",
+                "Scan the entire workspace: Ring 0 syntax + Ring 0.5 \
+                 structural signals (fan_out, max_chain_depth) per file, \
+                 plus cross-file import-graph cycle detection. \
+                 Returns a summary including total cost, syntax violation \
+                 count, top N highest-cost files, and any import cycles. \
+                 Parallel-scanned with persistent cache — cheap to call.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "top": { "type": "integer", "description": "How many top-cost files to surface (default 10)." }
+                    }
+                }),
+            ),
         ]
     }
 
@@ -162,6 +177,67 @@ impl ReadOnlyTools {
         Ok(out.join("\n"))
     }
 
+    fn do_scan(&self, args: &Value) -> Result<String, ToolError> {
+        let top = args
+            .get("top")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(10);
+        let report = aegis_core::scan::scan_workspace(
+            &self.workspace,
+            &aegis_core::scan::ScanOptions::default(),
+        );
+        let mut out = String::new();
+        out.push_str(&format!(
+            "Scanned {} files (cost={:.0}, {} cycles, {} syntax-err, {}ms)\n",
+            report.files_scanned,
+            report.total_cost,
+            report.cyclic_dependencies.len(),
+            report.files_with_syntax_errors,
+            report.duration_ms,
+        ));
+        if !report.cyclic_dependencies.is_empty() {
+            out.push_str("\nImport cycles:\n");
+            for cycle in &report.cyclic_dependencies {
+                let parts: Vec<String> =
+                    cycle.iter().map(|p| p.display().to_string()).collect();
+                out.push_str(&format!("  - {}\n", parts.join(" → ")));
+            }
+        }
+        let viol = report.syntax_violations();
+        if !viol.is_empty() {
+            out.push_str(&format!("\n{} files with syntax errors:\n", viol.len()));
+            for f in viol.iter().take(top) {
+                for v in &f.syntax_violations {
+                    out.push_str(&format!(
+                        "  - {}: {}\n",
+                        f.relative_path.display(),
+                        v
+                    ));
+                }
+            }
+        }
+        let n = top.min(report.files.len());
+        if n > 0 {
+            out.push_str(&format!("\nTop {n} by structural cost:\n"));
+            for f in report.top_n_by_cost(n) {
+                let pairs: Vec<String> = f
+                    .signals
+                    .iter()
+                    .filter(|(_, v)| *v > 0.0)
+                    .map(|(name, value)| format!("{name}={value:.0}"))
+                    .collect();
+                out.push_str(&format!(
+                    "  cost={:.0}  {}  ({})\n",
+                    f.cost,
+                    f.relative_path.display(),
+                    pairs.join(", ")
+                ));
+            }
+        }
+        Ok(out)
+    }
+
     fn do_grep(&self, args: &Value) -> Result<String, ToolError> {
         let needle = args
             .get("pattern")
@@ -219,8 +295,9 @@ impl ToolExecutor for ReadOnlyTools {
             "Read" => self.do_read(&args),
             "Glob" => self.do_glob(&args),
             "Grep" => self.do_grep(&args),
+            "Scan" => self.do_scan(&args),
             other => Err(ToolError::new(format!(
-                "ReadOnlyTools: unknown tool {other:?} (have: Read, Glob, Grep)"
+                "ReadOnlyTools: unknown tool {other:?} (have: Read, Glob, Grep, Scan)"
             ))),
         }
     }
