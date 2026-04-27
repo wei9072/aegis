@@ -14,7 +14,6 @@ members = [
     "crates/aegis-ir",
     "crates/aegis-providers",
     "crates/aegis-runtime",
-    "crates/aegis-pyshim",
     "crates/aegis-cli",
     "crates/aegis-mcp",
 ]

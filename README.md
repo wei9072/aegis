@@ -148,34 +148,27 @@ except RuntimeError as exc:
         print(f"  {e.layer:14} {e.decision:8} {e.reason}")
 ```
 
-Runnable copy: [`examples/00_quickstart.py`](examples/00_quickstart.py).
-Other patterns (multi-turn pipeline, custom Layer C verifier,
-trace consumption): [`examples/`](examples/).
-
-**Build note.** Aegis ships a Rust extension for fast structural-signal
-extraction. `pip install -e .` builds both the Rust extension and
-the Python package in one step via maturin:
+**Build note.** As of V1.10, Aegis is a single Rust workspace
+producing two binaries — `aegis` (CLI) and `aegis-mcp` (MCP
+stdio server). Zero Python at runtime.
 
 ```bash
-# Prerequisites: Python 3.10+, git, and a Rust toolchain.
+# Prerequisites: git + a Rust toolchain.
 # If you don't have Rust:
 #   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 #   source "$HOME/.cargo/env"
 
 git clone https://github.com/wei9072/aegis && cd aegis
-python -m venv .venv && source .venv/bin/activate
-pip install -e .                   # 30s-2min first time; <5s after
-python examples/00_quickstart.py
+cargo build --release --workspace
+./target/release/aegis languages
+./target/release/aegis check path/to/file.py
 ```
 
-Optional extras: `pip install -e ".[dev]"` adds pytest;
-`pip install -e ".[mcp]"` adds the MCP SDK so you can run
-`aegis-mcp` for Cursor / Claude Code integration.
-
-Examples self-bootstrap the import path; no `PYTHONPATH=` prefix
-required. Build friction reports welcome at
-[`docs/launch/issue_rust_build_friction.md`](docs/launch/issue_rust_build_friction.md).
-PyPI prebuilt wheels coming once friction reports stabilise.
+Install system-wide via `cargo install --path crates/aegis-cli`
+(and `--path crates/aegis-mcp` for the MCP server). Cross-platform
+release artifacts (Linux x86_64/aarch64, macOS x86_64/aarch64,
+Windows x86_64) ship via GitHub Releases — see V2.0 in
+[`docs/v1_rust_port_plan.md`](docs/v1_rust_port_plan.md).
 
 ---
 
@@ -189,7 +182,7 @@ that doesn't ask you to switch tools.
 | :--- | :--- | :--- |
 | Commit | [Git pre-commit hook](docs/integrations/git_pre_commit.md) | ✓ ready (5-line bash) |
 | PR / merge | [GitHub Action / CI gate](docs/integrations/github_action.md) | ✓ ready (10-line YAML) |
-| Agent decision | [MCP server](docs/integrations/mcp_design.md) | ✅ `validate_change` ready (`pip install -e ".[mcp]" && aegis-mcp`) |
+| Agent decision | [MCP server](docs/integrations/mcp_design.md) | ✅ `validate_change` ready (`cargo install --path crates/aegis-mcp && aegis-mcp`) |
 
 Pick whichever boundary fits your workflow; you can stack them.
 Index + per-path detail: [`docs/integrations/`](docs/integrations/).
@@ -209,10 +202,11 @@ Index + per-path detail: [`docs/integrations/`](docs/integrations/).
 ### Supported source languages (Ring 0 + Ring 0.5 signals)
 
 Tier 2 multi-language support landed in V1.4–V1.7 of the Rust port
-(see [`docs/v1_rust_port_plan.md`](docs/v1_rust_port_plan.md)). The
-multi-turn pipeline is still Python-only — these languages get the
-**enforcement** half (syntax-error detection, fan-out, max-chain-depth)
-without the **refactor** half.
+(see [`docs/v1_rust_port_plan.md`](docs/v1_rust_port_plan.md)). With
+V1.10's Python deletion, every language listed below now gets both
+**enforcement** (Ring 0 + Ring 0.5 via `aegis check`) and the
+**refactor** half (`aegis pipeline run` against an OpenAI-compatible
+LLM provider). Run `aegis languages` for the live registry.
 
 | Language | Ring 0 syntax | Ring 0.5 fan-out | Ring 0.5 chain-depth | Extensions |
 | :--- | :---: | :---: | :---: | :--- |

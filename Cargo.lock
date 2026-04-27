@@ -80,20 +80,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aegis-pyshim"
-version = "0.1.0"
-dependencies = [
- "aegis-core",
- "aegis-decision",
- "aegis-ir",
- "aegis-providers",
- "aegis-runtime",
- "aegis-trace",
- "pyo3",
- "serde_json",
-]
-
-[[package]]
 name = "aegis-runtime"
 version = "0.1.0"
 dependencies = [

@@ -29,49 +29,42 @@ the user asks "what does this thing actually do".
 
 ## Setup — the canonical install sequence
 
-Run these in order from the user's home or workspace dir. **Do not
-combine, do not reorder, do not skip the verification step.**
+V1.10 — Aegis is now a single Rust workspace, **zero Python at
+runtime**. Run these in order from the user's home or workspace dir.
 
 ```bash
 # 0. Prerequisites — check before installing.
-python --version           # need 3.10+
 git --version              # any recent
 cargo --version || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env"
 
-# 1. Clone, enter, venv.
+# 1. Clone, enter.
 git clone https://github.com/wei9072/aegis ~/aegis
 cd ~/aegis
-python -m venv .venv
-source .venv/bin/activate
 
-# 2. Single-step install — builds the Rust extension via maturin AND
-# installs the Python packages AND deps AND registers the `aegis` CLI.
-# Takes 30s-2min on first run (Rust compilation), <5s on subsequent.
-pip install -e .
+# 2. Build (release).  ~1-2 min first time; <10s incremental.
+cargo build --release --workspace
 
-# 3. VERIFY (do not skip — confirms the install worked end-to-end).
-python examples/00_quickstart.py
+# 3. VERIFY (do not skip).
+./target/release/aegis languages          # prints supported languages
+./target/release/aegis check Cargo.toml   # zero-signal smoke test
 ```
 
-Optional extras for specific scenarios:
+Install system-wide (so `aegis` is on `$PATH`):
 
 ```bash
-pip install -e ".[dev]"       # adds pytest for running tests
-pip install -e ".[mcp]"       # adds the MCP SDK for `aegis-mcp` server
-pip install -e ".[dev,mcp]"   # both
+cargo install --path crates/aegis-cli
+cargo install --path crates/aegis-mcp     # optional — MCP server
 ```
 
-Expected output of step 3 includes the lines `ALLOWED → ...` and
-`BLOCKED → RuntimeError: ...`. If you don't see both, the install
-is broken — diagnose before proceeding to integration. Common causes:
+After step 3 passes, the `aegis` CLI works without a Python
+interpreter on the box. Common causes if it doesn't build:
 
-- `cargo: command not found` → restart shell or `source "$HOME/.cargo/env"`. The Rust toolchain is required for step 2 (PyPI wheels coming later — see issue tracker).
-- `ImportError: dynamic module does not define module export function` → re-run step 2 (Rust extension may have been left in inconsistent state).
-- `ModuleNotFoundError: No module named 'aegis'` → check that `python` resolves to the venv's Python (`which python`); if not, re-run step 2 with the venv active.
+- `cargo: command not found` → restart shell or `source "$HOME/.cargo/env"`.
+- `failed to compile aegis-core` → ensure your Rust toolchain is recent (1.74+); `rustup update`.
 
-After step 3 passes, Aegis is installed and the `aegis` CLI is on
-PATH. The Python package and Rust extension are both in the venv;
-`python -c "from aegis import _core"` works. You're ready to integrate.
+Cross-platform release artifacts (Linux x86_64/aarch64, macOS
+x86_64/aarch64, Windows x86_64) ship via GitHub Releases — see
+V2.0 in [`docs/v1_rust_port_plan.md`](docs/v1_rust_port_plan.md).
 
 ---
 
@@ -98,10 +91,10 @@ then `chmod +x .git/hooks/pre-commit`:
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-files=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' || true)
+files=$(git diff --cached --name-only --diff-filter=ACM \
+        | grep -E '\.(py|pyi|ts|tsx|js|mjs|cjs|jsx|go|java|cs|php|swift|kt|dart)$' || true)
 [ -z "$files" ] && exit 0
-source "$HOME/aegis/.venv/bin/activate"
-echo "$files" | (cd "$HOME/aegis" && PYTHONPATH=. xargs -I{} python -m aegis.cli check "$OLDPWD/{}")
+echo "$files" | xargs -I{} aegis check "$OLDPWD/{}"
 ```
 
 Verify by triggering a known-fail (paste this into the user's repo
@@ -129,42 +122,30 @@ check as required in branch protection (you can't do this for them
 
 ### Path C — Wrap the user's LLM in `LLMGateway`
 
-The integration is one Python class + replacing one call site. The
-canonical template is [`examples/00_quickstart.py`](examples/00_quickstart.py).
-Adapted for the user's existing LLM:
+As of V1.10, the integration is the `aegis pipeline run` binary
+subcommand or the `aegis-mcp` server. There is no longer a Python
+in-process API to wrap — the agent invokes the binary as a child
+process or talks to `aegis-mcp` over stdio.
 
-```python
-from aegis.agents.llm_adapter import LLMGateway
-
-class UsersLLM:
-    """Wrap whatever the user is calling today."""
-    def generate(self, prompt: str, tools=None) -> str:
-        return existing_llm_call(prompt)   # the user's current call
-
-gateway = LLMGateway(llm_provider=UsersLLM())
-
-# Replace direct LLM calls with this:
-safe_response = gateway.generate_and_validate(prompt, max_retries=1)
-
-# Read the trace to surface decision events to the user / log:
-for event in gateway.last_trace.events:
-    print(f"{event.layer}:{event.decision} {event.reason}")
+```bash
+# Drive a single multi-turn pipeline run.
+export AEGIS_PROVIDER=openai          # or openrouter | groq
+export OPENAI_API_KEY=...             # or AEGIS_API_KEY / OPENROUTER_API_KEY / GROQ_API_KEY
+aegis pipeline run \
+  --task "rename the foo helper to bar across the codebase" \
+  --root . \
+  --max-iters 3 \
+  --json
 ```
 
-If the user has a multi-turn refactor loop (not just single
-completions), use `pipeline.run()` instead of `LLMGateway` — see
-[`examples/01_pipeline_basic.py`](examples/01_pipeline_basic.py)
-and [`examples/03_custom_verifier.py`](examples/03_custom_verifier.py).
-
-**For Cursor / Claude Code users specifically:** there's a fourth
-path — the MCP server. Install the optional `mcp` extra
-(`pip install -e ".[mcp]"`) and run `aegis-mcp`. Configure the
-client per
-[`docs/integrations/mcp_design.md`](docs/integrations/mcp_design.md);
-the agent can then call `validate_change(path, new_content,
-old_content?)` mid-loop and get a structured verdict back. Only
-`validate_change` exposed in V0.x — if the user needs the other
-tools (`validate_diff`, `get_signals`), tell them to file an issue.
+For LLM clients with their own loop (Cursor / Claude Code / custom
+agent), use the MCP server — `cargo install --path crates/aegis-mcp`
+then add `aegis-mcp` to the MCP client config per
+[`docs/integrations/mcp_design.md`](docs/integrations/mcp_design.md).
+The agent calls `validate_change(path, new_content, old_content?)`
+mid-loop and gets a structured verdict back. Only `validate_change`
+exposed (intentionally narrow surface — if the user needs the other
+tools, tell them to file an issue).
 
 ---
 
@@ -188,8 +169,10 @@ propose any of these to the user.**
 4. **Do not propose extracting `aegis-core` as a generic framework.**
    See [`docs/future_abstraction.md`](docs/future_abstraction.md) —
    three trigger conditions must be met first; they aren't yet.
-5. **Do not modify `tests/test_task_verifier.py::test_task_verdict_has_no_feedback_field`.**
-   It enforces rule 2 structurally.
+5. **Do not modify `crates/aegis-decision/src/task.rs::TaskVerdict`** to add
+   feedback / hint / next_plan / advice / guidance fields. The cargo
+   contract test `crates/aegis-decision/tests/contract.rs` enforces
+   rule 2 structurally.
 
 If a user request implies any of these, stop and explain that the
 request would change Aegis from a constraint system into an optimizer,
@@ -204,17 +187,15 @@ Cheatsheet for "I need to find X in this repo":
 | You need... | Look at... |
 | :--- | :--- |
 | Understand what Aegis is for humans | [`README.md`](README.md) |
-| Run a no-API-key demo | [`examples/00_quickstart.py`](examples/00_quickstart.py) |
-| Real-LLM single-call example | [`examples/02_gateway_single_call.py`](examples/02_gateway_single_call.py) |
-| Multi-turn refactor with verifier | [`examples/01_pipeline_basic.py`](examples/01_pipeline_basic.py), [`examples/03_custom_verifier.py`](examples/03_custom_verifier.py) |
-| Read the decision trace | [`examples/04_read_decision_trace.py`](examples/04_read_decision_trace.py) |
-| Add a new LLM provider | mirror [`aegis/agents/groq.py`](aegis/agents/groq.py) — subclass `OpenAIProvider` if OpenAI-compatible, else implement the `LLMProvider` Protocol from scratch |
+| Single-file static analysis (Ring 0 + 0.5) | `aegis check <files>` (or `--json`) |
+| List supported source languages | `aegis languages` (or `aegis languages --json`) |
+| Drive an LLM-backed multi-turn refactor | `aegis pipeline run --task "..." --root . [--scope sub] --max-iters N` (env: `AEGIS_PROVIDER`, `AEGIS_MODEL`, `AEGIS_API_KEY`) |
+| MCP server for Cursor / Claude Code | `aegis-mcp` (stdio JSON-RPC; protocol `2025-06-18`) |
+| LLM-provider trait + first impl | [`crates/aegis-providers/src/lib.rs`](crates/aegis-providers/src/lib.rs), [`openai.rs`](crates/aegis-providers/src/openai.rs) |
+| Add a new LLM provider | mirror `OpenAIChatProvider`; implement the `LLMProvider` trait |
 | Add a new source language | one Cargo dep + one [`crates/aegis-core/src/ast/languages/<lang>.rs`](crates/aegis-core/src/ast/languages/) adapter + one [`crates/aegis-core/queries/<lang>.scm`](crates/aegis-core/queries/) query, then register in [`registry.rs`](crates/aegis-core/src/ast/registry.rs). Per-language checklist in [`docs/multi_language_plan.md`](docs/multi_language_plan.md). |
-| List supported languages from Python | `from aegis.core.bindings import supported_languages, supported_extensions` |
-| Add a new scenario | new dir under [`tests/scenarios/`](tests/scenarios/); copy structure from `tests/scenarios/syntax_fix/` |
-| Run all tests | `PYTHONPATH=. python -m pytest tests/ -q` (251 should pass) |
-| Run cross-model evidence sweep | `python scripts/v1_validation.py` |
-| Aggregate sweep results | `python scripts/v1_aggregate.py` |
+| Run all tests | `cargo test --workspace` |
+| Cross-model sweep | (script not yet ported; see V1.8 in [`docs/v1_rust_port_plan.md`](docs/v1_rust_port_plan.md) — the harness is gated on API quotas, not code) |
 | Understand the V1.6 evidence | [`docs/v1_validation.md`](docs/v1_validation.md) |
 | Understand what V2 looks like | [`docs/gap3_control_plane.md`](docs/gap3_control_plane.md) (design only, not implemented) |
 | Understand what's deferred | [`docs/post_launch_discipline.md`](docs/post_launch_discipline.md) |
@@ -226,8 +207,9 @@ Cheatsheet for "I need to find X in this repo":
 If a user reports something Aegis blocks that they think shouldn't
 be blocked:
 
-1. Run `python examples/04_read_decision_trace.py` (or the user's
-   equivalent) to capture the full trace.
+1. Run `aegis pipeline run --task "..." --root . --json` (or
+   `aegis check <files> --json`) to capture the full per-iteration
+   trace / signals.
 2. Identify which gate fired (the `layer` field).
 3. **Don't** propose modifying the gate logic to let it pass.
 4. **Do** open an issue at https://github.com/wei9072/aegis/issues
