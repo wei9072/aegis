@@ -26,6 +26,7 @@ use clap::{Parser, Subcommand};
 
 mod input;
 mod render;
+mod session_store;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -126,6 +127,14 @@ enum Command {
         /// server's advertised tools alongside Read/Glob/Grep/Edit/Write.
         #[arg(long = "mcp", value_name = "COMMAND")]
         mcp: Vec<String>,
+        /// Resume a saved session. Accepts a path to a session file
+        /// or `latest` to pick the most recent file from the
+        /// sessions directory (`$XDG_DATA_HOME/aegis/sessions/`,
+        /// fallback `~/.local/share/aegis/sessions/`). The runtime
+        /// auto-saves every turn so subsequent invocations can
+        /// `--resume latest` to continue.
+        #[arg(long, value_name = "PATH_OR_LATEST")]
+        resume: Option<String>,
         /// Emit the full result as JSON.
         #[arg(long)]
         json: bool,
@@ -208,6 +217,7 @@ fn main() -> ExitCode {
             read_only,
             no_aegis,
             mcp,
+            resume,
             json,
         } => cmd_chat(
             prompt,
@@ -221,6 +231,7 @@ fn main() -> ExitCode {
             read_only,
             no_aegis,
             mcp,
+            resume,
             json,
         ),
     }
@@ -239,6 +250,7 @@ fn cmd_chat(
     read_only: bool,
     no_aegis: bool,
     mcp_servers: Vec<String>,
+    resume: Option<String>,
     json: bool,
 ) -> ExitCode {
     use aegis_agent::aegis_predict::LocalAegisPredictor;
@@ -353,6 +365,30 @@ fn cmd_chat(
         None
     };
 
+    // Resume from a saved session if requested. Failure surfaces
+    // immediately — we don't silently start a fresh session when the
+    // user explicitly asked to continue an old one.
+    let initial_session = if let Some(arg) = resume.as_deref() {
+        match session_store::resolve_resume(arg).and_then(|p| {
+            session_store::load(&p).map(|s| (p, s)).map_err(|e| e.to_string())
+        }) {
+            Ok((path, session)) => {
+                eprintln!(
+                    "aegis chat: resumed {} ({} messages)",
+                    path.display(),
+                    session.messages.len()
+                );
+                session
+            }
+            Err(e) => {
+                eprintln!("aegis chat: --resume failed: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        Session::new()
+    };
+
     let system_prompt = system.map(|s| vec![s]).unwrap_or_default();
 
     // Tool surface: aegis core defaults to ON. Read-only mode strips
@@ -435,7 +471,7 @@ fn cmd_chat(
     };
 
     let mut rt = ConversationRuntime::new(
-        Session::new(),
+        initial_session,
         provider,
         executor,
         system_prompt,
@@ -546,6 +582,14 @@ where
     let renderer = render::TerminalRenderer::new();
     let theme = *renderer.color_theme();
 
+    // Auto-save target — fixed for the life of this REPL session,
+    // so `--resume latest` next invocation reliably picks it up.
+    let session_path = session_store::fresh_session_path();
+    eprintln!(
+        "aegis chat: auto-saving to {} (use --resume latest to continue next time)",
+        session_path.display()
+    );
+
     let banner_title = format!("{}", "aegis chat".with(theme.aegis_brand).bold());
     println!();
     println!("  ┌─ {} ─ V3 interactive mode", banner_title);
@@ -603,6 +647,8 @@ where
                 println!("  /reset        — clear conversation history");
                 println!("  /cost         — current cost-tracker snapshot");
                 println!("  /history      — message count");
+                println!("  /save [path]  — save session (default: auto-save target)");
+                println!("  /load <path>  — load + replace current session");
                 println!("  /help         — this list");
                 continue;
             }
@@ -641,6 +687,47 @@ where
                     "  {} messages in session",
                     rt.session().messages.len()
                 );
+                continue;
+            }
+            cmd if cmd == "/save" || cmd.starts_with("/save ") => {
+                let target = cmd
+                    .strip_prefix("/save")
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| session_path.clone());
+                match session_store::save(rt.session(), &target) {
+                    Ok(()) => println!(
+                        "  saved {} messages to {}",
+                        rt.session().messages.len(),
+                        target.display()
+                    ),
+                    Err(e) => println!(
+                        "  {}: {e}",
+                        "save failed".with(theme.spinner_failed)
+                    ),
+                }
+                continue;
+            }
+            cmd if cmd.starts_with("/load ") => {
+                let arg = cmd.strip_prefix("/load ").unwrap_or("").trim();
+                if arg.is_empty() {
+                    println!("  /load needs a path argument");
+                    continue;
+                }
+                match session_store::resolve_resume(arg)
+                    .and_then(|p| session_store::load(&p).map_err(|e| e.to_string()))
+                {
+                    Ok(loaded) => {
+                        let count = loaded.messages.len();
+                        rt.replace_session(loaded);
+                        println!("  loaded {count} messages");
+                    }
+                    Err(e) => println!(
+                        "  {}: {e}",
+                        "load failed".with(theme.spinner_failed)
+                    ),
+                }
                 continue;
             }
             _ if trimmed.starts_with('/') => {
@@ -774,6 +861,17 @@ where
             other => {
                 eprintln!("  ({:?}, {} iterations)", other, result.iterations);
             }
+        }
+
+        // Auto-save the session after every turn so a crash / Ctrl-C
+        // never loses the transcript. Failures are non-fatal — print
+        // a diagnostic but keep the REPL alive.
+        if let Err(e) = session_store::save(rt.session(), &session_path) {
+            eprintln!(
+                "  {}: {e}",
+                format!("auto-save to {} failed", session_path.display())
+                    .with(theme.spinner_failed)
+            );
         }
     }
 }

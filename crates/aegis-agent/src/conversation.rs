@@ -199,6 +199,16 @@ where
         self.stalemate = StalemateDetector::new();
     }
 
+    /// Swap the entire session (e.g. for `/load <path>` in the chat
+    /// REPL). Resets cost tracker + stalemate detector for safety —
+    /// the cost baseline of an old session can't be reused after
+    /// the workspace may have moved.
+    pub fn replace_session(&mut self, session: Session) {
+        self.session = session;
+        self.cost_tracker = CostTracker::new();
+        self.stalemate = StalemateDetector::new();
+    }
+
     /// Run one user turn through the model. Loops on tool_use until
     /// the assistant emits a turn with no `tool_use` blocks, or until
     /// the per-turn iteration budget is exhausted.
