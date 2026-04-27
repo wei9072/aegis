@@ -7,6 +7,7 @@ repository.workspace = true
 description = "V3 — coding agent built on aegis primitives. See docs/v3_agent_design.md."
 
 [dependencies]
+aegis-core = { path = "../aegis-core" }
 aegis-decision = { path = "../aegis-decision" }
 serde = { workspace = true }
 serde_json = { workspace = true }

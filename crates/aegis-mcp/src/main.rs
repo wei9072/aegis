@@ -17,11 +17,8 @@
 //! integration tests in V0.x.
 
 use std::io::{self, BufRead, Write};
-use std::path::Path;
 
-use aegis_core::ast::registry::LanguageRegistry;
-use aegis_core::enforcement::check_syntax_native;
-use aegis_core::signal_layer_pyapi::extract_signals_native;
+use aegis_core::validate::validate_change;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -209,7 +206,7 @@ fn handle_tools_call(id: Value, params: &Value) -> JsonRpcResponse {
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    let verdict = validate_change(&path, &new_content, old_content.as_deref());
+    let verdict = validate_change(&path, &new_content, old_content.as_deref()).to_value();
     JsonRpcResponse {
         jsonrpc: "2.0",
         id,
@@ -235,183 +232,4 @@ fn tool_error(id: Value, message: &str) -> JsonRpcResponse {
             message: message.to_string(),
         }),
     }
-}
-
-/// Mirror of the V0.x Python `validate_change` tool. Returns a JSON
-/// `Value` with `decision`, `reasons`, `signals_after`, optionally
-/// `signals_before` + `regression_detail`.
-fn validate_change(path: &str, new_content: &str, old_content: Option<&str>) -> Value {
-    let mut reasons: Vec<Value> = Vec::new();
-    let suffix = Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| format!(".{e}"))
-        .unwrap_or_else(|| ".py".to_string());
-
-    let supported_exts = LanguageRegistry::global().extensions();
-    if !supported_exts.contains(&suffix.as_str()) {
-        return json!({
-            "decision": "BLOCK",
-            "reasons": [{
-                "layer": "ring0",
-                "decision": "block",
-                "reason": "unsupported_extension",
-                "detail": format!("no language adapter for {suffix:?}; \
-                                   supported: {:?}", supported_exts),
-            }],
-            "signals_after": {},
-        });
-    }
-
-    // Write to temp file for the existing file-based APIs.
-    let tmp_new = match write_temp(&suffix, new_content) {
-        Ok(p) => p,
-        Err(e) => {
-            return json!({
-                "decision": "BLOCK",
-                "reasons": [{
-                    "layer": "ring0",
-                    "decision": "block",
-                    "reason": "tempfile_error",
-                    "detail": e,
-                }],
-                "signals_after": {},
-            });
-        }
-    };
-
-    // Ring 0 syntax check.
-    if let Ok(violations) = check_syntax_native(&tmp_new) {
-        for v in violations {
-            reasons.push(json!({
-                "layer": "ring0",
-                "decision": "block",
-                "reason": "ring0_violation",
-                "detail": v,
-            }));
-        }
-    }
-
-    let new_sigs = match extract_signals_native(&tmp_new) {
-        Ok(v) => v,
-        Err(e) => {
-            cleanup(&tmp_new);
-            return json!({
-                "decision": "BLOCK",
-                "reasons": [{
-                    "layer": "ring0_5",
-                    "decision": "block",
-                    "reason": "signal_extraction_failed",
-                    "detail": e,
-                }],
-                "signals_after": {},
-            });
-        }
-    };
-
-    let mut signals_after: serde_json::Map<String, Value> = serde_json::Map::new();
-    for s in &new_sigs {
-        signals_after
-            .entry(s.name.clone())
-            .and_modify(|v| {
-                let cur = v.as_f64().unwrap_or(0.0);
-                *v = json!(cur + s.value);
-            })
-            .or_insert(json!(s.value));
-    }
-
-    let mut result = json!({
-        "signals_after": signals_after,
-        "reasons": reasons,
-    });
-
-    if let Some(old) = old_content {
-        if let Ok(old_path) = write_temp(&suffix, old) {
-            let old_sigs = extract_signals_native(&old_path).unwrap_or_default();
-            cleanup(&old_path);
-            let mut signals_before: serde_json::Map<String, Value> =
-                serde_json::Map::new();
-            for s in &old_sigs {
-                signals_before
-                    .entry(s.name.clone())
-                    .and_modify(|v| {
-                        let cur = v.as_f64().unwrap_or(0.0);
-                        *v = json!(cur + s.value);
-                    })
-                    .or_insert(json!(s.value));
-            }
-            result["signals_before"] = Value::Object(signals_before.clone());
-
-            let cost_after: f64 = new_sigs.iter().map(|s| s.value).sum();
-            let cost_before: f64 = old_sigs.iter().map(|s| s.value).sum();
-            if cost_after > cost_before {
-                let mut growers: serde_json::Map<String, Value> = serde_json::Map::new();
-                let keys: std::collections::BTreeSet<String> = signals_after
-                    .keys()
-                    .chain(signals_before.keys())
-                    .cloned()
-                    .collect();
-                for key in keys {
-                    let a = signals_after
-                        .get(&key)
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0);
-                    let b = signals_before
-                        .get(&key)
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0);
-                    if a > b {
-                        let delta = ((a - b) * 10_000.0).round() / 10_000.0;
-                        growers.insert(key, json!(delta));
-                    }
-                }
-                result["regression_detail"] = Value::Object(growers.clone());
-                let reasons_array = result["reasons"].as_array_mut().unwrap();
-                reasons_array.push(json!({
-                    "layer": "regression",
-                    "decision": "block",
-                    "reason": "cost_increased",
-                    "detail": format!(
-                        "total cost {cost_before:.0} → {cost_after:.0}; growers: {:?}",
-                        growers
-                    ),
-                }));
-            }
-        }
-    }
-
-    cleanup(&tmp_new);
-
-    let reasons_now = result["reasons"].as_array().cloned().unwrap_or_default();
-    let any_block = reasons_now
-        .iter()
-        .any(|r| r.get("decision").and_then(|d| d.as_str()) == Some("block"));
-    let any_warn = reasons_now
-        .iter()
-        .any(|r| r.get("decision").and_then(|d| d.as_str()) == Some("warn"));
-    let decision = if any_block {
-        "BLOCK"
-    } else if any_warn {
-        "WARN"
-    } else {
-        "PASS"
-    };
-    result["decision"] = json!(decision);
-    result
-}
-
-fn write_temp(suffix: &str, content: &str) -> Result<String, String> {
-    let dir = std::env::temp_dir();
-    let pid = std::process::id();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let path = dir.join(format!("aegis-mcp-{pid}-{ts}{suffix}"));
-    std::fs::write(&path, content).map_err(|e| e.to_string())?;
-    Ok(path.to_string_lossy().into_owned())
-}
-
-fn cleanup(path: &str) {
-    let _ = std::fs::remove_file(path);
 }

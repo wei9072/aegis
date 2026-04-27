@@ -68,19 +68,23 @@ enum Command {
         sub: PipelineSub,
     },
 
-    /// V3 — drive a one-shot conversation with the aegis-agent loop.
+    /// V3 coding agent — full agent surface with aegis core gates
+    /// always-on by default.
     ///
-    /// Picks a provider from env vars (first match wins):
+    /// Defaults (no flags needed):
+    ///   - Workspace = current directory
+    ///   - Tools     = Read / Glob / Grep / Edit / Write
+    ///   - Aegis     = LocalAegisPredictor + AegisCostObserver +
+    ///                 StalemateDetector all active
+    ///   - Permission = workspace-write
+    ///
+    /// Flags are opt-out / opt-extras, not opt-in. Picks a provider
+    /// from env vars (first match wins):
     ///   AEGIS_OPENAI_BASE_URL + AEGIS_OPENAI_MODEL  → OpenAI-compat
     ///   AEGIS_ANTHROPIC_API_KEY + AEGIS_ANTHROPIC_MODEL → Anthropic
     ///   AEGIS_GEMINI_API_KEY + AEGIS_GEMINI_MODEL   → Gemini
-    ///
-    /// Outputs the assistant's response on stdout; the structured
-    /// AgentTurnResult (stopped_reason / iterations / verdict) goes
-    /// to stderr unless --json is set, in which case the whole
-    /// result is one JSON object on stdout.
     Chat {
-        /// Prompt to send. If omitted, reads from stdin.
+        /// Prompt to send. If omitted: tty → REPL, pipe → read stdin.
         prompt: Option<String>,
         /// Optional system prompt prefix.
         #[arg(long)]
@@ -91,7 +95,7 @@ enum Command {
         /// Cumulative cost regression budget for the session.
         #[arg(long)]
         cost_budget: Option<f64>,
-        /// Workspace path passed to the verifier.
+        /// Workspace root. Defaults to current directory.
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
         /// Permission mode: read-only | workspace-write | danger-full-access.
@@ -105,17 +109,21 @@ enum Command {
         /// Custom shell verifier command (overrides auto-detect).
         #[arg(long)]
         verifier_cmd: Option<String>,
-        /// Wire in built-in read-only tools (Read, Glob, Grep) so
-        /// the LLM can inspect the workspace. Off by default — pure
-        /// chat mode otherwise.
+        /// Restrict to read-only tools (Read/Glob/Grep). Equivalent
+        /// to --permission-mode read-only — LLM cannot modify files.
         #[arg(long)]
-        tools: bool,
-        /// Mount one or more MCP servers as additional tool sources.
-        /// Each value is a shell command (e.g. `aegis-mcp` or
-        /// `node my-server.js`). Tools advertised by the server
-        /// become callable by the LLM through aegis-agent's
-        /// MultiToolExecutor. Combine with --tools for built-in +
-        /// MCP simultaneously.
+        read_only: bool,
+        /// **DANGEROUS** — turn off aegis core's PreToolUse predictor
+        /// and per-edit cost observer. Edit/Write tools become
+        /// unprotected. Provided for debugging the agent loop in
+        /// isolation; the framing-correct way to use `aegis chat`
+        /// is WITHOUT this flag.
+        #[arg(long)]
+        no_aegis: bool,
+        /// Mount one or more **extra** MCP servers as additional
+        /// tool sources beyond the built-ins. Each value is a shell
+        /// command (e.g. `node my-server.js`). The LLM gets the
+        /// server's advertised tools alongside Read/Glob/Grep/Edit/Write.
         #[arg(long = "mcp", value_name = "COMMAND")]
         mcp: Vec<String>,
         /// Emit the full result as JSON.
@@ -197,7 +205,8 @@ fn main() -> ExitCode {
             permission_mode,
             verify,
             verifier_cmd,
-            tools,
+            read_only,
+            no_aegis,
             mcp,
             json,
         } => cmd_chat(
@@ -209,13 +218,15 @@ fn main() -> ExitCode {
             &permission_mode,
             verify,
             verifier_cmd,
-            tools,
+            read_only,
+            no_aegis,
             mcp,
             json,
         ),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_chat(
     prompt: Option<String>,
     system: Option<String>,
@@ -225,20 +236,23 @@ fn cmd_chat(
     permission_mode_str: &str,
     verify: bool,
     verifier_cmd: Option<String>,
-    tools_enabled: bool,
+    read_only: bool,
+    no_aegis: bool,
     mcp_servers: Vec<String>,
     json: bool,
 ) -> ExitCode {
-    use aegis_agent::agent_tools::ReadOnlyTools;
+    use aegis_agent::aegis_predict::LocalAegisPredictor;
+    use aegis_agent::agent_tools::{ReadOnlyTools, WorkspaceTools};
     use aegis_agent::api::{ApiClient, ToolDefinition};
+    use aegis_agent::cost_observer_aegis::AegisCostObserver;
     use aegis_agent::mcp::{McpClient, McpToolExecutor, StdioTransport};
     use aegis_agent::multi_tool::{MultiToolExecutor, ToolSource};
     use aegis_agent::permission::{PermissionMode, PermissionPolicy};
+    use aegis_agent::predict::PreToolUsePredictor;
     use aegis_agent::providers::{
         AnthropicConfig, AnthropicProvider, GeminiConfig, GeminiProvider, OpenAiCompatConfig,
         OpenAiCompatProvider, UreqClient,
     };
-    use aegis_agent::testing::ScriptedToolExecutor;
     use aegis_agent::tool::ToolExecutor;
     use aegis_agent::verifier::{AgentTaskVerifier, ShellVerifier, TestVerifier};
     use aegis_agent::{AgentConfig, ConversationRuntime, Session, StoppedReason};
@@ -341,15 +355,32 @@ fn cmd_chat(
 
     let system_prompt = system.map(|s| vec![s]).unwrap_or_default();
 
-    // Tool sources: collect built-ins + MCP servers, dispatch via
-    // MultiToolExecutor. Empty list → ScriptedToolExecutor (no tools).
+    // Tool surface: aegis core defaults to ON. Read-only mode strips
+    // out Edit/Write; otherwise WorkspaceTools (Read/Glob/Grep + Edit/Write)
+    // is the default.
+    let effective_read_only = read_only || permission_mode == PermissionMode::ReadOnly;
     let mut sources: Vec<ToolSource> = Vec::new();
-    if tools_enabled {
-        eprintln!("aegis chat: read-only tools enabled (Read, Glob, Grep)");
+    if effective_read_only {
+        eprintln!("aegis chat: tool surface = read-only (Read / Glob / Grep)");
         sources.push(ToolSource::new(
             "read_only",
             Box::new(ReadOnlyTools::new(workspace.clone())),
             ReadOnlyTools::definitions(),
+        ));
+    } else {
+        let aegis_status = if no_aegis {
+            "DISABLED (--no-aegis)"
+        } else {
+            "active (LocalAegisPredictor + AegisCostObserver)"
+        };
+        eprintln!(
+            "aegis chat: tool surface = workspace (Read / Glob / Grep / Edit / Write); \
+             aegis core = {aegis_status}"
+        );
+        sources.push(ToolSource::new(
+            "workspace",
+            Box::new(WorkspaceTools::new(workspace.clone())),
+            WorkspaceTools::definitions(),
         ));
     }
     for spec in &mcp_servers {
@@ -397,10 +428,7 @@ fn cmd_chat(
         ));
     }
 
-    let (executor, tool_defs): (Box<dyn ToolExecutor>, Vec<ToolDefinition>) = if sources.is_empty()
-    {
-        (Box::new(ScriptedToolExecutor::new()), Vec::new())
-    } else {
+    let (executor, tool_defs): (Box<dyn ToolExecutor>, Vec<ToolDefinition>) = {
         let multi = MultiToolExecutor::new(sources);
         let defs = multi.all_definitions();
         (Box::new(multi), defs)
@@ -415,10 +443,24 @@ fn cmd_chat(
         AgentConfig {
             max_iterations_per_turn: max_iters,
             session_cost_budget: cost_budget,
-            workspace_root: Some(workspace),
+            workspace_root: Some(workspace.clone()),
         },
     )
     .with_permission_policy(PermissionPolicy::standard(permission_mode));
+
+    // Aegis core defaults to ON. --no-aegis is the explicit
+    // (warned) opt-out for debugging the agent loop in isolation.
+    if !no_aegis {
+        rt = rt
+            .with_predictor(Box::new(LocalAegisPredictor::new(workspace.clone())))
+            .with_cost_observer(Box::new(AegisCostObserver::new(workspace.clone())));
+    } else {
+        eprintln!(
+            "aegis chat: ⚠ aegis core disabled (--no-aegis). \
+             Edit/Write tools will not go through validate_change \
+             before mutating files. Use only for agent-loop debugging."
+        );
+    }
 
     if let Some(v) = verifier {
         rt = rt.with_verifier(v);

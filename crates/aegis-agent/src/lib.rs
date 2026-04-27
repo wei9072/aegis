@@ -34,6 +34,7 @@ pub mod agent_tools;
 pub mod api;
 pub mod conversation;
 pub mod cost;
+pub mod cost_observer_aegis;
 pub mod hooks;
 pub mod mcp;
 pub mod message;
