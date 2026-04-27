@@ -4,6 +4,8 @@
 > in 2026-04-26.** All 10 Tier A languages (Python, TypeScript,
 > JavaScript, Go, Java, C#, PHP, Swift, Kotlin, Dart) are live in
 > the Rust workspace; run `aegis languages` for the live registry.
+> **V3.9 (2026-04-27)** added Rust as Tier A #11 so aegis can
+> dogfood itself.
 > Per-phase status is at the bottom of this file.
 >
 > **What survives as canonical:** the `LanguageAdapter` trait shape
@@ -60,6 +62,7 @@ flip.
 | 8 | **Swift** | `tree-sitter-swift` (need to add) | iOS / macOS code |
 | 9 | **Kotlin** | `tree-sitter-kotlin` (community-maintained, verify quality) | Android + JVM |
 | 10 | **Dart** | `tree-sitter-dart` (community-maintained) | needed for Flutter (Tier B #14) |
+| 11 | **Rust** | `tree-sitter-rust` (added 2026-04-27, V3.9) | aegis self-dogfood — without it `aegis scan` skips its own crates |
 
 ### Tier B — Frameworks (specialisation on a Tier A language)
 
@@ -364,6 +367,39 @@ Same verification needed.
 **Exit gate:** standard.
 
 **Estimated session count:** 2.
+
+### Phase 4.5 — Rust (V3.9, 2026-04-27)
+
+**Why retroactively:** the original plan stopped at Dart because the
+audience was assumed to be polyglot end-users. V3.9 added the
+`aegis chat` agent — at which point aegis became a Rust workspace
+that wanted to scan itself, and "skip 1,300 of your own files" was
+not acceptable. Adding Rust is dogfood, not feature.
+
+**Files added:**
+- `Cargo.toml`: `tree-sitter-rust = "0.20"` (one line)
+- `crates/aegis-core/queries/rust.scm`: 3 captures (`use_declaration`,
+  `mod_item`, `extern_crate_declaration`)
+- `crates/aegis-core/src/ast/languages/rust.rs`: ~50 LOC adapter
+  with custom `normalize_import` that takes the leftmost `::`
+  segment (so `use std::io::Read` resolves to `std`)
+- `crates/aegis-core/src/ast/adapter.rs`: added `field_expression`
+  + `try_expression` to the chain-depth walker (Rust-specific node
+  kinds — additive change, no other language affected)
+- `crates/aegis-core/src/ast/languages/mod.rs` + `registry.rs`:
+  one-line registrations
+
+**Verified:** `aegis scan --workspace .` on aegis itself — 111
+`.rs` files, 73 import edges, 0 cycles, 0 syntax errors. Cache
+warm path 2 ms.
+
+**Rust-specific gotcha:** crate-internal cycle detection is
+best-effort. Rust uses `crate::`, `super::`, `self::` for
+intra-crate references which the stem-match cycle detector can't
+resolve to file paths. `mod foo;` is captured (catches the
+file-include shape), and external-crate cycles still light up.
+Deep intra-crate cycle resolution would require Cargo workspace
+metadata — out of scope.
 
 ### Phase 5 — Acceptance review
 

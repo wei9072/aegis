@@ -18,6 +18,11 @@ htmlcov/
 # V0.x kept the cargo target dir under aegis-core-rs/; V1.0 moved
 # the workspace under crates/ so target/ now lives at repo root.
 target/
+
+# --- aegis runtime caches ---
+# `aegis scan` writes its mtime+size cache under .aegis-cache/ at
+# the workspace root. Per-machine artefact, never commit.
+.aegis-cache/
 crates/*/target/
 **/*.rs.bk
 Cargo.lock.bak

@@ -85,6 +85,9 @@ fn is_chain_node(kind: &str) -> bool {
         // Swift / Kotlin / Dart
         | "navigation_expression"
         | "selector"
+        // Rust
+        | "field_expression"
+        | "try_expression"
     )
 }
 
@@ -97,20 +100,24 @@ fn default_chain_depth(node: Node) -> usize {
         "attribute"
             | "member_expression"
             | "field_access"
+            | "field_expression"
             | "selector_expression"
             | "navigation_expression"
             | "member_access_expression"
             | "scoped_property_access_expression"
             | "selector"
+            | "try_expression"
     ) {
         // Most grammars expose the receiver as field "object" or
-        // "operand" or "expression". Fall back to the first named
-        // child for grammars without explicit field names.
+        // "operand" or "expression". Rust `field_expression` uses
+        // "value"; fall back to the first named child for grammars
+        // without explicit field names.
         let recv = node
             .child_by_field_name("object")
             .or_else(|| node.child_by_field_name("operand"))
             .or_else(|| node.child_by_field_name("expression"))
             .or_else(|| node.child_by_field_name("scope"))
+            .or_else(|| node.child_by_field_name("value"))
             .or_else(|| node.named_child(0));
         return recv.map(|n| 1 + default_chain_depth(n)).unwrap_or(1);
     }

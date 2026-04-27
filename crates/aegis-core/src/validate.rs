@@ -273,6 +273,23 @@ mod tests {
     }
 
     #[test]
+    fn pass_on_clean_rust() {
+        let v = validate_change(
+            "lib.rs",
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+            None,
+        );
+        assert_eq!(v.decision, "PASS", "expected clean Rust to PASS; got {v:?}");
+    }
+
+    #[test]
+    fn block_on_rust_syntax_error() {
+        let v = validate_change("broken.rs", "fn broken(\n", None);
+        assert_eq!(v.decision, "BLOCK");
+        assert!(v.reasons.iter().any(|r| r["layer"] == "ring0"));
+    }
+
+    #[test]
     fn block_on_unsupported_extension() {
         let v = validate_change("notes.xyz", "anything", None);
         assert_eq!(v.decision, "BLOCK");

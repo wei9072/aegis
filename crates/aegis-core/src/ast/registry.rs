@@ -36,6 +36,7 @@ impl LanguageRegistry {
                 Box::new(languages::swift::SwiftAdapter),
                 Box::new(languages::kotlin::KotlinAdapter),
                 Box::new(languages::dart::DartAdapter),
+                Box::new(languages::rust::RustAdapter),
             ],
         }
     }

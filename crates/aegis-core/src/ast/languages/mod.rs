@@ -8,6 +8,7 @@ pub mod php;
 pub mod swift;
 pub mod kotlin;
 pub mod dart;
+pub mod rust;
 
 pub use python::language as python_language;
 pub use typescript::language as typescript_language;

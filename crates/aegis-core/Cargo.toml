@@ -41,6 +41,9 @@ tree-sitter-java = "0.20"
 tree-sitter-c-sharp = "0.20"
 tree-sitter-php = "0.20"
 tree-sitter-swift = "0.4"
+# Rust grammar — added under V3.9 C-7. Aegis dogfoods itself once
+# this lands, so cycle detection on its own crates lights up.
+tree-sitter-rust = "0.20"
 # Community-maintained — pinned to known-good versions; if a
 # breakage shows up, the registry meta-test in ast/registry.rs
 # fails fast on startup parse + query compile.
