@@ -105,7 +105,6 @@ pub struct ImportGraphStats {
 pub struct CacheStats {
     pub hits: usize,
     pub misses: usize,
-    pub stale: usize,
 }
 
 impl ScanReport {
@@ -200,13 +199,6 @@ pub fn scan_workspace(root: &Path, opts: &ScanOptions) -> ScanReport {
             ScanOutcome::IoError => {
                 files_skipped_io_error += 1;
             }
-            ScanOutcome::Stale => {
-                // Cached entry existed but mtime/size mismatched and
-                // the fresh scan also failed. Counts as stale +
-                // io_error.
-                cache_stats.stale += 1;
-                files_skipped_io_error += 1;
-            }
         }
     }
 
@@ -245,7 +237,6 @@ pub fn scan_workspace(root: &Path, opts: &ScanOptions) -> ScanReport {
 enum ScanOutcome {
     Cached(FileScan),
     Fresh(FileScan),
-    Stale,
     IoError,
 }
 

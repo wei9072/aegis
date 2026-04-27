@@ -13,7 +13,7 @@
 //! Tests in `aegis-runtime` don't depend on a real LLM — they
 //! provide a stub `Planner` that returns a canned `PatchPlan`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use aegis_ir::PatchPlan;
 use thiserror::Error;
@@ -110,11 +110,4 @@ mod tests {
         assert!(matches!(err, PlannerError::Failed(_)));
     }
 
-    /// Cheap path-canonicalize helper for tests that don't need
-    /// real workspace state. Silences a "PathBuf imported but not
-    /// used" warning on cfg(test).
-    #[allow(dead_code)]
-    fn anchor() -> PathBuf {
-        PathBuf::from(".")
-    }
 }

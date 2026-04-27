@@ -23,6 +23,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use aegis_core::validate::ValidateVerdict;
 use serde_json::{json, Value};
 
 use crate::mcp::McpClient;
@@ -38,69 +39,67 @@ use crate::predict::{PreToolUsePredictor, PredictVerdict};
 ///   `[aegis] BLOCK Edit foo.rs: cost 12 → 15 (+25%); growers: fan_out +2`
 ///   `[aegis] BLOCK Write bar.py: ring0 invalid_syntax`
 ///   `[aegis] BLOCK Edit baz.unknown: unsupported_extension`
-fn format_block_banner(
-    decision: &str,
-    reasons: &[Value],
-    signals_before: Option<&serde_json::Map<String, Value>>,
-    signals_after: Option<&serde_json::Map<String, Value>>,
-    regression_detail: Option<&serde_json::Map<String, Value>>,
-    tool_name: &str,
-    path_display: &str,
-) -> String {
-    if decision != "BLOCK" {
-        return format!("[aegis] {decision} {tool_name} {path_display}");
+fn format_block_banner(verdict: &ValidateVerdict, tool_name: &str, path_display: &str) -> String {
+    if !verdict.blocked() {
+        return format!("[aegis] {} {tool_name} {path_display}", verdict.decision);
     }
 
     // Pick the first reason carrying decision == "block" — that's
     // the headline; remaining ones are noise for the banner.
-    let primary = reasons
+    let primary = verdict
+        .reasons
         .iter()
         .find(|r| r.get("decision").and_then(|d| d.as_str()) == Some("block"));
 
-    let summary = match primary {
-        Some(r) => {
-            let layer = r.get("layer").and_then(|v| v.as_str()).unwrap_or("?");
-            let reason = r.get("reason").and_then(|v| v.as_str()).unwrap_or("?");
-            match (layer, reason) {
-                ("regression", "cost_increased") => {
-                    let before = signals_before
-                        .map(sum_map_values)
-                        .unwrap_or(0.0);
-                    let after = signals_after.map(sum_map_values).unwrap_or(0.0);
-                    let pct = if before > 0.0 {
-                        ((after - before) / before * 100.0).round() as i64
-                    } else {
-                        0
-                    };
-                    let growers = regression_detail
-                        .map(|g| {
-                            let mut parts: Vec<String> = g
-                                .iter()
-                                .map(|(k, v)| {
-                                    format!("{k} +{}", v.as_f64().unwrap_or(0.0).round() as i64)
-                                })
-                                .collect();
-                            parts.sort();
-                            parts.join(", ")
-                        })
-                        .unwrap_or_default();
-                    if growers.is_empty() {
-                        format!("cost {before:.0} → {after:.0} (+{pct}%)")
-                    } else {
-                        format!("cost {before:.0} → {after:.0} (+{pct}%); growers: {growers}")
-                    }
-                }
-                (lyr, rsn) => format!("{lyr} {rsn}"),
-            }
-        }
-        None => "no reason reported".to_string(),
-    };
+    let summary = primary
+        .map(|r| describe_reason(r, verdict))
+        .unwrap_or_else(|| "no reason reported".to_string());
 
     format!("[aegis] BLOCK {tool_name} {path_display}: {summary}")
 }
 
+/// Render a single reason value as the headline summary. The
+/// regression case carries the full before/after picture; everything
+/// else collapses to "<layer> <reason>".
+fn describe_reason(reason: &Value, verdict: &ValidateVerdict) -> String {
+    let layer = reason.get("layer").and_then(|v| v.as_str()).unwrap_or("?");
+    let kind = reason.get("reason").and_then(|v| v.as_str()).unwrap_or("?");
+
+    if (layer, kind) == ("regression", "cost_increased") {
+        let before = verdict
+            .signals_before
+            .as_ref()
+            .map(sum_map_values)
+            .unwrap_or(0.0);
+        let after = sum_map_values(&verdict.signals_after);
+        let pct = if before > 0.0 {
+            ((after - before) / before * 100.0).round() as i64
+        } else {
+            0
+        };
+        let growers = format_growers(verdict.regression_detail.as_ref());
+        if growers.is_empty() {
+            format!("cost {before:.0} → {after:.0} (+{pct}%)")
+        } else {
+            format!("cost {before:.0} → {after:.0} (+{pct}%); growers: {growers}")
+        }
+    } else {
+        format!("{layer} {kind}")
+    }
+}
+
 fn sum_map_values(m: &serde_json::Map<String, Value>) -> f64 {
     m.values().filter_map(|v| v.as_f64()).sum()
+}
+
+fn format_growers(detail: Option<&serde_json::Map<String, Value>>) -> String {
+    let Some(g) = detail else { return String::new() };
+    let mut parts: Vec<String> = g
+        .iter()
+        .map(|(k, v)| format!("{k} +{}", v.as_f64().unwrap_or(0.0).round() as i64))
+        .collect();
+    parts.sort();
+    parts.join(", ")
 }
 
 /// Default tool names recognised as file-write operations.
@@ -216,8 +215,11 @@ impl PreToolUsePredictor for AegisPredictor {
             }
         };
 
-        // The text payload is JSON-encoded {decision, reasons, ...}.
-        let parsed: Value = match serde_json::from_str(&result.text) {
+        // aegis-mcp serves ValidateVerdict::to_value() verbatim, so
+        // we deserialize the JSON straight back into the same type
+        // LocalAegisPredictor uses below — one verdict shape, one
+        // banner code path.
+        let verdict: ValidateVerdict = match serde_json::from_str(&result.text) {
             Ok(v) => v,
             Err(e) => {
                 self.last_diagnostic = Some(format!("predict: verdict not JSON ({e})"));
@@ -225,52 +227,10 @@ impl PreToolUsePredictor for AegisPredictor {
             }
         };
 
-        let decision = parsed
-            .get("decision")
-            .and_then(|v| v.as_str())
-            .unwrap_or("PASS");
-        if decision == "BLOCK" {
-            // Surface the reasons array so the LLM sees structured
-            // signals — NOT a coaching string, just facts.
-            let reasons_json = parsed
-                .get("reasons")
-                .map(|r| r.to_string())
-                .unwrap_or_else(|| "no reasons reported".into());
-
-            // User-facing banner so the rejection isn't silent on
-            // the terminal. The banner is fact-shaped (numbers
-            // before / after), not advice — keeps the
-            // negative-space framing intact at the UX layer.
-            let reasons_array = parsed
-                .get("reasons")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let signals_before = parsed
-                .get("signals_before")
-                .and_then(|v| v.as_object())
-                .cloned();
-            let signals_after = parsed
-                .get("signals_after")
-                .and_then(|v| v.as_object())
-                .cloned();
-            let regression_detail = parsed
-                .get("regression_detail")
-                .and_then(|v| v.as_object())
-                .cloned();
-            eprintln!(
-                "{}",
-                format_block_banner(
-                    "BLOCK",
-                    &reasons_array,
-                    signals_before.as_ref(),
-                    signals_after.as_ref(),
-                    regression_detail.as_ref(),
-                    tool_name,
-                    &path,
-                )
-            );
-
+        if verdict.blocked() {
+            eprintln!("{}", format_block_banner(&verdict, tool_name, &path));
+            let reasons_json = serde_json::to_string(&verdict.reasons)
+                .unwrap_or_else(|_| "no reasons reported".into());
             return PredictVerdict::Block {
                 reason: format!(
                     "aegis predicted BLOCK for {tool_name} on {path}. reasons: {reasons_json}"
@@ -443,26 +403,16 @@ impl PreToolUsePredictor for LocalAegisPredictor {
         );
 
         if verdict.blocked() {
-            let reasons_summary = serde_json::to_string(&verdict.reasons)
-                .unwrap_or_else(|_| "no reasons reported".into());
-
+            let path_display = path.display().to_string();
             eprintln!(
                 "{}",
-                format_block_banner(
-                    &verdict.decision,
-                    &verdict.reasons,
-                    verdict.signals_before.as_ref(),
-                    Some(&verdict.signals_after),
-                    verdict.regression_detail.as_ref(),
-                    tool_name,
-                    &path.display().to_string(),
-                )
+                format_block_banner(&verdict, tool_name, &path_display)
             );
-
+            let reasons_summary = serde_json::to_string(&verdict.reasons)
+                .unwrap_or_else(|_| "no reasons reported".into());
             return PredictVerdict::Block {
                 reason: format!(
-                    "aegis predicted BLOCK for {tool_name} on {}. reasons: {reasons_summary}",
-                    path.display()
+                    "aegis predicted BLOCK for {tool_name} on {path_display}. reasons: {reasons_summary}"
                 ),
             };
         }
@@ -476,39 +426,58 @@ mod tests {
     use super::*;
     use serde_json::Map;
 
+    fn make_verdict(
+        decision: &str,
+        reasons: Vec<Value>,
+        before: Option<Map<String, Value>>,
+        after: Map<String, Value>,
+        growers: Option<Map<String, Value>>,
+    ) -> ValidateVerdict {
+        ValidateVerdict {
+            decision: decision.to_string(),
+            reasons,
+            signals_after: after,
+            signals_before: before,
+            regression_detail: growers,
+        }
+    }
+
     #[test]
     fn banner_for_ring0_syntax_error() {
-        let reasons = vec![json!({
-            "layer": "ring0",
-            "decision": "block",
-            "reason": "invalid_syntax",
-        })];
-        let line = format_block_banner(
-            "BLOCK", &reasons, None, None, None, "Edit", "broken.rs",
+        let v = make_verdict(
+            "BLOCK",
+            vec![json!({
+                "layer": "ring0",
+                "decision": "block",
+                "reason": "invalid_syntax",
+            })],
+            None,
+            Map::new(),
+            None,
         );
+        let line = format_block_banner(&v, "Edit", "broken.rs");
         assert_eq!(line, "[aegis] BLOCK Edit broken.rs: ring0 invalid_syntax");
     }
 
     #[test]
     fn banner_for_unsupported_extension() {
-        let reasons = vec![json!({
-            "layer": "ring0",
-            "decision": "block",
-            "reason": "unsupported_extension",
-        })];
-        let line = format_block_banner(
-            "BLOCK", &reasons, None, None, None, "Write", "notes.xyz",
+        let v = make_verdict(
+            "BLOCK",
+            vec![json!({
+                "layer": "ring0",
+                "decision": "block",
+                "reason": "unsupported_extension",
+            })],
+            None,
+            Map::new(),
+            None,
         );
+        let line = format_block_banner(&v, "Write", "notes.xyz");
         assert_eq!(line, "[aegis] BLOCK Write notes.xyz: ring0 unsupported_extension");
     }
 
     #[test]
     fn banner_for_cost_regression_with_growers() {
-        let reasons = vec![json!({
-            "layer": "regression",
-            "decision": "block",
-            "reason": "cost_increased",
-        })];
         let mut before = Map::new();
         before.insert("fan_out".into(), json!(10.0));
         before.insert("max_chain_depth".into(), json!(2.0));
@@ -519,15 +488,18 @@ mod tests {
         growers.insert("fan_out".into(), json!(3.0));
         growers.insert("max_chain_depth".into(), json!(2.0));
 
-        let line = format_block_banner(
+        let v = make_verdict(
             "BLOCK",
-            &reasons,
-            Some(&before),
-            Some(&after),
-            Some(&growers),
-            "Edit",
-            "src/lib.rs",
+            vec![json!({
+                "layer": "regression",
+                "decision": "block",
+                "reason": "cost_increased",
+            })],
+            Some(before),
+            after,
+            Some(growers),
         );
+        let line = format_block_banner(&v, "Edit", "src/lib.rs");
         // before total = 12, after total = 17, ~+42%
         assert!(
             line.contains("cost 12 → 17 (+42%)") || line.contains("cost 12 → 17 (+41%)"),
@@ -540,17 +512,15 @@ mod tests {
 
     #[test]
     fn banner_when_decision_not_block_just_states_decision() {
-        let line = format_block_banner(
-            "PASS", &[], None, None, None, "Edit", "ok.rs",
-        );
+        let v = make_verdict("PASS", vec![], None, Map::new(), None);
+        let line = format_block_banner(&v, "Edit", "ok.rs");
         assert_eq!(line, "[aegis] PASS Edit ok.rs");
     }
 
     #[test]
     fn banner_with_no_reasons_falls_back() {
-        let line = format_block_banner(
-            "BLOCK", &[], None, None, None, "Edit", "weird.rs",
-        );
+        let v = make_verdict("BLOCK", vec![], None, Map::new(), None);
+        let line = format_block_banner(&v, "Edit", "weird.rs");
         assert_eq!(line, "[aegis] BLOCK Edit weird.rs: no reason reported");
     }
 }

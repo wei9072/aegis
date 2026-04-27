@@ -30,8 +30,13 @@ pub struct ValidateVerdict {
     /// `"PASS"`, `"WARN"`, or `"BLOCK"`.
     pub decision: String,
     /// Each gate's per-violation breakdown. Empty on PASS.
+    #[serde(default)]
     pub reasons: Vec<Value>,
     /// Sum of signal values per name for the proposed `new_content`.
+    /// Defaults to empty map so older / partial wire payloads (e.g.
+    /// a ring0 syntax-error verdict where signal extraction never
+    /// ran) deserialize without losing the decision.
+    #[serde(default)]
     pub signals_after: Map<String, Value>,
     /// Same shape as `signals_after` but for `old_content`. Only
     /// populated when `old_content` is supplied.

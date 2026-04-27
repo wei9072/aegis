@@ -19,7 +19,9 @@ use std::path::Path;
 use aegis_decision::IterationEvent;
 use aegis_ir::PatchPlan;
 
-use crate::context::{PlanContext, Signal};
+use crate::context::Signal;
+#[cfg(test)]
+use crate::context::PlanContext;
 use crate::executor::{ExecutionResult, Executor};
 use crate::loop_step::{step_decision, LoopState};
 use crate::metrics::{

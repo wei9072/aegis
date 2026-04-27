@@ -6,6 +6,12 @@
 //! `aegis-pyshim/src/lib.rs` register them into the `_core` PyO3
 //! module.
 
+// pyo3's #[pymethods] macro emits trait impls inside fn scopes which
+// trips the new `non_local_definitions` lint. Not actionable from
+// our code — silence the lint at crate root rather than scattering
+// #[allow(...)] across every #[pymethods] block.
+#![allow(non_local_definitions)]
+
 use pyo3::prelude::*;
 
 pub mod ast;

@@ -13,6 +13,17 @@
 use std::fmt::{Display, Formatter};
 use std::sync::Mutex;
 
+/// Strip scheme + path from a URL, returning just `host[:port]`.
+/// Used by both friendly_* helpers below — they all want to surface
+/// the hostname so the user can spot a typo without parsing the URL
+/// themselves.
+fn host_of(url: &str) -> &str {
+    url.split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or(url)
+}
+
 /// Translate a raw transport-layer error string into a one-paragraph
 /// hint that names the URL and the most likely fix. Pattern-matches
 /// the underlying HTTP client's wording — a real fix walks the user
@@ -23,11 +34,7 @@ use std::sync::Mutex;
 #[must_use]
 pub fn friendly_transport_error(url: &str, raw: &str) -> String {
     let lc = raw.to_lowercase();
-    let host = url
-        .split("://")
-        .nth(1)
-        .and_then(|rest| rest.split('/').next())
-        .unwrap_or(url);
+    let host = host_of(url);
 
     let hint = if lc.contains("dns") || lc.contains("name resolution") || lc.contains("lookup") {
         format!(
@@ -63,11 +70,7 @@ pub fn friendly_transport_error(url: &str, raw: &str) -> String {
 /// connection succeeded but the server rejected the request.
 #[must_use]
 pub fn friendly_http_status(url: &str, status: u16, body: &str) -> String {
-    let host = url
-        .split("://")
-        .nth(1)
-        .and_then(|rest| rest.split('/').next())
-        .unwrap_or(url);
+    let host = host_of(url);
 
     let hint = match status {
         401 | 403 => format!(

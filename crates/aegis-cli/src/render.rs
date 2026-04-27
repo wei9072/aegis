@@ -6,17 +6,12 @@
 //! image inlining (none of which appear in normal chat assistant
 //! responses). What remains:
 //!   - `ColorTheme` palette
-//!   - `Spinner` for "thinking..." between turns
 //!   - `TerminalRenderer::render_markdown` — markdown → ANSI, with
 //!     code-block syntax highlighting via syntect
 
 use std::fmt::Write as FmtWrite;
-use std::io::{self, Write};
 
-use crossterm::cursor::{MoveToColumn, RestorePosition, SavePosition};
-use crossterm::style::{Color, Print, ResetColor, SetForegroundColor, Stylize};
-use crossterm::terminal::{Clear, ClearType};
-use crossterm::{execute, queue};
+use crossterm::style::{Color, Stylize};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
@@ -32,8 +27,14 @@ pub struct ColorTheme {
     pub link: Color,
     pub quote: Color,
     pub code_block_border: Color,
+    /// Accent colour for in-progress / active markers — also the
+    /// banner colour when `aegis chat` boots into REPL mode.
     pub spinner_active: Color,
+    /// Success-status colour. Used by `/save`, verifier-passed,
+    /// and any "ok" footer.
     pub spinner_done: Color,
+    /// Error-status colour. Used by `/save` failures, verifier
+    /// rejections, provider errors, and unknown slash commands.
     pub spinner_failed: Color,
     pub aegis_brand: Color,
 }
@@ -53,87 +54,6 @@ impl Default for ColorTheme {
             spinner_failed: Color::Red,
             aegis_brand: Color::Cyan,
         }
-    }
-}
-
-/// Animated braille-frame spinner. Use `tick()` repeatedly while
-/// waiting; `finish()` or `fail()` clears the line and writes a
-/// final marker.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Spinner {
-    frame_index: usize,
-}
-
-impl Spinner {
-    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn tick(
-        &mut self,
-        label: &str,
-        theme: &ColorTheme,
-        out: &mut impl Write,
-    ) -> io::Result<()> {
-        let frame = Self::FRAMES[self.frame_index % Self::FRAMES.len()];
-        self.frame_index += 1;
-        queue!(
-            out,
-            SavePosition,
-            MoveToColumn(0),
-            Clear(ClearType::CurrentLine),
-            SetForegroundColor(theme.spinner_active),
-            Print(format!("{frame} {label}")),
-            ResetColor,
-            RestorePosition
-        )?;
-        out.flush()
-    }
-
-    pub fn finish(
-        &mut self,
-        label: &str,
-        theme: &ColorTheme,
-        out: &mut impl Write,
-    ) -> io::Result<()> {
-        self.frame_index = 0;
-        execute!(
-            out,
-            MoveToColumn(0),
-            Clear(ClearType::CurrentLine),
-            SetForegroundColor(theme.spinner_done),
-            Print(format!("✔ {label}\n")),
-            ResetColor
-        )?;
-        out.flush()
-    }
-
-    pub fn fail(
-        &mut self,
-        label: &str,
-        theme: &ColorTheme,
-        out: &mut impl Write,
-    ) -> io::Result<()> {
-        self.frame_index = 0;
-        execute!(
-            out,
-            MoveToColumn(0),
-            Clear(ClearType::CurrentLine),
-            SetForegroundColor(theme.spinner_failed),
-            Print(format!("✘ {label}\n")),
-            ResetColor
-        )?;
-        out.flush()
-    }
-
-    /// Clear the spinner line without writing a final marker.
-    pub fn clear(&mut self, out: &mut impl Write) -> io::Result<()> {
-        self.frame_index = 0;
-        execute!(out, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-        out.flush()
     }
 }
 

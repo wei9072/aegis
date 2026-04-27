@@ -334,14 +334,13 @@ fn cmd_chat(
     use aegis_agent::mcp::{McpClient, McpToolExecutor, StdioTransport};
     use aegis_agent::multi_tool::{MultiToolExecutor, ToolSource};
     use aegis_agent::permission::{PermissionMode, PermissionPolicy};
-    use aegis_agent::predict::PreToolUsePredictor;
     use aegis_agent::providers::{
         AnthropicConfig, AnthropicProvider, GeminiConfig, GeminiProvider, OpenAiCompatConfig,
         OpenAiCompatProvider, UreqClient,
     };
     use aegis_agent::tool::ToolExecutor;
     use aegis_agent::verifier::{AgentTaskVerifier, ShellVerifier, TestVerifier};
-    use aegis_agent::{AgentConfig, ConversationRuntime, Session, StoppedReason};
+    use aegis_agent::{AgentConfig, ConversationRuntime, Session};
     use std::io::{IsTerminal, Read};
 
     // Decide UX mode:
@@ -1101,11 +1100,8 @@ fn print_scan_report_human(
         report.import_graph.cycle_count
     );
     println!(
-        "  cache                : {} hits / {} misses / {} stale  (took {} ms)",
-        report.cache_stats.hits,
-        report.cache_stats.misses,
-        report.cache_stats.stale,
-        report.duration_ms
+        "  cache                : {} hits / {} misses  (took {} ms)",
+        report.cache_stats.hits, report.cache_stats.misses, report.duration_ms
     );
 
     if !report.cyclic_dependencies.is_empty() {

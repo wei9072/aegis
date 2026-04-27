@@ -8,7 +8,6 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::io::IsTerminal;
 
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -117,7 +116,6 @@ fn slash_prefix(line: &str, pos: usize) -> Option<&str> {
 /// Wraps a rustyline editor so the chat loop can stay simple.
 pub struct ChatInput {
     editor: Editor<SlashCommandHelper, DefaultHistory>,
-    is_tty: bool,
 }
 
 impl ChatInput {
@@ -130,14 +128,7 @@ impl ChatInput {
         let mut editor: Editor<SlashCommandHelper, DefaultHistory> =
             Editor::with_config(config)?;
         editor.set_helper(Some(SlashCommandHelper::new(slash_commands)));
-        Ok(Self {
-            editor,
-            is_tty: std::io::stdin().is_terminal(),
-        })
-    }
-
-    pub fn is_tty(&self) -> bool {
-        self.is_tty
+        Ok(Self { editor })
     }
 
     /// Read one line. Returns:
