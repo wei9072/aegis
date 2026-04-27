@@ -24,6 +24,7 @@ use aegis_runtime::{
 };
 use clap::{Parser, Subcommand};
 
+mod config;
 mod input;
 mod render;
 mod session_store;
@@ -182,6 +183,26 @@ enum PipelineSub {
 }
 
 fn main() -> ExitCode {
+    // Apply config-file env vars BEFORE clap parses. Shell exports
+    // always win — config is the fallback layer.
+    match config::try_load() {
+        Some(Ok(cfg)) => {
+            let applied = config::apply_to_env(&cfg);
+            if !applied.is_empty() {
+                eprintln!(
+                    "aegis: loaded {} env vars from config: {}",
+                    applied.len(),
+                    applied.join(", ")
+                );
+            }
+        }
+        Some(Err(e)) => {
+            eprintln!("aegis: config error: {e}");
+            // Non-fatal — proceed with whatever env shell provides.
+        }
+        None => {} // no config file, normal case
+    }
+
     let cli = Cli::parse();
     match cli.command {
         Command::Check { files, json } => cmd_check(&files, json),

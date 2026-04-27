@@ -23,6 +23,7 @@ crossterm = "0.28"
 pulldown-cmark = "0.13"
 syntect = "5"
 rustyline = "15"
+toml = "0.8"
 
 aegis-core = { path = "../aegis-core" }
 aegis-decision = { path = "../aegis-decision" }

@@ -1,0 +1,248 @@
+//! Optional config-file loader for `aegis chat`.
+//!
+//! Looks for `$XDG_CONFIG_HOME/aegis/config.toml` (fallback
+//! `$HOME/.config/aegis/config.toml`) at startup. When found,
+//! populates the AEGIS_*_BASE_URL / AEGIS_*_MODEL / AEGIS_*_API_KEY
+//! env vars **only if they aren't already set in the shell** —
+//! shell exports always win, so users can override per-invocation.
+//!
+//! Spec format (every section optional):
+//!
+//! ```toml
+//! [provider.openai]
+//! base_url    = "https://openrouter.ai/api/v1"
+//! model       = "meta-llama/llama-3.3-70b-instruct"
+//! api_key_env = "OPENROUTER_API_KEY"   # reads from this env var
+//! # or:
+//! api_key     = "sk-or-v1-literal"      # literal (less safe)
+//!
+//! [provider.anthropic]
+//! model       = "claude-haiku-4-5"
+//! api_key_env = "ANTHROPIC_API_KEY"
+//!
+//! [provider.gemini]
+//! model       = "gemini-2.5-flash"
+//! api_key_env = "GOOGLE_API_KEY"
+//! ```
+//!
+//! All three provider sections are independent; whichever one has
+//! all required fields populated will be picked up by aegis-agent's
+//! existing first-match-wins env var resolver.
+
+use std::path::PathBuf;
+
+use serde::Deserialize;
+
+#[derive(Debug, Default, Deserialize)]
+pub struct Config {
+    #[serde(default)]
+    pub provider: ProviderSet,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ProviderSet {
+    #[serde(default)]
+    pub openai: Option<OpenAiSection>,
+    #[serde(default)]
+    pub anthropic: Option<AnthropicSection>,
+    #[serde(default)]
+    pub gemini: Option<GeminiSection>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct OpenAiSection {
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub api_key: Option<String>,
+    pub api_key_env: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct AnthropicSection {
+    pub model: Option<String>,
+    pub api_key: Option<String>,
+    pub api_key_env: Option<String>,
+    pub base_url: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct GeminiSection {
+    pub model: Option<String>,
+    pub api_key: Option<String>,
+    pub api_key_env: Option<String>,
+    pub base_url: Option<String>,
+}
+
+/// Resolve the canonical config file path. Honours `XDG_CONFIG_HOME`,
+/// falls back to `~/.config/aegis/config.toml`.
+#[must_use]
+pub fn default_path() -> Option<PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return Some(PathBuf::from(xdg).join("aegis").join("config.toml"));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return Some(
+                PathBuf::from(home)
+                    .join(".config")
+                    .join("aegis")
+                    .join("config.toml"),
+            );
+        }
+    }
+    None
+}
+
+/// Try to load the config from the default path. Returns `None`
+/// when the file doesn't exist; surfaces parse errors as `Some(Err)`.
+pub fn try_load() -> Option<Result<Config, String>> {
+    let path = default_path()?;
+    if !path.exists() {
+        return None;
+    }
+    let body = match std::fs::read_to_string(&path) {
+        Ok(b) => b,
+        Err(e) => return Some(Err(format!("read {}: {e}", path.display()))),
+    };
+    Some(
+        toml::from_str::<Config>(&body)
+            .map_err(|e| format!("parse {}: {e}", path.display())),
+    )
+}
+
+/// Apply config values to the process env. Existing env values
+/// always win — config is the FALLBACK, never the override.
+/// Returns the names of env vars actually set by this call (so
+/// callers can print a diagnostic).
+pub fn apply_to_env(config: &Config) -> Vec<String> {
+    let mut applied = Vec::new();
+
+    if let Some(o) = &config.provider.openai {
+        set_if_unset(&mut applied, "AEGIS_OPENAI_BASE_URL", o.base_url.as_deref());
+        set_if_unset(&mut applied, "AEGIS_OPENAI_MODEL", o.model.as_deref());
+        set_api_key_if_unset(
+            &mut applied,
+            "AEGIS_OPENAI_API_KEY",
+            o.api_key.as_deref(),
+            o.api_key_env.as_deref(),
+        );
+    }
+    if let Some(a) = &config.provider.anthropic {
+        set_if_unset(
+            &mut applied,
+            "AEGIS_ANTHROPIC_BASE_URL",
+            a.base_url.as_deref(),
+        );
+        set_if_unset(&mut applied, "AEGIS_ANTHROPIC_MODEL", a.model.as_deref());
+        set_api_key_if_unset(
+            &mut applied,
+            "AEGIS_ANTHROPIC_API_KEY",
+            a.api_key.as_deref(),
+            a.api_key_env.as_deref(),
+        );
+    }
+    if let Some(g) = &config.provider.gemini {
+        set_if_unset(&mut applied, "AEGIS_GEMINI_BASE_URL", g.base_url.as_deref());
+        set_if_unset(&mut applied, "AEGIS_GEMINI_MODEL", g.model.as_deref());
+        set_api_key_if_unset(
+            &mut applied,
+            "AEGIS_GEMINI_API_KEY",
+            g.api_key.as_deref(),
+            g.api_key_env.as_deref(),
+        );
+    }
+
+    applied
+}
+
+fn set_if_unset(applied: &mut Vec<String>, name: &str, value: Option<&str>) {
+    if std::env::var(name).is_ok() {
+        return; // shell wins
+    }
+    let Some(v) = value.filter(|s| !s.is_empty()) else {
+        return;
+    };
+    std::env::set_var(name, v);
+    applied.push(name.to_string());
+}
+
+fn set_api_key_if_unset(
+    applied: &mut Vec<String>,
+    name: &str,
+    api_key: Option<&str>,
+    api_key_env: Option<&str>,
+) {
+    if std::env::var(name).is_ok() {
+        return;
+    }
+    // Prefer api_key_env: read whatever's in the named env var
+    // (still respects shell — if the source env is also unset, no-op).
+    if let Some(env_name) = api_key_env.filter(|s| !s.is_empty()) {
+        if let Ok(v) = std::env::var(env_name) {
+            if !v.is_empty() {
+                std::env::set_var(name, v);
+                applied.push(name.to_string());
+                return;
+            }
+        }
+    }
+    // Fall back to literal api_key from config.
+    if let Some(literal) = api_key.filter(|s| !s.is_empty()) {
+        std::env::set_var(name, literal);
+        applied.push(name.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(toml: &str) -> Config {
+        toml::from_str(toml).unwrap()
+    }
+
+    #[test]
+    fn parses_openai_section() {
+        let c = parse(
+            r#"
+            [provider.openai]
+            base_url = "https://example.test/v1"
+            model = "gpt-x"
+            api_key_env = "OPENROUTER_API_KEY"
+            "#,
+        );
+        let o = c.provider.openai.unwrap();
+        assert_eq!(o.base_url.unwrap(), "https://example.test/v1");
+        assert_eq!(o.model.unwrap(), "gpt-x");
+        assert_eq!(o.api_key_env.unwrap(), "OPENROUTER_API_KEY");
+    }
+
+    #[test]
+    fn parses_all_three_sections() {
+        let c = parse(
+            r#"
+            [provider.openai]
+            base_url = "u"
+
+            [provider.anthropic]
+            model = "claude-h"
+
+            [provider.gemini]
+            model = "gemini-f"
+            "#,
+        );
+        assert!(c.provider.openai.is_some());
+        assert!(c.provider.anthropic.is_some());
+        assert!(c.provider.gemini.is_some());
+    }
+
+    #[test]
+    fn parses_empty_file() {
+        let c = parse("");
+        assert!(c.provider.openai.is_none());
+        assert!(c.provider.anthropic.is_none());
+        assert!(c.provider.gemini.is_none());
+    }
+}
