@@ -16,9 +16,11 @@
 //! that implements `ApiClient`, and a re-export here.
 
 pub mod anthropic;
+pub mod gemini;
 pub mod http;
 pub mod openai_compat;
 
 pub use anthropic::{AnthropicConfig, AnthropicProvider};
+pub use gemini::{GeminiConfig, GeminiProvider};
 pub use http::{HttpClient, HttpError, HttpResponse, RecordedRequest, StubHttpClient, UreqClient};
 pub use openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
