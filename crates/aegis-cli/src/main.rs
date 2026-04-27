@@ -105,6 +105,11 @@ enum Command {
         /// Custom shell verifier command (overrides auto-detect).
         #[arg(long)]
         verifier_cmd: Option<String>,
+        /// Wire in built-in read-only tools (Read, Glob, Grep) so
+        /// the LLM can inspect the workspace. Off by default — pure
+        /// chat mode otherwise.
+        #[arg(long)]
+        tools: bool,
         /// Emit the full result as JSON.
         #[arg(long)]
         json: bool,
@@ -184,6 +189,7 @@ fn main() -> ExitCode {
             permission_mode,
             verify,
             verifier_cmd,
+            tools,
             json,
         } => cmd_chat(
             prompt,
@@ -194,6 +200,7 @@ fn main() -> ExitCode {
             &permission_mode,
             verify,
             verifier_cmd,
+            tools,
             json,
         ),
     }
@@ -208,15 +215,18 @@ fn cmd_chat(
     permission_mode_str: &str,
     verify: bool,
     verifier_cmd: Option<String>,
+    tools_enabled: bool,
     json: bool,
 ) -> ExitCode {
-    use aegis_agent::api::ApiClient;
+    use aegis_agent::agent_tools::ReadOnlyTools;
+    use aegis_agent::api::{ApiClient, ToolDefinition};
     use aegis_agent::permission::{PermissionMode, PermissionPolicy};
     use aegis_agent::providers::{
         AnthropicConfig, AnthropicProvider, GeminiConfig, GeminiProvider, OpenAiCompatConfig,
         OpenAiCompatProvider, UreqClient,
     };
     use aegis_agent::testing::ScriptedToolExecutor;
+    use aegis_agent::tool::ToolExecutor;
     use aegis_agent::verifier::{AgentTaskVerifier, ShellVerifier, TestVerifier};
     use aegis_agent::{AgentConfig, ConversationRuntime, Session, StoppedReason};
     use std::io::{IsTerminal, Read};
@@ -318,12 +328,24 @@ fn cmd_chat(
 
     let system_prompt = system.map(|s| vec![s]).unwrap_or_default();
 
+    // Tool executor + tool definitions: empty by default (chat-only),
+    // ReadOnlyTools when --tools is set.
+    let (executor, tool_defs): (Box<dyn ToolExecutor>, Vec<ToolDefinition>) = if tools_enabled {
+        eprintln!("aegis chat: read-only tools enabled (Read, Glob, Grep)");
+        (
+            Box::new(ReadOnlyTools::new(workspace.clone())),
+            ReadOnlyTools::definitions(),
+        )
+    } else {
+        (Box::new(ScriptedToolExecutor::new()), Vec::new())
+    };
+
     let mut rt = ConversationRuntime::new(
         Session::new(),
         provider,
-        ScriptedToolExecutor::new(),
+        executor,
         system_prompt,
-        vec![],
+        tool_defs,
         AgentConfig {
             max_iterations_per_turn: max_iters,
             session_cost_budget: cost_budget,
@@ -467,9 +489,10 @@ where
                 continue;
             }
             "/reset" => {
+                rt.reset_session();
                 println!(
                     "{}",
-                    "(in-process reset not yet supported — restart `aegis chat` for a clean session)"
+                    "(session reset — conversation history + cost + stalemate cleared)"
                         .with(theme.quote)
                 );
                 continue;

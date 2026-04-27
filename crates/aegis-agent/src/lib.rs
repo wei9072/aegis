@@ -30,6 +30,7 @@
 //! for the sibling contract guarding `TaskVerdict`.
 
 pub mod aegis_predict;
+pub mod agent_tools;
 pub mod api;
 pub mod conversation;
 pub mod cost;

@@ -155,6 +155,16 @@ where
         &self.cost_tracker
     }
 
+    /// Wipe the conversation transcript + cost tracker + stalemate
+    /// detector and start fresh. Used by `/reset` in the chat REPL.
+    /// The provider, executor, predictor, verifier, permissions and
+    /// config stay — only the per-session state resets.
+    pub fn reset_session(&mut self) {
+        self.session = Session::new();
+        self.cost_tracker = CostTracker::new();
+        self.stalemate = StalemateDetector::new();
+    }
+
     /// Run one user turn through the model. Loops on tool_use until
     /// the assistant emits a turn with no `tool_use` blocks, or until
     /// the per-turn iteration budget is exhausted.
