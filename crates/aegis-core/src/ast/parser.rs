@@ -75,24 +75,29 @@ pub fn analyze_file(filepath: &str) -> PyResult<AstMetrics> {
 
 #[pyfunction]
 pub fn get_imports(filepath: &str) -> PyResult<Vec<String>> {
-    let code = fs::read_to_string(filepath)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+    get_imports_native(filepath).map_err(pyo3::exceptions::PyIOError::new_err)
+}
+
+/// Pure-Rust import extraction. Same logic as `get_imports`, but
+/// returns `Result<Vec<String>, String>` so callers without a Python
+/// runtime (the V1.9 `aegis-cli` / `aegis-mcp` binaries) can use it.
+pub fn get_imports_native(filepath: &str) -> Result<Vec<String>, String> {
+    let code = fs::read_to_string(filepath).map_err(|e| e.to_string())?;
 
     let registry = LanguageRegistry::global();
-    let adapter = registry.for_path(filepath).ok_or_else(|| unsupported(filepath))?;
+    let adapter = registry
+        .for_path(filepath)
+        .ok_or_else(|| format!("no language adapter for {filepath:?}"))?;
     let lang = adapter.tree_sitter_language();
 
     let mut parser = Parser::new();
-    parser
-        .set_language(lang)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    parser.set_language(lang).map_err(|e| e.to_string())?;
     let tree = parser
         .parse(&code, None)
-        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("parse returned None"))?;
+        .ok_or_else(|| "parse returned None".to_string())?;
     let root = tree.root_node();
 
-    let query = Query::new(lang, adapter.import_query())
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let query = Query::new(lang, adapter.import_query()).map_err(|e| e.to_string())?;
 
     let mut qc = QueryCursor::new();
     let mut seen = std::collections::HashSet::new();

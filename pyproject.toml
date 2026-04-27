@@ -63,7 +63,10 @@ Issues = "https://github.com/wei9072/aegis/issues"
 "V1 Validation Evidence" = "https://github.com/wei9072/aegis/blob/main/docs/v1_validation.md"
 
 [tool.maturin]
-manifest-path = "crates/aegis-core/Cargo.toml"
+# V1.9 cycle-break — the `_core` cdylib lives in aegis-pyshim now
+# so pyshim can depend on aegis-core (for the build_context + planner
+# Rust ports). aegis-core stays a pure rlib.
+manifest-path = "crates/aegis-pyshim/Cargo.toml"
 python-source = "."
 module-name = "aegis._core"
 features = ["extension-module"]

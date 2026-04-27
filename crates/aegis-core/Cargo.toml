@@ -6,18 +6,16 @@ license.workspace = true
 repository.workspace = true
 
 [lib]
-# Underscore-prefixed name signals "private submodule of `aegis`".
-# Maturin's `module-name = "aegis._core"` in pyproject.toml installs
-# the produced .so at aegis/_core.<so>, matching this PyO3 binding.
-name = "_core"
-crate-type = ["cdylib", "rlib"]
+# rlib only — V1.9 cycle-break moved the `_core` cdylib boundary to
+# aegis-pyshim, so aegis-pyshim can depend on this crate's rlib for
+# the build_context / planner ports.
+crate-type = ["rlib"]
 
 [features]
-# Maturin builds `aegis-control-plane` with `--features extension-module`
-# (see pyproject.toml). `cargo test --workspace` builds without it so
-# unit tests can link without the Python extension scaffolding.
+# Pure rlib needs no extension-module flag; aegis-pyshim is the
+# crate that links the Python extension now.
 default = []
-extension-module = ["pyo3/extension-module", "aegis-pyshim/extension-module"]
+extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 pyo3 = { workspace = true }
@@ -53,9 +51,11 @@ tree-sitter-dart = "=0.0.3"
 
 # V1.0 — pure-Rust types live in sibling crates; aegis-pyshim wraps
 # them as PyO3 classes and registers them into the `_core` module.
+# (aegis-pyshim was a sibling dep here pre-V1.9; the cycle-break
+# moved the cdylib to aegis-pyshim, so this crate no longer
+# references it — aegis-pyshim now depends on this crate.)
 aegis-trace = { path = "../aegis-trace" }
 aegis-decision = { path = "../aegis-decision" }
-aegis-pyshim = { path = "../aegis-pyshim" }
 
 [dev-dependencies]
 # 用於單元測試
