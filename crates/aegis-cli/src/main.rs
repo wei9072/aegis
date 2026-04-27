@@ -24,6 +24,9 @@ use aegis_runtime::{
 };
 use clap::{Parser, Subcommand};
 
+mod input;
+mod render;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "aegis",
@@ -393,70 +396,88 @@ where
     C: aegis_agent::api::ApiClient,
     T: aegis_agent::tool::ToolExecutor,
 {
-    use aegis_agent::{Session, StoppedReason};
-    use std::io::{BufRead, Write};
+    use aegis_agent::StoppedReason;
+    use crossterm::style::Stylize;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
+    let renderer = render::TerminalRenderer::new();
+    let theme = renderer.color_theme().clone();
+    let mut stderr = std::io::stderr();
+
+    let banner_title = format!("{}", "aegis chat".with(theme.aegis_brand).bold());
     println!();
-    println!("aegis chat — interactive mode");
+    println!("  ┌─ {} ─ V3 interactive mode", banner_title);
     println!(
-        "type your message; commands: /exit  /quit  /reset  /cost  /history  /help"
+        "  │  type your message; commands: {}",
+        "/exit  /help  /cost  /history  /reset"
+            .with(theme.quote)
     );
+    println!("  └─");
     println!();
 
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
+    let slash_commands = vec![
+        "exit".into(),
+        "quit".into(),
+        "help".into(),
+        "reset".into(),
+        "cost".into(),
+        "history".into(),
+    ];
+    let mut input = match input::ChatInput::new(slash_commands) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("aegis chat: failed to init readline: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let prompt_label = format!("{} ", "you>".with(theme.aegis_brand).bold());
     let mut last_exit = ExitCode::SUCCESS;
 
     loop {
-        // Prompt + flush so it appears even when stdout is line-buffered.
-        print!("you> ");
-        let _ = stdout.flush();
-
-        let mut line = String::new();
-        let bytes = match stdin.lock().read_line(&mut line) {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!("aegis chat: read error: {e}");
-                return ExitCode::from(2);
+        let trimmed = match input.read_line(&prompt_label) {
+            input::ReadOutcome::Submit(line) => line.trim().to_string(),
+            input::ReadOutcome::Cancel => {
+                // Ctrl+C abandons the in-progress line; loop continues.
+                println!();
+                continue;
+            }
+            input::ReadOutcome::Exit => {
+                println!();
+                return last_exit;
             }
         };
-        if bytes == 0 {
-            // EOF (Ctrl+D)
-            println!();
-            return last_exit;
-        }
-        let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        // Slash commands.
-        match trimmed {
+        match trimmed.as_str() {
             "/exit" | "/quit" => {
-                println!("bye");
+                println!("{}", "bye".with(theme.quote));
                 return last_exit;
             }
             "/help" => {
-                println!("/exit, /quit  — leave the session");
-                println!("/reset        — clear conversation history");
-                println!("/cost         — show current cost-tracker snapshot");
-                println!("/history      — show how many messages are buffered");
-                println!("/help         — this list");
+                println!("  /exit, /quit  — leave the session");
+                println!("  /reset        — clear conversation history");
+                println!("  /cost         — current cost-tracker snapshot");
+                println!("  /history      — message count");
+                println!("  /help         — this list");
                 continue;
             }
             "/reset" => {
-                // Replace the runtime's session with a fresh one. The
-                // public API doesn't expose a `set_session`, so we
-                // do it via `into_session` on a clone — for V3.6 we
-                // just print a note and let the user run a new
-                // process if they really need a hard reset.
-                println!("(reset not supported in-process yet — restart `aegis chat` for a clean session)");
+                println!(
+                    "{}",
+                    "(in-process reset not yet supported — restart `aegis chat` for a clean session)"
+                        .with(theme.quote)
+                );
                 continue;
             }
             "/cost" => {
                 let snap = rt.cost_tracker().snapshot();
                 if snap.is_empty() {
-                    println!("(no cost observations recorded)");
+                    println!("{}", "(no cost observations recorded)".with(theme.quote));
                 } else {
                     for entry in &snap {
                         println!(
@@ -475,51 +496,88 @@ where
                 continue;
             }
             "/history" => {
-                println!("({} messages in session)", rt.session().messages.len());
+                println!(
+                    "  {} messages in session",
+                    rt.session().messages.len()
+                );
                 continue;
             }
             _ if trimmed.starts_with('/') => {
-                println!("unknown command: {trimmed}  (try /help)");
+                println!(
+                    "  {}  (try /help)",
+                    format!("unknown command: {trimmed}").with(theme.spinner_failed)
+                );
                 continue;
             }
             _ => {}
         }
 
-        // Run the turn.
-        let result = rt.run_turn(trimmed.to_string());
-        let response_text = collect_last_assistant_text(rt);
+        // Spinner ticks on a background thread while the LLM thinks.
+        let spinner_running = Arc::new(AtomicBool::new(true));
+        let spin_flag = spinner_running.clone();
+        let spinner_theme = theme.clone();
+        let spinner_thread = std::thread::spawn(move || {
+            let mut spinner = render::Spinner::new();
+            let mut err = std::io::stderr();
+            while spin_flag.load(Ordering::Relaxed) {
+                let _ = spinner.tick("thinking…", &spinner_theme, &mut err);
+                std::thread::sleep(std::time::Duration::from_millis(80));
+            }
+            let _ = spinner.clear(&mut err);
+        });
 
+        let result = rt.run_turn(trimmed);
+
+        spinner_running.store(false, Ordering::Relaxed);
+        let _ = spinner_thread.join();
+        let _ = stderr.flush();
+
+        let response_text = collect_last_assistant_text(rt);
         if !response_text.is_empty() {
-            println!("aegis> {response_text}");
+            let prefix = format!("{}", "aegis>".with(theme.aegis_brand).bold());
+            println!("{prefix}");
+            // Render the response as markdown for prettier output.
+            let rendered = renderer.render_markdown(&response_text);
+            for line in rendered.lines() {
+                println!("  {line}");
+            }
+            println!();
         }
-        // Quiet status footer — only print when something interesting
-        // (not the boring PlanDoneNoVerifier case).
+
+        // Status footer — quiet on the boring path.
         match &result.stopped_reason {
             StoppedReason::PlanDoneNoVerifier => {}
             StoppedReason::PlanDoneVerified => {
-                eprintln!("(verified, {} iterations)", result.iterations);
+                eprintln!(
+                    "  {} ({} iterations)",
+                    "verified".with(theme.spinner_done),
+                    result.iterations
+                );
             }
             StoppedReason::PlanDoneVerifierRejected => {
-                eprintln!("(verifier rejected — see verdict)");
+                eprintln!(
+                    "  {} — see verdict",
+                    "verifier rejected".with(theme.spinner_failed)
+                );
                 if let Some(v) = &result.task_verdict {
                     if let Some(r) = &v.verifier_result {
-                        eprintln!("rationale: {}", r.rationale);
+                        eprintln!("  rationale: {}", r.rationale);
                     }
                 }
                 last_exit = ExitCode::from(1);
             }
             StoppedReason::ProviderError(message) => {
-                eprintln!("provider error: {message}");
+                eprintln!(
+                    "  {}: {}",
+                    "provider error".with(theme.spinner_failed),
+                    message
+                );
                 last_exit = ExitCode::from(2);
             }
             other => {
-                eprintln!("({:?}, {} iterations)", other, result.iterations);
+                eprintln!("  ({:?}, {} iterations)", other, result.iterations);
             }
         }
-
-        // Touch Session import so unused warning doesn't fire if some
-        // build flag prunes the slash-command body.
-        let _: Option<&Session> = None;
     }
 }
 
