@@ -1,0 +1,31 @@
+# V2.0 — continuous integration. Runs on every push + PR.
+# Single job: build + test the workspace on Linux x86_64. Platform
+# matrix lives in release.yml (only fires on tags so PRs don't burn
+# 5×2 minutes per change).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build
+        run: cargo build --workspace --locked
+      - name: cargo test
+        run: cargo test --workspace --locked
+      - name: aegis smoke
+        run: |
+          ./target/debug/aegis languages
+          ./target/debug/aegis check Cargo.toml
+          echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+            | ./target/debug/aegis-mcp \
+            | grep -q '"protocolVersion"'

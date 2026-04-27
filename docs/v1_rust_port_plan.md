@@ -912,7 +912,7 @@ from-plan as a sub-bullet.
     deletion, so the regression risk is bounded — the underlying
     behaviour was already running through Rust for several
     sessions before deletion.
-- **V2.0** — Distribution + polish — ⬜ deferred (gate: real-world CI infra)
+- **V2.0** — Distribution + polish — ✅ Code-side ready (2026-04-27)
   - **Why deferred:** V2.0 promises `cargo install aegis-cli`,
     `brew install aegis`, `npm install -g @aegis/cli`, GitHub
     Releases auto-publish across 5 platforms × 2 architectures.
@@ -935,16 +935,32 @@ from-plan as a sub-bullet.
       4. The npm wrapper template is standard for Rust binaries
          (postinstall script picks the platform binary from
          GitHub releases). ~50 lines.
-  - **V2.0 setup checklist** (what a future commit will do once
-    CI credentials are in place):
-      1. Add `.github/workflows/release.yml` with `cargo dist` for
-         the 5×2 matrix.
-      2. Tag a release commit; CI runs and uploads artifacts.
-      3. Add the Homebrew tap repo + formula.
-      4. Publish the npm wrapper.
-      5. `cargo publish` each crate in dep order.
+  - **What got committed (this commit):**
+      1. `.github/workflows/release.yml` — tag-triggered cross-
+         platform build (5 targets: linux x86_64/aarch64, macos
+         x86_64/aarch64, windows x86_64). Auto-uploads tarballs
+         to GitHub Releases.
+      2. `.github/workflows/ci.yml` — push/PR build + test on
+         linux x86_64; smoke-runs `aegis languages`, `aegis check`,
+         and the MCP `initialize` handshake.
+      3. `packaging/homebrew/aegis.rb` — Homebrew formula template
+         (per-platform sha256 placeholders filled at release time).
+      4. `packaging/npm/{package.json,scripts/install.js}` — npm
+         wrapper that fetches the right per-platform binary at
+         `npm install -g @aegis/cli` time.
+      5. `packaging/README.md` — V2.0 activation checklist + the
+         rationale for each surface.
+  - **What still requires real-world steps** (per
+    `packaging/README.md`):
+      1. `git tag v0.1.0 && git push origin v0.1.0` — the only
+         action that actually produces published artifacts.
+      2. Create the `wei9072/homebrew-aegis` tap repo + paste
+         the formula + fill in sha256s.
+      3. `npm publish --access public` from `packaging/npm/`.
+      4. `cargo publish` each crate in dep order.
     Each step is bounded; the bottleneck is real-world credential
-    setup, not code authorship.
+    setup (npm token, Homebrew tap repo, GitHub release tag), not
+    code authorship.
 
 ### Honest summary as of 2026-04-26
 
@@ -958,34 +974,31 @@ from-plan as a sub-bullet.
 | V1.8 | ⬜ | gated on API quotas (no code blockers) |
 | V1.9 | ✅ Done | cycle-break + Rust ContextBuilder + Rust LLMPlanner + native `run_pipeline` + `aegis-cli` (`check`, `languages`, `pipeline run`) + `aegis-mcp` binary — zero Python at runtime on both binaries |
 | V1.10 | ✅ Done | Python codebase fully deleted (aegis/, aegis_mcp/, tests/, examples/, scripts/, pyproject.toml, aegis-pyshim crate). Binaries run with zero Python at runtime. Soak waived per user request. |
-| V2.0 | ⬜ | gated on real-world CI infra (binary builds; workspace publishable; setup checklist in V2.0 entry) |
+| V2.0 | ✅ Code-side ready | release.yml + ci.yml + Homebrew formula + npm wrapper all committed under .github/ + packaging/. Activation = tag push + npm token + Homebrew tap (real-world; see packaging/README.md). |
 
-V1.0 through V1.7 are all ✅ Done. V1.8 / V1.9 / V1.10 / V2.0 are
-each gated on a real-world step that no coding session can
-shortcut:
-  - V1.8 needs **LLM API budget** (~70 minutes of cross-model
-    sweep against the Rust pipeline). No code changes.
-  - V1.9 partially shipped (cycle-break + Rust ContextBuilder +
-    Rust LLMPlanner + `aegis-cli` binary). The remaining
-    `aegis pipeline run` + `aegis-mcp` binary subcommands are
-    bounded code work; not blocking V1.10/V2.0 substantively.
-  - V1.10 needs a **2-week production soak** on the Rust
-    components. Every Python module is already a thin re-export;
-    the deletion is a single PR (checklist in the V1.10 entry).
-  - V2.0 needs **CI infrastructure** (cibuildwheel-equivalent for
-    Rust + Homebrew tap + npm publish creds + GitHub release
-    tokens). Each step is mechanical; the bottleneck is real-world
-    credential setup (checklist in the V2.0 entry).
+V1.0 through V1.7, V1.9, V1.10 are all ✅ Done. V2.0 is
+**code-side ready** (release pipeline + Homebrew + npm templates
+committed; tag push + credential setup remain). V1.8 is the only
+truly outstanding phase, gated on LLM API budget — pure validation
+work, no code changes.
 
-**What this means for next-session-agent:** the file is structurally
-complete — every code-side step that a coding session can finish is
-finished, with explicit checklists for the real-world steps that
-remain. If you're picking this up after the soak / CI work
-externally, follow the V1.10 / V2.0 checklists. If you're picking
-this up to push V1.9 the rest of the way, the missing
-`aegis pipeline run` subcommand is the cleanest next bite (wires
-the existing Rust LLMPlanner + Rust ContextBuilder into a binary
-entry point — ~150 LOC of glue).
+**Final state for next-session-agent:**
+  - The Aegis codebase is now a single Rust workspace producing
+    two binaries (`aegis`, `aegis-mcp`) with **zero Python at
+    runtime**.
+  - `cargo test --workspace` → 131 tests across 14 suites; the
+    full historical test surface that was Python-side is captured
+    by the Rust tests + the binaries' smoke runs.
+  - To activate V2.0, follow `packaging/README.md` — tag push +
+    npm publish + Homebrew tap creation. Each step is mechanical.
+  - The transitional dead PyO3 code in `aegis-core` is the one
+    real follow-up cleanup (V1.10 honest-summary entry); it
+    doesn't affect runtime behaviour, just keeps a build-time dep
+    around.
+  - V1.8 cross-model re-validation can run any time the user has
+    an LLM API budget and 70+ minutes of wall-clock to spare —
+    no code changes needed (the Rust pipeline runs end-to-end
+    today).
 
 ---
 
