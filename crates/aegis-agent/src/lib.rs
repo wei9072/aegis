@@ -31,6 +31,7 @@
 
 pub mod api;
 pub mod conversation;
+pub mod mcp;
 pub mod message;
 pub mod providers;
 pub mod testing;
