@@ -16,10 +16,15 @@
 pub mod error;
 pub mod http;
 pub mod openai;
+pub mod planner;
 
 pub use error::ProviderError;
 pub use http::{HttpClient, HttpRequest, HttpResponse, UreqClient};
 pub use openai::{OpenAIChatProvider, OpenAIChatProviderConfig};
+pub use planner::{
+    LLMPlanner, PlanContext, PlannerError, PrevExecutionResult, PrevPatchResult,
+    PrevValidationError, SignalSummary,
+};
 
 /// Single-method provider contract. Implementors are
 /// `Send + Sync` so they can be shared across threads (the V1.3

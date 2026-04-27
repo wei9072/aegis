@@ -14,3 +14,6 @@ thiserror = { workspace = true }
 # semantics — the V1 pipeline port (V1.3) decides whether to move
 # to async.
 ureq = { version = "2.10", default-features = false, features = ["tls"] }
+
+# V1.9 — LLMPlanner needs the IR types it produces.
+aegis-ir = { path = "../aegis-ir" }

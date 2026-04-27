@@ -15,6 +15,7 @@ members = [
     "crates/aegis-providers",
     "crates/aegis-runtime",
     "crates/aegis-pyshim",
+    "crates/aegis-cli",
 ]
 
 [workspace.package]

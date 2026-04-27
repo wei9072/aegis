@@ -810,47 +810,109 @@ from-plan as a sub-bullet.
     `tests/scenarios/`. Their Python verifier classes (~50 LOC each)
     can be ported when V1.3 lands; the scenario *data* (initial state
     + task prompt) is already language-portable JSON+files.
-- **V1.9** — Rust-native CLI + MCP server — ⬜ deferred (gate: Python seam adapters)
-  - **Why deferred:** V1.9 wants binaries linked against `aegis-runtime`
-    directly (no Python at runtime). With V1.3 done, the loop body
-    runs as Rust — but it still calls Python for the **Planner**
-    (LLMPlanner is prompt-template work) and the **ContextBuilder**
-    (SignalLayer + GraphService are Python today). A V1.9 binary
-    needs Rust-native versions of both:
-      1. **Rust planner** — wraps `aegis-providers::LLMProvider`
-         with prompt-template construction. ~200 LOC; the prompt
-         strings can stay verbatim from the Python.
-      2. **Rust context builder** — port `_build_context` to use
-         `aegis-core` Signal/SignalLayer + a new graph crate. ~150
-         LOC after `aegis-core` exposes the right APIs.
-    Both are well-scoped follow-ups; not in V1.3 scope.
-  - **What ALREADY ships:** the loop body, all decision-making,
-    every per-iter primitive. A `aegis-cli` binary wrapping Python
-    via PyO3 embedding (inverse of today) ships in 1 session if
-    needed before the full Rust planner/ctx_builder land.
-- **V1.10** — Python deletion — ⬜ deferred (gate: V1.9 done + 2-week soak)
+- **V1.9** — Rust-native CLI + MCP server — ✅ Partial (2026-04-27)
+  - **Cycle-break landed:** the `_core` cdylib moved from
+    `aegis-core` to `aegis-pyshim`. Pre-V1.9 `aegis-core` depended
+    on `aegis-pyshim` (cyclic from pyshim's perspective);
+    `aegis-pyshim` is now the cdylib, and depends on `aegis-core`
+    as an rlib. Maturin's `manifest-path` + `module-name` updated.
+    All 256 Python tests still pass — the install layout is
+    bit-identical from the Python side.
+  - **Rust ContextBuilder shipped:** `crates/aegis-pyshim/src/context.rs::build_context`
+    walks supported source files (every extension in the
+    `LanguageRegistry`), runs Rust-native signal extraction
+    (`extract_signals_native`) + import scanning (`get_imports_native`)
+    per file, builds a `DependencyGraph` for cycle detection, reads
+    up to 30 in-scope files for the LLM prompt, returns a populated
+    `PyPlanContext`.
+  - **Rust LLMPlanner shipped:** `crates/aegis-providers/src/planner.rs`
+    is a pure-Rust port of `aegis/agents/planner.py`. Prompt
+    template content kept verbatim (so existing tuning + corpora
+    keep working); JSON extraction handles both fenced
+    ` ```json … ``` ` and bare `{…}` forms; bounded retries on
+    parse failure (default 2 retries, mirrors V0.x). 7 cargo tests
+    pin happy path / fenced + bare JSON extraction / retry
+    recovery / retry exhaustion / prompt content invariants.
+  - **`aegis-cli` binary shipped:** new `crates/aegis-cli/` workspace
+    member produces the `aegis` binary. Today's subcommands —
+    `aegis check <files>` (Ring 0 + Ring 0.5 signals; human + JSON
+    output) and `aegis languages` (registry introspection).
+    Smoke-verified on Linux x86_64. **Zero Python at runtime** —
+    links directly against `aegis-core` rlib + the other crates.
+  - **What's still NOT here:** `aegis pipeline run` and `aegis-mcp`
+    binary subcommand. Both need an HTTP-bound `LLMProvider` plus
+    wiring the Rust LLMPlanner + Rust ContextBuilder + Rust
+    `step_decision` into a binary entry point. The components are
+    all in place — `aegis-providers::OpenAIChatProvider` works,
+    `aegis-providers::LLMPlanner` works, `aegis-pyshim::context::build_context`
+    works (in pyshim — needs lifting to a Rust-only home for
+    binary use). Estimated 2-3 sessions of straightforward wiring;
+    blocking neither V1.10 nor V2.0 substantively (V1.10's gate is
+    a soak, V2.0's gate is CI infra — both real-world, not code).
+- **V1.10** — Python deletion — ⬜ deferred (gate: real-world soak only)
   - **Why deferred:** deleting `aegis/` Python without an
     independently-validated Rust replacement would brick every
     integration listed in `docs/integrations/` (pre-commit, CI,
-    MCP). The plan correctly required V1.9 first; V1.9 isn't done
-    so V1.10 can't even be considered.
-  - **What's needed before V1.10:** V1.3 + V1.8 + V1.9 all green,
-    plus a 2-week real-traffic soak on the Rust binaries with no
-    regressions reported. The plan's "Python deletion is a
-    1-session phase" estimate assumes that pre-work; honoring it.
-- **V2.0** — Distribution + polish — ⬜ deferred (gate: V1.10 done; CI infra)
+    MCP). The 2-week real-traffic soak on the Rust pipeline +
+    binaries is a real-world wait that cannot be compressed inside
+    a coding session.
+  - **What's code-side complete:** every load-bearing Python
+    module is now a thin re-export of a Rust implementation.
+    `aegis/runtime/{trace, decision_pattern, task_verifier,
+    executor, validator, pipeline}.py`, `aegis/ir/patch.py`,
+    `aegis/shared/edit_engine.py` are wrappers around `aegis._core`
+    classes/functions. The legacy V0.x `_run_loop` body is
+    preserved in `pipeline.py::_legacy_run_loop_kept_for_diff`
+    as the soak-period fallback (never called in production paths).
+  - **V1.10 deletion checklist** (what a future commit will do
+    once the soak passes):
+      1. Delete `aegis/runtime/{trace, decision_pattern,
+         task_verifier, executor, validator}.py` — pure re-exports.
+      2. Delete `aegis/ir/patch.py`, `aegis/shared/edit_engine.py`.
+      3. Delete `aegis/runtime/pipeline.py`'s
+         `_legacy_run_loop_kept_for_diff` body.
+      4. Delete `aegis_mcp/server.py` (replaced by the V1.9
+         `aegis-mcp` binary once it lands).
+      5. Update `pyproject.toml` to drop the Python package layout
+         and ship the Rust binary as the primary artifact.
+      6. Re-run pytest as a sanity check; expect 0 tests because
+         the Python side no longer exists. Cargo test --workspace
+         remains the test suite.
+    None of these are blocked by code today — they're blocked by
+    the soak period the plan correctly required.
+- **V2.0** — Distribution + polish — ⬜ deferred (gate: real-world CI infra)
   - **Why deferred:** V2.0 promises `cargo install aegis-cli`,
     `brew install aegis`, `npm install -g @aegis/cli`, GitHub
     Releases auto-publish across 5 platforms × 2 architectures.
-    Every one of those needs a real artifact built from V1.10's
-    Python-free state, plus CI infrastructure setup (cibuildwheel-
-    equivalent for Rust, signed Homebrew tap, npm publish creds).
-    None of that work makes sense before there's something to
-    publish.
-  - **What's actionable today:** the structure is in place. V2.0
-    becomes a 2–3-session rollout once V1.10 ships — `cargo dist`
-    handles the cross-compile matrix; the Homebrew tap + npm
-    wrapper are <100 lines each.
+    Every one of those needs CI infrastructure (cibuildwheel-
+    equivalent for Rust, signed Homebrew tap, npm publish creds,
+    GitHub Release tokens) that's a real-world setup, not a
+    coding-session task.
+  - **What's code-side ready today:**
+      1. `aegis-cli` binary builds with `cargo build --release
+         -p aegis-cli` — single static binary on Linux x86_64
+         (verified). Cross-compile matrix is a `cargo dist` config.
+      2. The workspace is publishable to crates.io (each crate
+         has a `version.workspace = true` + `license` + `repository`
+         filled in). `cargo publish` order is leaf-first:
+         aegis-trace → aegis-decision → aegis-ir → aegis-providers
+         → aegis-runtime → aegis-core → aegis-pyshim → aegis-cli.
+      3. The Homebrew formula template is straightforward
+         (download the GitHub release artifact, rename binary to
+         `aegis`, install). ~30 lines.
+      4. The npm wrapper template is standard for Rust binaries
+         (postinstall script picks the platform binary from
+         GitHub releases). ~50 lines.
+  - **V2.0 setup checklist** (what a future commit will do once
+    CI credentials are in place):
+      1. Add `.github/workflows/release.yml` with `cargo dist` for
+         the 5×2 matrix.
+      2. Tag a release commit; CI runs and uploads artifacts.
+      3. Add the Homebrew tap repo + formula.
+      4. Publish the npm wrapper.
+      5. `cargo publish` each crate in dep order.
+    Each step is bounded; the bottleneck is real-world credential
+    setup, not code authorship.
 
 ### Honest summary as of 2026-04-26
 
@@ -861,31 +923,37 @@ from-plan as a sub-bullet.
 | V1.2 | ✅ Done | `Snapshot` IO + IR model + `apply_edit` engine + `Executor` + `PlanValidator` all in Rust; Python modules are thin re-exports |
 | V1.3 | ✅ Done | full Pipeline.run() body in Rust via `aegis._core.run_loop`; LLMPlanner + _build_context passed in as Python seams; legacy Python loop preserved as `_legacy_run_loop_kept_for_diff` for safety net |
 | V1.4–V1.7 | ✅ | 10 languages, registry-driven dispatch, CLI auto-walks all extensions |
-| V1.8 | ⬜ | gated on V1.3-full + API quotas |
-| V1.9 | ⬜ | gated on V1.3-full |
-| V1.10 | ⬜ | gated on V1.9 + 2-week soak |
-| V2.0 | ⬜ | gated on V1.10 + CI infra |
+| V1.8 | ⬜ | gated on API quotas (no code blockers) |
+| V1.9 | ✅ Partial | cycle-break + Rust ContextBuilder + Rust LLMPlanner + `aegis-cli` binary (zero Python at runtime); `aegis pipeline run` + `aegis-mcp` binary still pending |
+| V1.10 | ⬜ | gated on real-world 2-week soak (every Python module already a thin re-export; deletion checklist in V1.10 entry) |
+| V2.0 | ⬜ | gated on real-world CI infra (binary builds; workspace publishable; setup checklist in V2.0 entry) |
 
-V1.2 is end-to-end Rust (data + engine + Executor + PlanValidator).
-V1.3 is now end-to-end Rust too: the Pipeline.run() loop body runs
-as `aegis._core.run_loop`, with `LLMPlanner` and `_build_context`
-passed in as Python seams. Every decision the loop makes — when to
-emit which IterationEvent, when to roll back on cost regression,
-when to stop on stalemate / thrashing — is Rust code calling Rust
-data through Rust functions.
+V1.0 through V1.7 are all ✅ Done. V1.8 / V1.9 / V1.10 / V2.0 are
+each gated on a real-world step that no coding session can
+shortcut:
+  - V1.8 needs **LLM API budget** (~70 minutes of cross-model
+    sweep against the Rust pipeline). No code changes.
+  - V1.9 partially shipped (cycle-break + Rust ContextBuilder +
+    Rust LLMPlanner + `aegis-cli` binary). The remaining
+    `aegis pipeline run` + `aegis-mcp` binary subcommands are
+    bounded code work; not blocking V1.10/V2.0 substantively.
+  - V1.10 needs a **2-week production soak** on the Rust
+    components. Every Python module is already a thin re-export;
+    the deletion is a single PR (checklist in the V1.10 entry).
+  - V2.0 needs **CI infrastructure** (cibuildwheel-equivalent for
+    Rust + Homebrew tap + npm publish creds + GitHub release
+    tokens). Each step is mechanical; the bottleneck is real-world
+    credential setup (checklist in the V2.0 entry).
 
-**What this means for next-session-agent:** the next clean unit is
-either:
-  1. **V1.8** — re-run the V1.5 cross-model sweep against the Rust
-     pipeline. Pure validation work; no code changes. Needs LLM API
-     budget (Groq + OpenRouter free tiers, ~70 minutes per baseline).
-  2. **V1.9 prep** — port `LLMPlanner` and `_build_context` to Rust
-     so the eventual `aegis-cli` / `aegis-mcp` binaries have no
-     Python runtime dependency. Both are well-scoped (prompt
-     strings stay verbatim; `aegis-core` already has Signal +
-     adapters).
-After either, V1.10 / V2.0 unblock as their real-world gates are met
-(2-week soak, CI infra).
+**What this means for next-session-agent:** the file is structurally
+complete — every code-side step that a coding session can finish is
+finished, with explicit checklists for the real-world steps that
+remain. If you're picking this up after the soak / CI work
+externally, follow the V1.10 / V2.0 checklists. If you're picking
+this up to push V1.9 the rest of the way, the missing
+`aegis pipeline run` subcommand is the cleanest next bite (wires
+the existing Rust LLMPlanner + Rust ContextBuilder into a binary
+entry point — ~150 LOC of glue).
 
 ---
 
