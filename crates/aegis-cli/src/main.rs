@@ -64,6 +64,48 @@ enum Command {
         #[command(subcommand)]
         sub: PipelineSub,
     },
+
+    /// V3 — drive a one-shot conversation with the aegis-agent loop.
+    ///
+    /// Picks a provider from env vars (first match wins):
+    ///   AEGIS_OPENAI_BASE_URL + AEGIS_OPENAI_MODEL  → OpenAI-compat
+    ///   AEGIS_ANTHROPIC_API_KEY + AEGIS_ANTHROPIC_MODEL → Anthropic
+    ///   AEGIS_GEMINI_API_KEY + AEGIS_GEMINI_MODEL   → Gemini
+    ///
+    /// Outputs the assistant's response on stdout; the structured
+    /// AgentTurnResult (stopped_reason / iterations / verdict) goes
+    /// to stderr unless --json is set, in which case the whole
+    /// result is one JSON object on stdout.
+    Chat {
+        /// Prompt to send. If omitted, reads from stdin.
+        prompt: Option<String>,
+        /// Optional system prompt prefix.
+        #[arg(long)]
+        system: Option<String>,
+        /// Per-turn iteration budget.
+        #[arg(long, default_value_t = 5)]
+        max_iters: u32,
+        /// Cumulative cost regression budget for the session.
+        #[arg(long)]
+        cost_budget: Option<f64>,
+        /// Workspace path passed to the verifier.
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+        /// Permission mode: read-only | workspace-write | danger-full-access.
+        #[arg(long, default_value = "workspace-write")]
+        permission_mode: String,
+        /// Run a verifier when the LLM signals "done".
+        /// Auto-detect (Cargo.toml/pyproject.toml/etc.) or pass a
+        /// custom shell command via --verifier-cmd.
+        #[arg(long)]
+        verify: bool,
+        /// Custom shell verifier command (overrides auto-detect).
+        #[arg(long)]
+        verifier_cmd: Option<String>,
+        /// Emit the full result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -130,6 +172,200 @@ fn main() -> ExitCode {
                 json,
             ),
         },
+        Command::Chat {
+            prompt,
+            system,
+            max_iters,
+            cost_budget,
+            workspace,
+            permission_mode,
+            verify,
+            verifier_cmd,
+            json,
+        } => cmd_chat(
+            prompt,
+            system,
+            max_iters,
+            cost_budget,
+            workspace,
+            &permission_mode,
+            verify,
+            verifier_cmd,
+            json,
+        ),
+    }
+}
+
+fn cmd_chat(
+    prompt: Option<String>,
+    system: Option<String>,
+    max_iters: u32,
+    cost_budget: Option<f64>,
+    workspace: PathBuf,
+    permission_mode_str: &str,
+    verify: bool,
+    verifier_cmd: Option<String>,
+    json: bool,
+) -> ExitCode {
+    use aegis_agent::api::ApiClient;
+    use aegis_agent::permission::{PermissionMode, PermissionPolicy};
+    use aegis_agent::providers::{
+        AnthropicConfig, AnthropicProvider, GeminiConfig, GeminiProvider, OpenAiCompatConfig,
+        OpenAiCompatProvider, UreqClient,
+    };
+    use aegis_agent::testing::ScriptedToolExecutor;
+    use aegis_agent::verifier::{AgentTaskVerifier, ShellVerifier, TestVerifier};
+    use aegis_agent::{AgentConfig, ConversationRuntime, Session, StoppedReason};
+
+    // Resolve prompt — flag → arg → stdin.
+    let prompt = match prompt {
+        Some(p) if !p.trim().is_empty() => p,
+        _ => {
+            use std::io::Read;
+            let mut buf = String::new();
+            if std::io::stdin().read_to_string(&mut buf).is_err() || buf.trim().is_empty() {
+                eprintln!("aegis chat: no prompt provided (pass as arg or pipe via stdin)");
+                return ExitCode::from(2);
+            }
+            buf
+        }
+    };
+
+    // Resolve permission mode.
+    let permission_mode = match permission_mode_str {
+        "read-only" => PermissionMode::ReadOnly,
+        "workspace-write" => PermissionMode::WorkspaceWrite,
+        "danger-full-access" => PermissionMode::DangerFullAccess,
+        other => {
+            eprintln!(
+                "aegis chat: unknown --permission-mode {other:?} (allowed: \
+                 read-only | workspace-write | danger-full-access)"
+            );
+            return ExitCode::from(2);
+        }
+    };
+
+    // Pick a provider from env vars. First match wins.
+    let provider: Box<dyn ApiClient> = if let Some(c) = OpenAiCompatConfig::from_env() {
+        eprintln!(
+            "aegis chat: provider = openai-compat ({} {})",
+            c.base_url, c.model
+        );
+        Box::new(OpenAiCompatProvider::new(c, Box::new(UreqClient::new())))
+    } else if let Some(c) = AnthropicConfig::from_env() {
+        eprintln!("aegis chat: provider = anthropic ({})", c.model);
+        Box::new(AnthropicProvider::new(c, Box::new(UreqClient::new())))
+    } else if let Some(c) = GeminiConfig::from_env() {
+        eprintln!("aegis chat: provider = gemini ({})", c.model);
+        Box::new(GeminiProvider::new(c, Box::new(UreqClient::new())))
+    } else {
+        eprintln!(
+            "aegis chat: no provider env vars set. Set one of:\n  \
+             AEGIS_OPENAI_BASE_URL + AEGIS_OPENAI_MODEL (+ AEGIS_OPENAI_API_KEY)\n  \
+             AEGIS_ANTHROPIC_API_KEY + AEGIS_ANTHROPIC_MODEL\n  \
+             AEGIS_GEMINI_API_KEY + AEGIS_GEMINI_MODEL"
+        );
+        return ExitCode::from(2);
+    };
+
+    // Optional verifier.
+    let verifier: Option<Box<dyn AgentTaskVerifier>> = if let Some(cmd) = verifier_cmd {
+        // Custom shell command — split on whitespace.
+        let mut parts = cmd.split_whitespace();
+        match parts.next() {
+            Some(program) => Some(Box::new(
+                ShellVerifier::new(program).args(parts.map(String::from)),
+            )),
+            None => None,
+        }
+    } else if verify {
+        // Auto-detect (composite — every test suite must pass).
+        match TestVerifier::auto_detect_composite(&workspace) {
+            Some(v) => Some(Box::new(v)),
+            None => {
+                eprintln!(
+                    "aegis chat: --verify requested but no project marker found in {} \
+                     (Cargo.toml / pyproject.toml / package.json / go.mod). Skipping.",
+                    workspace.display()
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let system_prompt = system.map(|s| vec![s]).unwrap_or_default();
+
+    let mut rt = ConversationRuntime::new(
+        Session::new(),
+        provider,
+        ScriptedToolExecutor::new(), // CLI demo has no tools wired; real tools land in V3.6+
+        system_prompt,
+        vec![],
+        AgentConfig {
+            max_iterations_per_turn: max_iters,
+            session_cost_budget: cost_budget,
+            workspace_root: Some(workspace),
+        },
+    )
+    .with_permission_policy(PermissionPolicy::standard(permission_mode));
+
+    if let Some(v) = verifier {
+        rt = rt.with_verifier(v);
+    }
+
+    let result = rt.run_turn(prompt);
+
+    // Collect the assistant's final text response.
+    let response_text: String = rt
+        .session()
+        .messages
+        .last()
+        .map(|msg| {
+            msg.blocks
+                .iter()
+                .filter_map(|b| match b {
+                    aegis_agent::ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+
+    if json {
+        let payload = serde_json::json!({
+            "stopped_reason": format!("{:?}", result.stopped_reason),
+            "iterations": result.iterations,
+            "task_verdict": result.task_verdict.as_ref().map(|v| serde_json::json!({
+                "pattern": format!("{:?}", v.pattern),
+                "rationale": v.verifier_result.as_ref().map(|r| r.rationale.clone()),
+            })),
+            "response": response_text,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+    } else {
+        if !response_text.is_empty() {
+            println!("{response_text}");
+        }
+        eprintln!();
+        eprintln!("--- result ---");
+        eprintln!("stopped_reason: {:?}", result.stopped_reason);
+        eprintln!("iterations:     {}", result.iterations);
+        if let Some(verdict) = &result.task_verdict {
+            eprintln!("task_verdict:   {:?}", verdict.pattern);
+            if let Some(r) = &verdict.verifier_result {
+                eprintln!("rationale:      {}", r.rationale);
+            }
+        }
+    }
+
+    match result.stopped_reason {
+        StoppedReason::PlanDoneVerified | StoppedReason::PlanDoneNoVerifier => ExitCode::SUCCESS,
+        StoppedReason::PlanDoneVerifierRejected => ExitCode::from(1),
+        StoppedReason::ProviderError(_) => ExitCode::from(2),
+        _ => ExitCode::from(1),
     }
 }
 

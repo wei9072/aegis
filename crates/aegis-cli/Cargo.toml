@@ -19,3 +19,4 @@ aegis-decision = { path = "../aegis-decision" }
 aegis-ir = { path = "../aegis-ir" }
 aegis-providers = { path = "../aegis-providers" }
 aegis-runtime = { path = "../aegis-runtime" }
+aegis-agent = { path = "../aegis-agent" }

@@ -133,31 +133,57 @@ pub struct TestVerifier {
 
 impl TestVerifier {
     /// Try to auto-detect a runnable test command for the given
-    /// workspace. Returns `None` if no recognised project marker
-    /// is present.
+    /// workspace. Returns the highest-priority single match, or
+    /// `None` if no recognised project marker is present.
+    /// For polyglot repos use `auto_detect_all` instead.
     #[must_use]
     pub fn auto_detect(workspace: &Path) -> Option<Self> {
+        Self::auto_detect_all(workspace).into_iter().next()
+    }
+
+    /// Detect every applicable test command in the workspace.
+    /// Useful for polyglot repos where a single project may have
+    /// both Rust and TS tests, etc. Returns one `TestVerifier`
+    /// per matching marker.
+    #[must_use]
+    pub fn auto_detect_all(workspace: &Path) -> Vec<Self> {
+        let mut out = Vec::new();
         if workspace.join("Cargo.toml").exists() {
-            return Some(Self {
+            out.push(Self {
                 inner: ShellVerifier::new("cargo").arg("test").arg("--quiet"),
             });
         }
         if workspace.join("pyproject.toml").exists() || workspace.join("setup.py").exists() {
-            return Some(Self {
+            out.push(Self {
                 inner: ShellVerifier::new("pytest").arg("-q"),
             });
         }
         if workspace.join("package.json").exists() {
-            return Some(Self {
+            out.push(Self {
                 inner: ShellVerifier::new("npm").arg("test").arg("--silent"),
             });
         }
         if workspace.join("go.mod").exists() {
-            return Some(Self {
+            out.push(Self {
                 inner: ShellVerifier::new("go").arg("test").arg("./..."),
             });
         }
-        None
+        out
+    }
+
+    /// Build a `CompositeVerifier` running every detected test
+    /// suite — every one must pass. Returns `None` if zero detected.
+    #[must_use]
+    pub fn auto_detect_composite(workspace: &Path) -> Option<CompositeVerifier> {
+        let detected = Self::auto_detect_all(workspace);
+        if detected.is_empty() {
+            return None;
+        }
+        let boxed: Vec<Box<dyn AgentTaskVerifier>> = detected
+            .into_iter()
+            .map(|v| Box::new(v) as Box<dyn AgentTaskVerifier>)
+            .collect();
+        Some(CompositeVerifier::new(boxed))
     }
 }
 

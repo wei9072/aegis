@@ -66,6 +66,15 @@ pub trait ApiClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError>;
 }
 
+/// Blanket impl so callers can pass `Box<dyn ApiClient>` directly
+/// to `ConversationRuntime::new` — useful for runtime provider
+/// selection (V3.7 chat_demo, the `aegis chat` CLI, etc.).
+impl<T: ApiClient + ?Sized> ApiClient for Box<T> {
+    fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        (**self).stream(request)
+    }
+}
+
 /// Error returned when a conversation turn cannot be completed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeError {

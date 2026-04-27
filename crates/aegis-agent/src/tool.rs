@@ -15,6 +15,14 @@ pub trait ToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
 }
 
+/// Blanket impl so callers can pass `Box<dyn ToolExecutor>` directly
+/// (multi-source tool dispatchers, MCP-backed executors, etc.).
+impl<T: ToolExecutor + ?Sized> ToolExecutor for Box<T> {
+    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        (**self).execute(tool_name, input)
+    }
+}
+
 /// Error returned when a tool invocation fails locally.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolError {

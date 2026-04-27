@@ -65,22 +65,11 @@ fn main() {
         std::process::exit(2);
     };
 
-    // ConversationRuntime is generic over (C: ApiClient, T: ToolExecutor).
-    // We can't easily use Box<dyn ApiClient> directly — wrap in a
-    // small adapter type.
-    struct DynApi(Box<dyn ApiClient>);
-    impl ApiClient for DynApi {
-        fn stream(
-            &mut self,
-            request: aegis_agent::api::ApiRequest,
-        ) -> Result<Vec<aegis_agent::api::AssistantEvent>, aegis_agent::api::RuntimeError> {
-            self.0.stream(request)
-        }
-    }
-
+    // ConversationRuntime accepts Box<dyn ApiClient> directly via
+    // the blanket ApiClient impl on Box<T>.
     let mut rt = ConversationRuntime::new(
         Session::new(),
-        DynApi(provider),
+        provider,
         ScriptedToolExecutor::new(), // no tools for the demo
         vec!["You are a concise assistant.".into()],
         vec![],

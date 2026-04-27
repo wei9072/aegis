@@ -23,6 +23,7 @@ dependencies = [
 name = "aegis-cli"
 version = "0.1.0"
 dependencies = [
+ "aegis-agent",
  "aegis-core",
  "aegis-decision",
  "aegis-ir",
