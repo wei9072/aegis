@@ -620,6 +620,39 @@ mod tests {
         );
     }
 
+    /// Bash uses `ReadOnlyTools::resolve_impl` for its redirect-
+    /// target check, so the V7 symlink defense added there flows
+    /// through automatically. This test pins that integration:
+    /// a redirect into an in-workspace symlink that points outside
+    /// the workspace must still reject.
+    #[cfg(unix)]
+    #[test]
+    fn bash_blocks_redirect_through_symlink_to_outside_workspace() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+        // Plant escape -> /etc inside the workspace. Lexically the
+        // redirect target `escape/cron.d/evil` is under workspace;
+        // only the canonicalize check catches the symlink.
+        symlink("/etc", dir.path().join("escape")).unwrap();
+
+        let mut tool = BashTool::new(dir.path());
+        let input = json!({
+            "command": "echo malicious > escape/cron.d/aegis_symlink_test"
+        })
+        .to_string();
+        let err = tool.execute("Bash", &input).unwrap_err();
+        assert!(
+            err.message().contains("redirect target rejected"),
+            "expected rejection, got: {}",
+            err.message()
+        );
+        assert!(
+            err.message().contains("resolves outside workspace"),
+            "expected symlink-resolve message, got: {}",
+            err.message()
+        );
+    }
+
     #[test]
     fn bash_subprocess_keeps_path_so_basic_commands_still_run() {
         // PATH is on the allowlist — `ls` must still resolve.

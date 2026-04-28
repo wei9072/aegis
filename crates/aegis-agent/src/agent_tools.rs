@@ -743,6 +743,51 @@ impl ReadOnlyTools {
                 )));
             }
         }
+
+        // V7 symlink defense: the lexical check above is fooled by a
+        // symlink in the workspace pointing outside it
+        // (`<workspace>/escape -> /etc`, then writing
+        // `<workspace>/escape/passwd` lexically passes but resolves
+        // to `/etc/passwd`). Canonicalize the candidate — or, if it
+        // does not exist yet (new file write), the deepest existing
+        // ancestor — and verify the resolved path stays inside the
+        // canonical workspace.
+        //
+        // Limitations (load-bearing — read before relaxing):
+        //   * TOCTOU between this check and the actual file
+        //     operation remains. An attacker who can swap a regular
+        //     file for a symlink between `resolve_impl` returning
+        //     and `fs::write` opening defeats this. A complete fix
+        //     requires `O_NOFOLLOW` / `openat2(RESOLVE_BENEATH)` at
+        //     the actual write call site, and is a separate
+        //     architectural change tracked outside this function.
+        //   * On Windows, symlink semantics differ; the canonicalize
+        //     check still runs and behaves analogously (returns the
+        //     real path with reparse points resolved).
+        let canonical_workspace = std::fs::canonicalize(workspace).map_err(|e| {
+            ToolError::new(format!("workspace canonicalize failed: {e}"))
+        })?;
+        let mut probe = candidate.clone();
+        let resolved_ancestor = loop {
+            if let Ok(c) = std::fs::canonicalize(&probe) {
+                break c;
+            }
+            // The probe path doesn't exist yet — common for new
+            // file writes. Walk up to find the deepest existing
+            // ancestor to canonicalize. The lexical check above
+            // already guarantees we are inside the workspace
+            // string-wise, so popping eventually lands on
+            // `workspace` itself (which exists, just canonicalized).
+            if !probe.pop() {
+                break canonical_workspace.clone();
+            }
+        };
+        if !resolved_ancestor.starts_with(&canonical_workspace) {
+            return Err(ToolError::new(format!(
+                "path resolves outside workspace via symlink: {path_str}"
+            )));
+        }
+
         Ok(candidate)
     }
 }
@@ -814,5 +859,95 @@ mod tests {
         let mut tools = ReadOnlyTools::new(dir.path());
         let err = tools.execute("Write", "{}").unwrap_err();
         assert!(err.message().contains("unknown tool"));
+    }
+
+    // ----------------------------------------------------------------
+    // V7 symlink defense — pin that resolve_impl rejects paths
+    // resolving outside the workspace via in-workspace symlinks.
+    // Gated on cfg(unix) because Windows symlink semantics + test
+    // privileges differ; the defense itself runs on all platforms.
+    // ----------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_rejects_symlink_pointing_outside_workspace() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        // Plant a symlink in the workspace pointing at /etc.
+        symlink("/etc", dir.path().join("escape")).unwrap();
+
+        // Reading through the symlink should fail. Lexically the
+        // path is under workspace; only the canonicalize-based
+        // check catches it.
+        let err =
+            ReadOnlyTools::resolve_impl(dir.path(), "escape/passwd").unwrap_err();
+        assert!(
+            err.message().contains("resolves outside workspace"),
+            "expected symlink-escape rejection, got: {}",
+            err.message()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_rejects_symlink_at_leaf_pointing_outside() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        // Symlink the file ITSELF (not a parent) — escape -> /etc/passwd.
+        symlink("/etc/passwd", dir.path().join("leaked")).unwrap();
+
+        let err = ReadOnlyTools::resolve_impl(dir.path(), "leaked").unwrap_err();
+        assert!(
+            err.message().contains("resolves outside workspace"),
+            "expected leaf-symlink rejection, got: {}",
+            err.message()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_allows_internal_symlinks() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("real.txt"), "x").unwrap();
+        // Symlink within workspace — should be allowed.
+        symlink(dir.path().join("sub"), dir.path().join("link")).unwrap();
+
+        let resolved =
+            ReadOnlyTools::resolve_impl(dir.path(), "link/real.txt").unwrap();
+        assert!(resolved.ends_with("link/real.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_allows_new_file_in_existing_workspace_subdir() {
+        // Regression: writing a NEW file (canonicalize would error
+        // on the file itself) must still pass when its parent is
+        // inside the workspace. The walk-up logic finds `<ws>/sub`
+        // as the deepest existing ancestor.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+
+        let resolved =
+            ReadOnlyTools::resolve_impl(dir.path(), "sub/new_file.txt").unwrap();
+        assert!(resolved.ends_with("sub/new_file.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_rejects_symlink_pointing_to_parent_via_dotdot() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        // Symlink to grandparent via `..` — outside workspace.
+        symlink("../..", dir.path().join("up")).unwrap();
+
+        let err =
+            ReadOnlyTools::resolve_impl(dir.path(), "up/anything").unwrap_err();
+        assert!(
+            err.message().contains("resolves outside workspace"),
+            "expected dotdot-symlink rejection, got: {}",
+            err.message()
+        );
     }
 }
