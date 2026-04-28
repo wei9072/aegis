@@ -16,3 +16,7 @@ glob = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+# AST-based contract tripwires (tests/tripwire_*.rs) parse src/ via
+# syn instead of grepping strings, so comments / docstrings / string
+# literals can't false-trigger the trip-wire.
+syn = { version = "2", features = ["full", "visit"] }

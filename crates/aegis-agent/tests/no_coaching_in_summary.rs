@@ -10,10 +10,14 @@
 //! this test fires loudly. The fix is always: remove the prose, fall
 //! back to fact-shaped tallies.
 //!
-//! Runs alongside the sibling contracts:
-//!   - tests/no_auto_retry.rs       (no retry loop)
-//!   - tests/no_coaching_injection.rs (verifier verdicts not coached)
-//!   - tests/verifier_drives_done.rs  (LLM-claimed done not authoritative)
+//! Runs alongside the sibling tripwires / contracts:
+//!   - tests/tripwire_no_auto_retry.rs       (no retry-shaped fns
+//!     or fields — AST tripwire, signaling not enforcement)
+//!   - tests/tripwire_no_coaching_injection.rs (no verdict→prompt
+//!     coaching APIs — AST tripwire, signaling not enforcement)
+//!   - tests/verifier_drives_done.rs  (LLM-claimed `done` is not
+//!     authoritative — true type-system contract: enum variant
+//!     existence enforced at compile time)
 
 use aegis_agent::compact::{build_summary, compact_session, CompactionConfig};
 use aegis_agent::cost::CostTracker;
