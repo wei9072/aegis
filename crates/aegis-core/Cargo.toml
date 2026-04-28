@@ -6,19 +6,11 @@ license.workspace = true
 repository.workspace = true
 
 [lib]
-# rlib only — V1.9 cycle-break moved the `_core` cdylib boundary to
-# aegis-pyshim, so aegis-pyshim can depend on this crate's rlib for
-# the build_context / planner ports.
+# rlib only — V1.10 deleted the PyO3 surface entirely; nothing in
+# this crate links against Python anymore.
 crate-type = ["rlib"]
 
-[features]
-# Pure rlib needs no extension-module flag; aegis-pyshim is the
-# crate that links the Python extension now.
-default = []
-extension-module = ["pyo3/extension-module"]
-
 [dependencies]
-pyo3 = { workspace = true }
 tree-sitter = "0.20"
 petgraph = "0.6.4"
 serde = { workspace = true }
@@ -56,11 +48,7 @@ tree-sitter-kotlin = "=0.3.4"
 # the tree-sitter 0.20 line that the rest of the grammars use.
 tree-sitter-dart = "=0.0.3"
 
-# V1.0 — pure-Rust types live in sibling crates; aegis-pyshim wraps
-# them as PyO3 classes and registers them into the `_core` module.
-# (aegis-pyshim was a sibling dep here pre-V1.9; the cycle-break
-# moved the cdylib to aegis-pyshim, so this crate no longer
-# references it — aegis-pyshim now depends on this crate.)
+# Sibling crates with pure-Rust types used by aegis-core.
 aegis-trace = { path = "../aegis-trace" }
 aegis-decision = { path = "../aegis-decision" }
 

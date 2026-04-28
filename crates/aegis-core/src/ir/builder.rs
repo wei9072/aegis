@@ -1,11 +1,9 @@
-use pyo3::prelude::*;
+use crate::ast::parser::get_imports_native;
 use crate::ir::model::IrNode;
-use crate::ast::parser::get_imports;
 
 /// Build a flat IR from a single file: one IrNode per import dependency.
-#[pyfunction]
-pub fn build_ir(filepath: &str) -> PyResult<Vec<IrNode>> {
-    let imports = get_imports(filepath)?;
+pub fn build_ir(filepath: &str) -> Result<Vec<IrNode>, String> {
+    let imports = get_imports_native(filepath)?;
     Ok(imports
         .into_iter()
         .map(|name| IrNode::new("dependency".to_string(), filepath.to_string(), name))

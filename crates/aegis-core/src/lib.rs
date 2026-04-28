@@ -1,18 +1,9 @@
 //! `aegis-core` — Ring 0 / Ring 0.5 analysis primitives.
 //!
-//! Pure-rlib crate. The Python extension (`aegis._core` cdylib) lives
-//! in `aegis-pyshim` since the V1.9 cycle-break — this crate exposes
-//! the analysis APIs as plain Rust functions; the wrappers in
-//! `aegis-pyshim/src/lib.rs` register them into the `_core` PyO3
-//! module.
-
-// pyo3's #[pymethods] macro emits trait impls inside fn scopes which
-// trips the new `non_local_definitions` lint. Not actionable from
-// our code — silence the lint at crate root rather than scattering
-// #[allow(...)] across every #[pymethods] block.
-#![allow(non_local_definitions)]
-
-use pyo3::prelude::*;
+//! Pure-rlib crate. As of V1.10, all PyO3 surface has been removed
+//! (the `aegis-pyshim` cdylib that consumed it was deleted in the
+//! same release). Callers — `aegis-cli`, `aegis-mcp`, `aegis-runtime`,
+//! `aegis-agent` — use the `*_native` functions directly.
 
 pub mod ast;
 pub mod ir;
@@ -22,22 +13,4 @@ pub mod incremental;
 pub mod enforcement;
 pub mod scan;
 pub mod validate;
-
-// Keep signal_layer as the PyO3-facing aggregator; pub so
-// aegis-pyshim can register the Signal class + extract_signals fn.
 pub mod signal_layer_pyapi;
-
-#[pyfunction]
-pub fn ring0_status() -> PyResult<String> {
-    Ok("Ring 0 Rust Core Initialized".to_string())
-}
-
-#[pyfunction]
-pub fn supported_languages() -> Vec<&'static str> {
-    ast::registry::LanguageRegistry::global().names()
-}
-
-#[pyfunction]
-pub fn supported_extensions() -> Vec<&'static str> {
-    ast::registry::LanguageRegistry::global().extensions()
-}

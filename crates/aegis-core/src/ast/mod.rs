@@ -4,5 +4,5 @@ pub mod parser;
 pub mod registry;
 
 pub use adapter::{default_max_chain_depth, LanguageAdapter};
-pub use parser::{analyze_file, get_imports, AstMetrics};
+pub use parser::get_imports_native;
 pub use registry::LanguageRegistry;
