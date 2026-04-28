@@ -93,6 +93,84 @@ fn workspace_write_denies_bash() {
 }
 
 #[test]
+fn plan_mode_dry_runs_edit_without_calling_executor() {
+    // ToolExecutor has NO Edit script — if it ran, the call would
+    // fail with "no such tool". A successful turn proves plan mode
+    // synthesised the result instead of dispatching.
+    let api = ScriptedApiClient::new()
+        .push_tool_call("c1", "Edit", r#"{"path":"x.py","old_string":"a","new_string":"b"}"#)
+        .push_text_then_done("plan looks fine");
+    let tools = ScriptedToolExecutor::new();
+
+    let mut rt = ConversationRuntime::new(Session::new(), api, tools, vec![], vec![], cfg())
+        .with_permission_policy(PermissionPolicy::standard(PermissionMode::Plan));
+
+    let result = rt.run_turn("propose an edit");
+    assert_eq!(result.stopped_reason, StoppedReason::PlanDoneNoVerifier);
+
+    let tool_msg = &rt.session().messages[2];
+    match &tool_msg.blocks[0] {
+        ContentBlock::ToolResult {
+            output, is_error, ..
+        } => {
+            assert!(!*is_error, "plan-mode synthesis is a fact-shaped result, not an error");
+            assert!(
+                output.contains("plan mode") && output.contains("NOT EXECUTED"),
+                "expected plan-mode marker; got: {output}"
+            );
+            assert!(
+                output.contains("Edit"),
+                "expected tool name in synthesized result; got: {output}"
+            );
+        }
+        _ => panic!("expected ToolResult"),
+    }
+}
+
+#[test]
+fn plan_mode_lets_reads_through_normally() {
+    // Read tools execute in plan mode — only writes dry-run.
+    let api = ScriptedApiClient::new()
+        .push_tool_call("c1", "Read", r#"{"path":"x.py"}"#)
+        .push_text_then_done("read it");
+    let tools = ScriptedToolExecutor::new().with_ok("Read", "file contents");
+
+    let mut rt = ConversationRuntime::new(Session::new(), api, tools, vec![], vec![], cfg())
+        .with_permission_policy(PermissionPolicy::standard(PermissionMode::Plan));
+
+    let _ = rt.run_turn("read this");
+    let tool_msg = &rt.session().messages[2];
+    match &tool_msg.blocks[0] {
+        ContentBlock::ToolResult { output, is_error, .. } => {
+            assert!(!*is_error);
+            assert_eq!(output, "file contents");
+        }
+        _ => panic!("expected ToolResult"),
+    }
+}
+
+#[test]
+fn plan_mode_denies_bash_explicitly() {
+    let api = ScriptedApiClient::new()
+        .push_tool_call("c1", "bash", r#"{"command":"rm -rf /"}"#)
+        .push_text_then_done("ok");
+    let tools = ScriptedToolExecutor::new();
+
+    let mut rt = ConversationRuntime::new(Session::new(), api, tools, vec![], vec![], cfg())
+        .with_permission_policy(PermissionPolicy::standard(PermissionMode::Plan));
+
+    let _ = rt.run_turn("danger");
+    let tool_msg = &rt.session().messages[2];
+    match &tool_msg.blocks[0] {
+        ContentBlock::ToolResult { output, is_error, .. } => {
+            assert!(*is_error);
+            assert!(output.contains("permission denied") && output.contains("Plan"));
+        }
+        _ => panic!("expected ToolResult"),
+    }
+}
+
+#[test]
 fn danger_full_access_allows_bash() {
     let api = ScriptedApiClient::new()
         .push_tool_call("c1", "bash", r#"{"command":"ls"}"#)

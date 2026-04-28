@@ -146,6 +146,21 @@ where
         &mut self.api_client
     }
 
+    /// Replace the permission policy mid-session. The REPL `/plan`
+    /// command flips between Plan and the user's prior mode this
+    /// way; tests use it to exercise mode-transition behaviour
+    /// without rebuilding the runtime.
+    pub fn set_permission_policy(&mut self, policy: Option<PermissionPolicy>) {
+        self.permission_policy = policy;
+    }
+
+    /// Read the current permission policy (if any). Used by the REPL
+    /// `/plan` command to decide whether to enter or leave plan mode.
+    #[must_use]
+    pub fn permission_policy(&self) -> Option<&PermissionPolicy> {
+        self.permission_policy.as_ref()
+    }
+
     /// Apply a permission policy. Tool calls denied by the policy
     /// short-circuit before reaching the predictor or executor.
     /// Default = no policy (everything allowed at this layer; the
@@ -360,6 +375,25 @@ where
                                 }
                             }
                         }
+                    }
+                    PermissionDecision::AllowDryRun => {
+                        // Plan mode (B3.4): the predictor still runs
+                        // — its decision + cost-delta is the entire
+                        // value of plan mode — but the tool executor
+                        // is bypassed so disk / shell / network never
+                        // touched. Return a synthesized fact-shaped
+                        // result; never coaching prose.
+                        let predict_verdict = self.predictor.predict(&tool_name, &input);
+                        let result = match predict_verdict {
+                            PredictVerdict::Block { reason } => format!(
+                                "[plan mode — NOT EXECUTED] aegis would BLOCK this {tool_name} call. {reason}"
+                            ),
+                            PredictVerdict::Allow => format!(
+                                "[plan mode — NOT EXECUTED] aegis would ALLOW this {tool_name} call. \
+                                 Tool input: {input}"
+                            ),
+                        };
+                        (result, false)
                     }
                 };
 

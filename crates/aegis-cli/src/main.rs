@@ -138,7 +138,10 @@ enum Command {
         /// Workspace root. Defaults to current directory.
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
-        /// Permission mode: read-only | workspace-write | danger-full-access.
+        /// Permission mode: read-only | workspace-write | plan | danger-full-access.
+        /// `plan` lets reads execute normally but routes writes through
+        /// the aegis predictor for cost-delta scoring without touching
+        /// disk — useful for proposing a refactor without committing it.
         #[arg(long, default_value = "workspace-write")]
         permission_mode: String,
         /// Run a verifier when the LLM signals "done".
@@ -409,11 +412,12 @@ fn cmd_chat(
     let permission_mode = match permission_mode_str {
         "read-only" => PermissionMode::ReadOnly,
         "workspace-write" => PermissionMode::WorkspaceWrite,
+        "plan" => PermissionMode::Plan,
         "danger-full-access" => PermissionMode::DangerFullAccess,
         other => {
             eprintln!(
                 "aegis chat: unknown --permission-mode {other:?} (allowed: \
-                 read-only | workspace-write | danger-full-access)"
+                 read-only | workspace-write | plan | danger-full-access)"
             );
             return ExitCode::from(2);
         }
@@ -761,6 +765,7 @@ where
                 println!("  /cost         — current cost-tracker snapshot");
                 println!("  /history      — message count");
                 println!("  /model [name] — show or switch the model (alias-resolved)");
+                println!("  /plan         — toggle plan mode (writes dry-run; reads execute)");
                 println!("  /scan         — Ring 0 + Ring 0.5 + cycle detection across the workspace");
                 println!("  /sessions     — list saved sessions (newest first)");
                 println!("  /save [path]  — save session (default: auto-save target)");
@@ -802,6 +807,54 @@ where
                         println!("  ... and {} more (showing newest 20)", listing.len() - 20);
                     }
                 }
+                continue;
+            }
+            cmd if cmd == "/model" || cmd.starts_with("/model ") => {
+                let arg = trimmed.strip_prefix("/model").unwrap_or("").trim();
+                if arg.is_empty() {
+                    println!("  current model: {}", rt.api_client_mut().current_model());
+                    println!("  usage: /model <name|alias>");
+                    println!("  aliases: opus / sonnet / haiku / flash / pro / 4o / 4o-mini / mini");
+                } else {
+                    let canonical = aegis_agent::providers::resolve_alias(arg);
+                    let unknown =
+                        aegis_agent::providers::metadata_for(canonical).is_none();
+                    rt.api_client_mut().set_model(canonical.to_string());
+                    if unknown {
+                        println!(
+                            "  {} switched to {} (not in registry — preflight will use \
+                             the conservative 32k-window default)",
+                            "↳".with(theme.spinner_active),
+                            canonical
+                        );
+                    } else {
+                        println!(
+                            "  {} switched to {}",
+                            "↳".with(theme.spinner_active),
+                            canonical
+                        );
+                    }
+                }
+                continue;
+            }
+            "/plan" => {
+                use aegis_agent::permission::{PermissionMode, PermissionPolicy};
+                let now = rt.permission_policy().map(|p| p.mode());
+                let next = match now {
+                    Some(PermissionMode::Plan) => PermissionMode::WorkspaceWrite,
+                    _ => PermissionMode::Plan,
+                };
+                rt.set_permission_policy(Some(PermissionPolicy::standard(next)));
+                let label = match next {
+                    PermissionMode::Plan => "plan (writes dry-run, reads execute)",
+                    PermissionMode::WorkspaceWrite => "workspace-write (writes execute)",
+                    PermissionMode::ReadOnly => "read-only",
+                    PermissionMode::DangerFullAccess => "danger-full-access",
+                };
+                println!(
+                    "  {} permission mode → {label}",
+                    "↳".with(theme.spinner_active)
+                );
                 continue;
             }
             "/reset" => {

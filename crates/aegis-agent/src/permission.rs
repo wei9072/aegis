@@ -14,7 +14,10 @@
 
 use std::collections::BTreeSet;
 
-/// Three permission modes mirroring Claude Code's surface.
+/// Permission modes covering inspection-only through full-access.
+/// `Plan` is aegis-specific: write tools route through the predictor
+/// for cost-delta scoring but are NOT executed — see `Plan` doc and
+/// `PermissionDecision::AllowDryRun`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PermissionMode {
     /// Only allow read-only inspection tools (read_file, glob,
@@ -23,6 +26,13 @@ pub enum PermissionMode {
     /// Allow reads + write/edit inside the workspace. Reject bash,
     /// network, anything that could leak outside.
     WorkspaceWrite,
+    /// Read tools execute normally; write tools dry-run — predictor
+    /// scores the structural cost delta and returns a synthesized
+    /// "plan: would write to X (+Y cost)" tool result to the LLM
+    /// instead of touching the disk. The framing-correct alternative
+    /// to claw-code's prose-only plan summary: aegis's plan summary
+    /// is structural numbers, not LLM narrative.
+    Plan,
     /// All tools allowed. Used when the user explicitly accepts
     /// risk (e.g. running an unattended ticket where the agent
     /// needs to run tests via bash).
@@ -32,7 +42,14 @@ pub enum PermissionMode {
 /// Policy decision for one tool call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PermissionDecision {
+    /// Tool is permitted; runtime executes it normally.
     Allow,
+    /// Tool is permitted but must NOT execute against disk / shell —
+    /// runtime calls the predictor for structural-cost scoring and
+    /// returns a synthesized result. Used by `Plan` mode.
+    AllowDryRun,
+    /// Tool blocked. `reason` goes back to the LLM as the tool
+    /// result — facts only, no coaching.
     Deny { reason: String },
 }
 
@@ -122,6 +139,22 @@ impl PermissionPolicy {
                     }
                 }
             }
+            PermissionMode::Plan => {
+                if is_read {
+                    // Reads are safe; let them through normally.
+                    PermissionDecision::Allow
+                } else if is_write {
+                    // The hallmark of plan mode: write tools score
+                    // through the predictor but never touch disk.
+                    PermissionDecision::AllowDryRun
+                } else {
+                    PermissionDecision::Deny {
+                        reason: format!(
+                            "permission denied: tool {tool_name:?} not allowed in Plan mode (only read tools execute; write tools dry-run; everything else blocked)"
+                        ),
+                    }
+                }
+            }
             PermissionMode::DangerFullAccess => {
                 let _ = unknown; // unknown tools allowed in this mode
                 PermissionDecision::Allow
@@ -177,5 +210,31 @@ mod tests {
         let p = PermissionPolicy::standard(PermissionMode::DangerFullAccess)
             .allow_dangerous("custom_shell");
         assert_eq!(p.authorize("custom_shell"), PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn plan_mode_lets_reads_through() {
+        let p = PermissionPolicy::standard(PermissionMode::Plan);
+        assert_eq!(p.authorize("read_file"), PermissionDecision::Allow);
+        assert_eq!(p.authorize("Glob"), PermissionDecision::Allow);
+        assert_eq!(p.authorize("Grep"), PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn plan_mode_dry_runs_writes() {
+        let p = PermissionPolicy::standard(PermissionMode::Plan);
+        assert_eq!(p.authorize("Edit"), PermissionDecision::AllowDryRun);
+        assert_eq!(p.authorize("Write"), PermissionDecision::AllowDryRun);
+        assert_eq!(p.authorize("MultiEdit"), PermissionDecision::AllowDryRun);
+    }
+
+    #[test]
+    fn plan_mode_denies_dangerous_and_unknown() {
+        let p = PermissionPolicy::standard(PermissionMode::Plan);
+        assert!(matches!(p.authorize("bash"), PermissionDecision::Deny { .. }));
+        assert!(matches!(
+            p.authorize("totally_new_tool"),
+            PermissionDecision::Deny { .. }
+        ));
     }
 }
