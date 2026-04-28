@@ -161,6 +161,27 @@ where
         self.permission_policy.as_ref()
     }
 
+    /// Compact the session in place using the supplied verifier
+    /// history (callers track this — runtime doesn't accumulate
+    /// verdicts across turns yet). Drops early messages and replaces
+    /// them with a structured fact-only summary; cost tracker stays
+    /// intact (it's already a tally, not a transcript).
+    ///
+    /// Returns `None` when the session is too short to bother
+    /// compacting (fewer turns than `config.keep_last_turns`).
+    pub fn compact(
+        &mut self,
+        verifier_history: &[TaskVerdict],
+        config: &crate::compact::CompactionConfig,
+    ) -> Option<crate::compact::CompactionResult> {
+        crate::compact::compact_session(
+            &mut self.session,
+            &self.cost_tracker,
+            verifier_history,
+            config,
+        )
+    }
+
     /// Apply a permission policy. Tool calls denied by the policy
     /// short-circuit before reaching the predictor or executor.
     /// Default = no policy (everything allowed at this layer; the

@@ -766,6 +766,7 @@ where
                 println!("  /history      — message count");
                 println!("  /model [name] — show or switch the model (alias-resolved)");
                 println!("  /plan         — toggle plan mode (writes dry-run; reads execute)");
+                println!("  /compact      — replace early messages with a structured summary");
                 println!("  /scan         — Ring 0 + Ring 0.5 + cycle detection across the workspace");
                 println!("  /sessions     — list saved sessions (newest first)");
                 println!("  /save [path]  — save session (default: auto-save target)");
@@ -832,6 +833,27 @@ where
                             "  {} switched to {}",
                             "↳".with(theme.spinner_active),
                             canonical
+                        );
+                    }
+                }
+                continue;
+            }
+            "/compact" => {
+                use aegis_agent::compact::CompactionConfig;
+                let result = rt.compact(&[], &CompactionConfig::default());
+                match result {
+                    Some(r) => {
+                        println!(
+                            "  {} compacted {} message(s) into a structured summary",
+                            "↳".with(theme.spinner_active),
+                            r.messages_compacted
+                        );
+                    }
+                    None => {
+                        println!(
+                            "{}",
+                            "(session too short to compact — keeps the last 5 turns intact)"
+                                .with(theme.quote)
                         );
                     }
                 }

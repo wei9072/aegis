@@ -32,6 +32,7 @@
 pub mod aegis_predict;
 pub mod agent_tools;
 pub mod api;
+pub mod compact;
 pub mod conversation;
 pub mod cost;
 pub mod cost_observer_aegis;
