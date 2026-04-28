@@ -13,7 +13,7 @@
 //!   - `aegis-runtime` for Executor + PlanValidator
 //!   - `aegis-providers` for the (future) LLMPlanner
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use aegis_core::ast::registry::LanguageRegistry;
@@ -362,6 +362,118 @@ fn main() -> ExitCode {
             )
         }
     }
+}
+
+/// `/init` template — agent-conventions doc. Stamped into the
+/// project root so cross-tool agents (aegis chat, Claude Code,
+/// Cursor, etc.) all read from the same source of truth.
+const AGENTS_MD_TEMPLATE: &str = r#"# AGENTS.md — Project Conventions for AI Coding Agents
+
+This file is the canonical entrypoint for AI coding agents working
+in this project. Edit to fit your repo; the sections below are
+defaults that work for most workspaces.
+
+## Tooling
+
+- `aegis chat` enforces structural cost regression checks via
+  ring 0 (syntax) + ring 0.5 (fan_out, max_chain_depth, …) every
+  time the agent proposes an edit. Edits that grow structural cost
+  are rejected before they hit disk.
+- Default tool surface: Read / Glob / Grep / Edit / Write.
+- Add `--bash` to enable shell (requires
+  `--permission-mode danger-full-access`).
+- Add `--extra-tools` for TodoWrite / WebFetch / WebSearch /
+  AskUserQuestion.
+
+## Verification
+
+TODO: name the test command(s) the agent should use to confirm a
+turn is done. Examples:
+- Rust:    `cargo test --workspace`
+- Python:  `pytest`
+- Node:    `npm test`
+
+`aegis chat --verify` runs the auto-detected test suite when the
+LLM signals "done" and rejects the verdict if tests fail.
+
+## Permission rules
+
+See `aegis.toml` in this directory for path-based rules. Common
+patterns:
+
+- Deny edits inside `vendor/` or generated code.
+- Dry-run all writes to `Cargo.toml` / `package.json` so dependency
+  changes get reviewed before they land.
+- Deny `*` against `secrets/` regardless of mode.
+
+## Negative-space framing
+
+Aegis exists to **reject degradations**, not to coach the model.
+Verifier verdicts and predictor rejections come back as
+fact-shaped tool results — never as advice strings prepended to
+the next prompt. If you find yourself wanting to write "the agent
+should try X" into this file, that direction belongs in a code
+review, not in the agent's harness.
+"#;
+
+/// `/init` template — project-local aegis settings (counterpart to
+/// the user-global `~/.config/aegis/config.toml`). Loader for this
+/// file lands in a follow-up; today the file is purely documentation.
+const AEGIS_TOML_TEMPLATE: &str = r#"# aegis.toml — per-project settings (workspace root).
+#
+# Commented-out sections describe the available knobs. Uncomment + edit
+# to opt in. The bare file is structurally valid (empty config = use
+# global ~/.config/aegis/config.toml).
+
+# ---- Cost guardrail ----
+# Cap cumulative structural cost regression for the session. When
+# exceeded, the agent stops with `StoppedReason::CostBudgetExceeded`.
+# session_cost_budget = 50
+
+# ---- Permission rules ----
+# Walked in order; first match wins. Each rule has tool_glob (required),
+# path_glob (optional), and decision (allow / deny / dry_run / prompt).
+
+# Example: never let the agent touch vendored code.
+# [[rules]]
+# tool_glob = "*"
+# path_glob = "vendor/**"
+# decision = "deny"
+
+# Example: dry-run all writes to Cargo.toml so dependency changes get
+# reviewed before they land. Read tools still execute normally.
+# [[rules]]
+# tool_glob = "Edit"
+# path_glob = "Cargo.toml"
+# decision = "dry_run"
+
+# Example: prompt for permission on every Bash call (interactive only).
+# [[rules]]
+# tool_glob = "Bash"
+# decision = "prompt"
+"#;
+
+/// Write both `/init` templates into `target_dir`. Returns
+/// (written_paths, skipped_paths). Existing files are NEVER
+/// overwritten — the user must delete them first if they want a
+/// fresh template.
+fn write_init_templates(target_dir: &Path) -> std::io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let entries: [(&str, &str); 2] = [
+        ("AGENTS.md", AGENTS_MD_TEMPLATE),
+        ("aegis.toml", AEGIS_TOML_TEMPLATE),
+    ];
+    let mut wrote = Vec::new();
+    let mut skipped = Vec::new();
+    for (filename, content) in entries {
+        let path = target_dir.join(filename);
+        if path.exists() {
+            skipped.push(path);
+        } else {
+            std::fs::write(&path, content)?;
+            wrote.push(path);
+        }
+    }
+    Ok((wrote, skipped))
 }
 
 /// Friendly relative-age string for the `/sessions` listing.
@@ -824,6 +936,8 @@ where
                 println!("  /model [name] — show or switch the model (alias-resolved)");
                 println!("  /plan         — toggle plan mode (writes dry-run; reads execute)");
                 println!("  /compact      — replace early messages with a structured summary");
+                println!("  /aegis        — show aegis core status (predictor, model, budget, regression)");
+                println!("  /init         — write AGENTS.md + aegis.toml templates into the workspace");
                 println!("  /scan         — Ring 0 + Ring 0.5 + cycle detection across the workspace");
                 println!("  /sessions     — list saved sessions (newest first)");
                 println!("  /save [path]  — save session (default: auto-save target)");
@@ -890,6 +1004,58 @@ where
                             "  {} switched to {}",
                             "↳".with(theme.spinner_active),
                             canonical
+                        );
+                    }
+                }
+                continue;
+            }
+            "/aegis" => {
+                let model = rt.api_client_mut().current_model().to_string();
+                let budget = rt.config().session_cost_budget;
+                let regression = rt.cost_tracker().cumulative_regression();
+                let mode = rt
+                    .permission_policy()
+                    .map(|p| format!("{:?}", p.mode()))
+                    .unwrap_or_else(|| "(no policy)".into());
+                println!("  aegis core status:");
+                println!("    model              = {model}");
+                println!("    permission mode    = {mode}");
+                println!(
+                    "    cost budget        = {}",
+                    budget
+                        .map(|b| format!("{b:.2}"))
+                        .unwrap_or_else(|| "(unset)".into())
+                );
+                println!("    cumulative regr.   = {regression:.2}");
+                if let Some(b) = budget {
+                    let pct = if b > 0.0 { regression / b * 100.0 } else { 0.0 };
+                    println!("    budget consumed    = {pct:.0}%");
+                }
+                continue;
+            }
+            "/init" => {
+                let target_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+                match write_init_templates(&target_dir) {
+                    Ok((wrote, skipped)) => {
+                        for path in &wrote {
+                            println!(
+                                "  {} wrote {}",
+                                "↳".with(theme.spinner_done),
+                                path.display()
+                            );
+                        }
+                        for path in &skipped {
+                            println!(
+                                "  {} {} already exists — skipped (delete it first if you want a fresh template)",
+                                "↳".with(theme.quote),
+                                path.display()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        println!(
+                            "  {} init failed: {e}",
+                            "↳".with(theme.spinner_failed)
                         );
                     }
                 }
@@ -1634,4 +1800,62 @@ fn cmd_languages(json: bool) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_init_templates_creates_both_files_in_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wrote, skipped) = write_init_templates(dir.path()).unwrap();
+        assert_eq!(wrote.len(), 2);
+        assert_eq!(skipped.len(), 0);
+        let agents = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        let aegis = std::fs::read_to_string(dir.path().join("aegis.toml")).unwrap();
+        assert!(agents.contains("# AGENTS.md"));
+        assert!(agents.contains("Negative-space framing"));
+        assert!(aegis.contains("aegis.toml"));
+        assert!(aegis.contains("session_cost_budget"));
+    }
+
+    #[test]
+    fn write_init_templates_skips_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "preexisting").unwrap();
+        let (wrote, skipped) = write_init_templates(dir.path()).unwrap();
+        // Only aegis.toml should be written; AGENTS.md skipped.
+        assert_eq!(wrote.len(), 1);
+        assert_eq!(skipped.len(), 1);
+        assert!(wrote[0].ends_with("aegis.toml"));
+        assert!(skipped[0].ends_with("AGENTS.md"));
+        // Confirm the existing file was NOT overwritten.
+        let preserved = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert_eq!(preserved, "preexisting");
+    }
+
+    #[test]
+    fn aegis_toml_template_parses_as_valid_empty_config() {
+        // The template ships fully-commented-out — should parse to
+        // an empty config so it can be dropped into a project
+        // unchanged without breaking the loader.
+        let parsed: toml::Value = toml::from_str(AEGIS_TOML_TEMPLATE).unwrap();
+        // No top-level `rules` array should exist (all commented).
+        assert!(
+            parsed.get("rules").is_none(),
+            "template should ship with no active rules; got: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn human_age_formats_ranges() {
+        assert_eq!(human_age(0), "0s ago");
+        assert_eq!(human_age(45), "45s ago");
+        assert_eq!(human_age(60), "1m ago");
+        assert_eq!(human_age(3599), "59m ago");
+        assert_eq!(human_age(3600), "1h ago");
+        assert_eq!(human_age(86_400), "1d ago");
+        assert_eq!(human_age(86_400 * 7), "7d ago");
+    }
 }

@@ -237,6 +237,14 @@ where
         &self.cost_tracker
     }
 
+    /// Read-only access to the agent config (max_iterations,
+    /// session_cost_budget, workspace_root). Used by REPL `/aegis`
+    /// to surface the budget alongside cost tracker state.
+    #[must_use]
+    pub fn config(&self) -> &AgentConfig {
+        &self.config
+    }
+
     /// Wipe the conversation transcript + cost tracker + stalemate
     /// detector and start fresh. Used by `/reset` in the chat REPL.
     /// The provider, executor, predictor, verifier, permissions and
