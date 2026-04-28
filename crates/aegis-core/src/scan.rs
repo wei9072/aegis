@@ -334,17 +334,34 @@ fn walk_collect(
 // ---------- import graph + cycle detection ----------
 
 /// String-graph cycle detector. Resolution heuristic: each import
-/// string is matched against workspace files by **filename stem**.
-/// Catches `a.py imports b, b.py imports a` style cycles. Cross-
-/// language and complex re-export cycles are out of scope here —
-/// flagged as future work.
+/// string is matched against workspace files by **filename stem**,
+/// with **path-context disambiguation** when multiple files share
+/// the same stem.
+///
+/// Catches `a.py imports b, b.py imports a` style cycles, including
+/// the realistic case where two unrelated modules both ship a
+/// `utils.py` / `helpers.ts` / etc. — the import's prefix segments
+/// (`from app.utils import X` → `["app"]`) pick the right candidate
+/// instead of the previous "first-wins-on-stem-collision" guess.
+///
+/// **Bias**: when path context can't disambiguate (bare `import
+/// utils` with two `utils.py`s, or no candidate's path matches the
+/// import prefix), the edge is **dropped** rather than guessed. A
+/// cycle detector that misses some cycles is acceptable; one that
+/// fabricates fake cycles in any monorepo with shared module names
+/// gets disabled. Cross-language and complex re-export cycles are
+/// still out of scope here — flagged as future work.
 fn build_graph_and_find_cycles(
     files: &[FileScan],
 ) -> (Vec<Vec<PathBuf>>, ImportGraphStats) {
-    let mut stem_to_idx: BTreeMap<String, usize> = BTreeMap::new();
+    // Multi-value index: stem → all matching file indices. The
+    // previous version threw away duplicates with `or_insert`,
+    // which silently stitched unrelated `utils.py` files into the
+    // same node and produced false cycles.
+    let mut stem_to_indices: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, f) in files.iter().enumerate() {
         if let Some(stem) = f.path.file_stem().and_then(|s| s.to_str()) {
-            stem_to_idx.entry(stem.to_string()).or_insert(i);
+            stem_to_indices.entry(stem.to_string()).or_default().push(i);
         }
     }
 
@@ -353,19 +370,16 @@ fn build_graph_and_find_cycles(
     for (i, f) in files.iter().enumerate() {
         graph.add_node(i);
         for imp in &f.imports {
-            let last = imp
-                .rsplit_once(['.', '/'])
-                .map(|(_, last)| last)
-                .unwrap_or(imp.as_str())
-                .trim_end_matches(['"', '\''])
-                .trim_start_matches(['"', '\'']);
-            if let Some(&target) = stem_to_idx.get(last) {
-                if target != i {
-                    if !graph.contains_edge(i, target) {
-                        edges += 1;
-                    }
-                    graph.add_edge(i, target, ());
-                }
+            let target = match resolve_import_to_index(imp, files, &stem_to_indices) {
+                Some(t) => t,
+                None => continue,
+            };
+            if target == i {
+                continue;
+            }
+            if !graph.contains_edge(i, target) {
+                edges += 1;
+                graph.add_edge(i, target, ());
             }
         }
     }
@@ -394,6 +408,105 @@ fn build_graph_and_find_cycles(
             cycle_count,
         },
     )
+}
+
+/// Resolve `import_str` to a single file index using path-context
+/// disambiguation. Returns `None` when:
+///
+///   1. No file matches the import's filename stem (out of workspace).
+///   2. Multiple files match AND the import string has no path
+///      context (bare `import utils` with two `utils.py`s) →
+///      ambiguous, skip rather than guess.
+///   3. Multiple files match equally well by path-context score →
+///      tied, skip.
+///   4. Multiple files match but none of them has any ancestor-path
+///      segment in common with the import prefix → no useful
+///      signal, skip.
+///
+/// The bias toward false negatives over false positives is
+/// deliberate: this is a heuristic feeding a workspace-level report,
+/// not a single-file BLOCK gate. A real cycle missed is recoverable
+/// by the next deeper analysis tool; a fake cycle reported in a
+/// monorepo with shared module names erodes trust in every other
+/// finding the report carries.
+fn resolve_import_to_index(
+    import_str: &str,
+    files: &[FileScan],
+    stem_to_indices: &BTreeMap<String, Vec<usize>>,
+) -> Option<usize> {
+    // Strip surrounding quotes (TypeScript / Go / Java string-form
+    // imports) and isolate the stem we'll match on.
+    let cleaned = import_str.trim_matches(|c: char| c == '"' || c == '\'');
+    let last = cleaned
+        .rsplit_once(['.', '/'])
+        .map(|(_, last)| last)
+        .unwrap_or(cleaned);
+
+    let candidates = stem_to_indices.get(last)?;
+    if candidates.len() == 1 {
+        return Some(candidates[0]);
+    }
+
+    // Path-context disambiguation: split the import's prefix
+    // (everything before the matched stem) on `.` / `/` and score
+    // each candidate by how many of those segments appear in
+    // suffix order at the end of its ancestor directory chain.
+    let prefix = cleaned.strip_suffix(last).unwrap_or("");
+    let prefix_segments: Vec<&str> = prefix
+        .split(['.', '/'])
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if prefix_segments.is_empty() {
+        // No path context at all + multiple candidates → ambiguous.
+        return None;
+    }
+
+    let mut best: Option<(usize, usize)> = None; // (winning idx, score)
+    let mut tied = false;
+    for &idx in candidates {
+        let path_segments: Vec<&str> = files[idx]
+            .relative_path
+            .iter()
+            .filter_map(|s| s.to_str())
+            .collect();
+        // Drop the filename itself; only the ancestor chain
+        // counts for path matching.
+        let ancestors: &[&str] = if !path_segments.is_empty() {
+            &path_segments[..path_segments.len() - 1]
+        } else {
+            &[]
+        };
+
+        let score = ancestors
+            .iter()
+            .rev()
+            .zip(prefix_segments.iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+
+        match best {
+            None => {
+                best = Some((idx, score));
+                tied = false;
+            }
+            Some((_, prev)) if score > prev => {
+                best = Some((idx, score));
+                tied = false;
+            }
+            Some((_, prev)) if score == prev => {
+                tied = true;
+            }
+            _ => {}
+        }
+    }
+
+    match best {
+        Some((_, 0)) => None, // No candidate had any matching ancestor segments.
+        Some(_) if tied => None,
+        Some((idx, _)) => Some(idx),
+        None => None,
+    }
 }
 
 // ---------- persistent cache ----------
@@ -497,6 +610,91 @@ mod tests {
         std::fs::write(dir.path().join("c.py"), "x = 1\n").unwrap();
         let report = scan_workspace(dir.path(), &ScanOptions::default());
         assert_eq!(report.cyclic_dependencies.len(), 0);
+    }
+
+    #[test]
+    fn cycle_disambiguates_by_path_when_multiple_files_share_a_stem() {
+        // Realistic monorepo shape: two unrelated `utils.py` modules
+        // under different parent dirs. The real cycle is between
+        // `app/utils.py` and `app/helpers.py`; the unrelated
+        // `db/utils.py` must NOT be pulled into the cycle.
+        //
+        // Pre-fix behaviour: stem_to_idx kept only the first `utils`
+        // entry, so `from app.utils` resolved to whichever entry
+        // happened to win the `or_insert` race — non-deterministic
+        // and frequently wrong.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("app")).unwrap();
+        std::fs::create_dir(dir.path().join("db")).unwrap();
+        std::fs::write(
+            dir.path().join("app").join("utils.py"),
+            "from app.helpers import x\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("app").join("helpers.py"),
+            "from app.utils import y\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("db").join("utils.py"),
+            "x = 1\n",
+        )
+        .unwrap();
+
+        let report = scan_workspace(dir.path(), &ScanOptions::default());
+        assert_eq!(
+            report.cyclic_dependencies.len(),
+            1,
+            "expected exactly one cycle (app/utils ↔ app/helpers)"
+        );
+        let cycle_paths: Vec<String> = report.cyclic_dependencies[0]
+            .iter()
+            .map(|p| p.display().to_string().replace('\\', "/"))
+            .collect();
+        assert!(
+            cycle_paths.iter().any(|p| p.ends_with("app/utils.py")),
+            "app/utils.py should be in cycle: {cycle_paths:?}"
+        );
+        assert!(
+            cycle_paths.iter().any(|p| p.ends_with("app/helpers.py")),
+            "app/helpers.py should be in cycle: {cycle_paths:?}"
+        );
+        assert!(
+            !cycle_paths.iter().any(|p| p.ends_with("db/utils.py")),
+            "db/utils.py must NOT be in cycle: {cycle_paths:?}"
+        );
+    }
+
+    #[test]
+    fn cycle_skips_ambiguous_bare_imports_to_avoid_false_positives() {
+        // file.py does a bare `import utils` while two unrelated
+        // `utils.py` files exist. Both `app/utils.py` and
+        // `db/utils.py` import `file`. Pre-fix, this fabricated a
+        // cycle (file ↔ whichever utils won the index race);
+        // post-fix the bare import is ambiguous, the edge from
+        // file.py is dropped, and no cycle is reported.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("app")).unwrap();
+        std::fs::create_dir(dir.path().join("db")).unwrap();
+        std::fs::write(dir.path().join("file.py"), "import utils\n").unwrap();
+        std::fs::write(
+            dir.path().join("app").join("utils.py"),
+            "import file\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("db").join("utils.py"),
+            "import file\n",
+        )
+        .unwrap();
+
+        let report = scan_workspace(dir.path(), &ScanOptions::default());
+        assert_eq!(
+            report.cyclic_dependencies.len(),
+            0,
+            "ambiguous `import utils` must not fabricate a cycle"
+        );
     }
 
     #[test]
