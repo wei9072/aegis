@@ -182,6 +182,14 @@ enum Command {
             default_missing_value = "latest",
         )]
         resume: Option<String>,
+        /// Mount the Bash tool. **Requires** --permission-mode
+        /// danger-full-access (or a custom permission rule that
+        /// allows Bash) — otherwise the LLM will see "permission
+        /// denied" on every Bash call. Aegis logs redirect targets
+        /// (`> / >> / tee`) before running so you can see the
+        /// planned mutations.
+        #[arg(long)]
+        bash: bool,
         /// Print every tool call's input + per-call structural cost
         /// delta inline in the REPL. Off by default — keeps the
         /// turn output uncluttered. Helpful when investigating why
@@ -311,6 +319,7 @@ fn main() -> ExitCode {
             no_aegis,
             mcp,
             resume,
+            bash,
             verbose,
             print_config_template,
             json,
@@ -332,6 +341,7 @@ fn main() -> ExitCode {
                 no_aegis,
                 mcp,
                 resume,
+                bash,
                 verbose,
                 json,
             )
@@ -364,12 +374,13 @@ fn cmd_chat(
     no_aegis: bool,
     mcp_servers: Vec<String>,
     resume: Option<String>,
+    bash_enabled: bool,
     verbose: bool,
     json: bool,
 ) -> ExitCode {
     use aegis_agent::aegis_predict::LocalAegisPredictor;
     use aegis_agent::agent_tools::{ReadOnlyTools, WorkspaceTools};
-    use aegis_agent::api::{ApiClient, ToolDefinition};
+    use aegis_agent::api::ToolDefinition;
     use aegis_agent::cost_observer_aegis::AegisCostObserver;
     use aegis_agent::mcp::{McpClient, McpToolExecutor, StdioTransport};
     use aegis_agent::multi_tool::{MultiToolExecutor, ToolSource};
@@ -531,6 +542,20 @@ fn cmd_chat(
             "workspace",
             Box::new(WorkspaceTools::new(workspace.clone())),
             WorkspaceTools::definitions(),
+        ));
+    }
+    if bash_enabled {
+        use aegis_agent::bash::BashTool;
+        if permission_mode != PermissionMode::DangerFullAccess {
+            eprintln!(
+                "aegis chat: ⚠ --bash mounted but --permission-mode is {permission_mode:?}; \
+                 Bash calls will be denied. Use --permission-mode danger-full-access to allow."
+            );
+        }
+        sources.push(ToolSource::new(
+            "bash",
+            Box::new(BashTool::new(workspace.clone())),
+            BashTool::definitions(),
         ));
     }
     for spec in &mcp_servers {

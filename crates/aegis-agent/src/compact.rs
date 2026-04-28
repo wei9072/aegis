@@ -33,7 +33,9 @@
 
 use crate::cost::CostTracker;
 use crate::message::{ContentBlock, ConversationMessage, MessageRole};
-use aegis_decision::{TaskPattern, TaskVerdict};
+use aegis_decision::TaskVerdict;
+#[cfg(test)]
+use aegis_decision::TaskPattern;
 
 /// Knobs for `compact_session`. All sensible defaults — most callers
 /// just call `..Default::default()`.
