@@ -19,8 +19,13 @@ pub mod anthropic;
 pub mod gemini;
 pub mod http;
 pub mod openai_compat;
+pub mod registry;
 
 pub use anthropic::{AnthropicConfig, AnthropicProvider};
 pub use gemini::{GeminiConfig, GeminiProvider};
 pub use http::{HttpClient, HttpError, HttpResponse, RecordedRequest, StubHttpClient, UreqClient};
 pub use openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
+pub use registry::{
+    estimate_tokens, metadata_for, preflight, resolve_alias, ModelMetadata, PreflightError,
+    ProviderKind,
+};
