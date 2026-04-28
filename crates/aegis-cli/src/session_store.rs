@@ -100,7 +100,7 @@ pub fn list_sessions() -> Vec<SessionMeta> {
             })
         })
         .collect();
-    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out.sort_by_key(|m| std::cmp::Reverse(m.modified));
     out
 }
 

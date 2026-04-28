@@ -9,6 +9,37 @@
 > succeeded, where it surfaced one of the four V3 differentiation
 > point verdicts (predict-block / cost-budget / verifier-rejected /
 > stalemate), and any framing-relevant surprises.
+>
+> **V3.9 (2026-04-28) — major capability + UX expansion** (see also
+> `docs/multi_language_plan.md`). Phase 0–7 of the V3.9 plan landed:
+>
+> - Rust language support in ring 0 (aegis can scan its own crates)
+> - `aegis setup` interactive wizard + `aegis chat --print-config-template`
+> - Multi-line input (`\` continuation), `--resume` defaults to latest,
+>   `/sessions` listing, `/aegis` status, `/init` workspace bootstrap,
+>   `--verbose`, friendly provider error hints, visible PreToolUse
+>   rejection banner (`[aegis] BLOCK Edit foo.rs: cost 12 → 17 …`)
+> - Provider model registry + alias resolver (sonnet/opus/haiku/4o/etc.)
+>   + preflight check (rejects requests > ctx_window — no silent
+>   truncation, ever)
+> - Anthropic ephemeral cache_control on system prompt (~90% input
+>   cost cut on stable system prompts)
+> - REPL `/model <alias>` mid-session model switch
+> - Plan mode (writes route through predictor, disk untouched) — the
+>   aegis-shaped counterpart to claw-code's prose-summary plan mode
+> - Path-glob permission rules + PermissionPrompter trait
+> - Session compaction with fact-shaped summary (no LLM round-trip,
+>   guarded by the new `no_coaching_in_summary` contract test —
+>   four contract tests now structurally defend the framing)
+> - Bash V0 (subprocess + 60s deadline + `>`/`>>`/`tee` redirect
+>   parser banner; deeper aegis-aware predict integration deferred
+>   until heuristic surface area is justified by dogfood)
+> - Four extra tools: TodoWrite, WebFetch, WebSearch (DDG HTML),
+>   AskUserQuestion (with stdin / scriptable prompter)
+>
+> Workspace tests grew from ~330 (V3.8) to **433** (V3.9). Build is
+> warning-free across all crates. None of the four contract tests
+> fired — framing intact.
 
 Once V3 (V3.0–V3.8 + the chat REPL polish) shipped, the natural test
 is to point `aegis chat --tools` at a real codebase and see what
@@ -132,16 +163,33 @@ no coaching string injected. Visible in REPL as a status footer.
 
 Tab-completion works on slash commands.
 
-## What's not yet wired
+## What's not yet wired (V3.9 deferral list)
 
-These are deliberate scope cuts in V3:
+These are deliberate scope cuts. Each one has a principled reason
+for waiting (per `post_launch_discipline.md`); revisit when a real
+consumer asks for them with a concrete use case.
 
-- **No Edit / Write tools** — agent can read but not mutate files.
-  Add a write tool when there's a clear scope-and-permissions story
-  (the V3 framing means writes need both the write tool AND the
-  PreToolUse aegis-predict gate active).
-- **No Bash tool** — same reasoning. `--permission-mode danger-full-access`
-  exists for when this lands.
+- **A6 streaming spinner** — pure UX polish. Streaming text already
+  appears live for OpenAI-compat; spinner during tool calls would
+  be nice but isn't blocking real work.
+- **B5.5 OpenAI prefix cache** — provider-specific extension; needs
+  real dogfood evidence that someone is paying for it before adding
+  the wire surface area.
+- **B5.6 Cost split** — distinguishing `cached_input_tokens` vs
+  `input_tokens` in the cost tracker. Deferred until B5.4/5.5 have
+  shipped real cache hits in dogfood (otherwise we have nothing to
+  measure).
+- **B6 deep aegis-aware Bash predict** — the V0 banner exists. The
+  full BLOCK semantic needs content synthesis (knowing what
+  `cmd > path` would actually write), which is heuristic-fragile.
+  Lands incrementally as dogfood reveals real cases worth catching.
+- **/memory slash command** — aegis has no memory store of its
+  own; the existing Claude Code memory sits one level up from the
+  chat runtime. Wiring needs an aegis-side memory abstraction
+  first.
+- **Project-local `aegis.toml` loader** — `/init` writes the file,
+  but `cmd_chat` doesn't read it yet. Lands when a real consumer
+  edits one and wants it picked up automatically.
 - **Streaming for Anthropic / Gemini** — only OpenAI-compat truly
   streams in V3.8. Anthropic and Gemini use the non-streaming default
   (full response then callback replay). UX degrades to "wait, then

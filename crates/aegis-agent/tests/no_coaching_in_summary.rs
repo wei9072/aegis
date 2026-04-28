@@ -68,7 +68,7 @@ fn build_test_session() -> Session {
             }],
         });
         s.push(ConversationMessage::tool_result(
-            &format!("call_{i}"),
+            format!("call_{i}"),
             "Edit",
             "ok",
             false,

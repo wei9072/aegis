@@ -333,10 +333,7 @@ impl PlanValidator {
                     if !abs.exists() {
                         None
                     } else {
-                        match fs::read_to_string(&abs) {
-                            Ok(s) => Some(s),
-                            Err(_) => None,
-                        }
+                        fs::read_to_string(&abs).ok()
                     }
                 }
             };
