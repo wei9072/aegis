@@ -190,6 +190,17 @@ enum Command {
         /// planned mutations.
         #[arg(long)]
         bash: bool,
+        /// Mount four extra tools: TodoWrite (record agent's plan),
+        /// WebFetch (HTTP GET), WebSearch (DuckDuckGo HTML), and
+        /// AskUserQuestion (pause turn for clarification). Each is
+        /// independently disable-able via the per-tool flags below.
+        #[arg(long)]
+        extra_tools: bool,
+        /// URL prefix allowlist for WebFetch. Repeatable; when
+        /// empty, all URLs allowed. Example: --webfetch-allow
+        /// https://docs.rs/ --webfetch-allow https://github.com/
+        #[arg(long = "webfetch-allow")]
+        webfetch_allow: Vec<String>,
         /// Print every tool call's input + per-call structural cost
         /// delta inline in the REPL. Off by default — keeps the
         /// turn output uncluttered. Helpful when investigating why
@@ -320,6 +331,8 @@ fn main() -> ExitCode {
             mcp,
             resume,
             bash,
+            extra_tools,
+            webfetch_allow,
             verbose,
             print_config_template,
             json,
@@ -342,6 +355,8 @@ fn main() -> ExitCode {
                 mcp,
                 resume,
                 bash,
+                extra_tools,
+                webfetch_allow,
                 verbose,
                 json,
             )
@@ -375,6 +390,8 @@ fn cmd_chat(
     mcp_servers: Vec<String>,
     resume: Option<String>,
     bash_enabled: bool,
+    extra_tools_enabled: bool,
+    webfetch_allow: Vec<String>,
     verbose: bool,
     json: bool,
 ) -> ExitCode {
@@ -557,6 +574,21 @@ fn cmd_chat(
             Box::new(BashTool::new(workspace.clone())),
             BashTool::definitions(),
         ));
+    }
+    if extra_tools_enabled {
+        use aegis_agent::extra_tools::{ExtraTools, WebFetchConfig};
+        let extra = ExtraTools::new(
+            workspace.clone(),
+            WebFetchConfig {
+                allowlist: webfetch_allow.clone(),
+            },
+        );
+        let defs = extra.definitions();
+        eprintln!(
+            "aegis chat: extra tools mounted = {}",
+            defs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(" / ")
+        );
+        sources.push(ToolSource::new("extra", Box::new(extra), defs));
     }
     for spec in &mcp_servers {
         // Spec is a shell command — split on whitespace, first token

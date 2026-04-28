@@ -37,6 +37,7 @@ pub mod compact;
 pub mod conversation;
 pub mod cost;
 pub mod cost_observer_aegis;
+pub mod extra_tools;
 pub mod hooks;
 pub mod mcp;
 pub mod message;
