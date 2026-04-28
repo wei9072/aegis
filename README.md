@@ -18,6 +18,10 @@ A system for preventing silent regressions in LLM-driven workflows.
 Aegis is a constraint-based behavior harness for LLM systems.
 (In the broad sense: a verification environment, not an agent driver.)
 
+For the domain-independent framework definition, see
+[`docs/framework.md`](docs/framework.md). `aegis-agent` is one
+implementation case: Aegis applied to agent-driven code changes.
+
 **Aegis does not write code, and does not tell the LLM how to
 write code. It only judges whether the code an LLM produces is
 allowed to stay.** The LLM (or whichever code generator you wrap)
