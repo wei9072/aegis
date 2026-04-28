@@ -1,5 +1,7 @@
 # Aegis
 
+[English](README.md) · [繁體中文](README.zh-TW.md)
+
 > Aegis ensures bad decisions don't stick.
 
 A system for preventing silent regressions in LLM-driven workflows.
