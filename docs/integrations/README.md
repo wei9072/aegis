@@ -50,9 +50,12 @@ build when real demand justifies them.
   GitHub Action gives every PR an Aegis check status. Same effect
   as pre-commit but at the merge boundary, and visible to reviewers.
 - **You're using Cursor or Claude Code with MCP** → install with
-  `cargo install --path crates/aegis-mcp`, run `aegis-mcp`, configure
-  per [the MCP doc](mcp_design.md). Only `validate_change` exposed
-  in V1.10; ask for `validate_diff` / `get_signals` if you need them.
+  `cargo install --path crates/aegis-mcp`, run `aegis-mcp`,
+  configure per [the MCP doc](mcp_design.md), or inspect the
+  runnable client smoke example at
+  [`examples/integration/mcp-server/`](../../examples/integration/mcp-server/).
+  Only `validate_change` exposed in V1.10 (intentionally narrow
+  surface); ask for `validate_diff` / `get_signals` if you need them.
 
 You can stack them. The git hook + CI gate + MCP server are
 complementary: each catches a different timing of the same kind of
