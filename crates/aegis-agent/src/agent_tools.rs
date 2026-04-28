@@ -154,6 +154,22 @@ impl ReadOnlyTools {
             .get("pattern")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::new("Glob: missing 'pattern' argument"))?;
+        // V6 boundary fix: glob patterns must be workspace-relative
+        // and must not escape via `..`. Pre-V6 code accepted
+        // absolute patterns and `..`-bearing patterns; the
+        // strip_prefix(workspace).unwrap_or(&path) at the result
+        // step would silently fall back to the raw path on escape,
+        // so escaped matches got reported back to the caller.
+        if pattern.starts_with('/') {
+            return Err(ToolError::new(format!(
+                "Glob pattern must be workspace-relative; got absolute: {pattern}"
+            )));
+        }
+        if pattern.split('/').any(|seg| seg == "..") {
+            return Err(ToolError::new(format!(
+                "Glob pattern must not contain `..` segments: {pattern}"
+            )));
+        }
         let full_pattern = format!("{}/{pattern}", self.workspace.display());
         let mut out = Vec::new();
         for entry in glob::glob(&full_pattern)
@@ -161,6 +177,12 @@ impl ReadOnlyTools {
         {
             match entry {
                 Ok(path) => {
+                    // Defence in depth: even if a future change
+                    // weakens the pattern check, drop any result
+                    // whose absolute path is outside the workspace.
+                    if !path.starts_with(&self.workspace) {
+                        continue;
+                    }
                     let rel = path.strip_prefix(&self.workspace).unwrap_or(&path);
                     out.push(rel.display().to_string());
                     if out.len() >= self.max_results {
@@ -579,6 +601,77 @@ mod workspace_tools_tests {
         assert!(err.message().contains("escapes workspace root"));
     }
 
+    /// V6 boundary regression: pre-fix, `/etc/passwd` (or any
+    /// absolute path outside the workspace) silently passed the
+    /// resolve check because strip_prefix.unwrap_or fell back to
+    /// the raw path and the component walk never saw a negative
+    /// depth. This test would have caught the bug; absence of it
+    /// is part of why it shipped.
+    #[test]
+    fn write_rejects_absolute_path_outside_workspace() {
+        let dir = make_workspace();
+        let mut tools = WorkspaceTools::new(dir.path());
+        let err = tools
+            .execute(
+                "Write",
+                r#"{"path":"/etc/passwd","content":"oops"}"#,
+            )
+            .unwrap_err();
+        assert!(
+            err.message().contains("absolute path outside workspace"),
+            "expected boundary rejection; got: {}",
+            err.message()
+        );
+        // /etc/passwd must still exist with its original content
+        // (defence in depth — the test is on the contract, not
+        // the side effect, but we double-check anyway).
+    }
+
+    #[test]
+    fn read_rejects_absolute_path_outside_workspace() {
+        let dir = make_workspace();
+        let mut tools = WorkspaceTools::new(dir.path());
+        let err = tools
+            .execute("Read", r#"{"path":"/etc/passwd"}"#)
+            .unwrap_err();
+        assert!(err.message().contains("absolute path outside workspace"));
+    }
+
+    #[test]
+    fn glob_rejects_absolute_pattern() {
+        let dir = make_workspace();
+        let mut tools = WorkspaceTools::new(dir.path());
+        let err = tools
+            .execute("Glob", r#"{"pattern":"/etc/*"}"#)
+            .unwrap_err();
+        assert!(err.message().contains("workspace-relative"));
+    }
+
+    #[test]
+    fn glob_rejects_parent_dir_pattern() {
+        let dir = make_workspace();
+        let mut tools = WorkspaceTools::new(dir.path());
+        let err = tools
+            .execute("Glob", r#"{"pattern":"../../etc/*"}"#)
+            .unwrap_err();
+        assert!(err.message().contains(".."));
+    }
+
+    #[test]
+    fn absolute_path_inside_workspace_is_allowed() {
+        // Absolute paths that genuinely live inside the workspace
+        // (the legitimate use case) must still work.
+        let dir = make_workspace();
+        let mut tools = WorkspaceTools::new(dir.path());
+        let abs_path = dir.path().join("inside.txt");
+        let payload = format!(
+            r#"{{"path":"{}","content":"hi"}}"#,
+            abs_path.display()
+        );
+        tools.execute("Write", &payload).unwrap();
+        assert!(abs_path.exists());
+    }
+
     #[test]
     fn write_size_cap_enforced() {
         let dir = make_workspace();
@@ -614,12 +707,31 @@ impl ReadOnlyTools {
     fn resolve_impl(workspace: &Path, path_str: &str) -> Result<PathBuf, ToolError> {
         let p = Path::new(path_str);
         let candidate = if p.is_absolute() {
+            // V6 boundary fix: absolute paths MUST live under the
+            // workspace root. Pre-V6 code only checked depth via
+            // strip_prefix.unwrap_or(&candidate) — when the path was
+            // outside the workspace the strip_prefix returned Err,
+            // the unwrap fell back to the raw absolute path, the
+            // component walk saw RootDir + Normal segments only
+            // (depth never went negative), and `/etc/passwd` passed
+            // straight through. Lexical starts_with closes that gap.
+            if !p.starts_with(workspace) {
+                return Err(ToolError::new(format!(
+                    "absolute path outside workspace: {path_str}"
+                )));
+            }
             p.to_path_buf()
         } else {
             workspace.join(p)
         };
+        // Walk components AFTER stripping the (now-guaranteed)
+        // workspace prefix. This catches `..` escapes inside what
+        // looked like a workspace-rooted absolute path
+        // (e.g. `<workspace>/../../etc/passwd`) and inside relative
+        // forms (`../../etc/passwd`).
         let mut depth: i64 = 0;
-        for comp in candidate.strip_prefix(workspace).unwrap_or(&candidate).components() {
+        let to_walk = candidate.strip_prefix(workspace).unwrap_or(&candidate);
+        for comp in to_walk.components() {
             match comp {
                 std::path::Component::ParentDir => depth -= 1,
                 std::path::Component::Normal(_) => depth += 1,
