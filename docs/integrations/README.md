@@ -33,7 +33,7 @@ Three boundaries → three ready-to-use integrations:
 | :--- | :--- | :--- | :--- | :--- |
 | 1 | [Git pre-commit hook](git_pre_commit.md) | Solo developers, side projects | 2 min | ✓ ready |
 | 2 | [GitHub Action / CI gate](github_action.md) | Teams with PR review | 5 min | ✓ ready |
-| 3 | [MCP server](mcp_design.md) | Cursor / Claude Code users | 5 min config | ✅ `validate_change` shipped (`pip install -e .[mcp]` + `aegis-mcp`) |
+| 3 | [MCP server](mcp_design.md) | Cursor / Claude Code users | 5 min config | ✅ `validate_change` shipped (`cargo install --path crates/aegis-mcp` + `aegis-mcp`) |
 
 The 5-path discussion (including LSP plugin and per-tool plugins
 like Aider) is in
@@ -51,9 +51,12 @@ those paths are deferred until evidence justifies them.
   GitHub Action gives every PR an Aegis check status. Same effect
   as pre-commit but at the merge boundary, and visible to reviewers.
 - **You're using Cursor or Claude Code with MCP** → install with
-  `pip install -e ".[mcp]"`, run `aegis-mcp`, configure per
-  [the MCP doc](mcp_design.md). Only `validate_change` exposed in
-  V0.x; ask for `validate_diff` / `get_signals` if you need them.
+  `cargo install --path crates/aegis-mcp`, run `aegis-mcp`,
+  configure per [the MCP doc](mcp_design.md), or inspect the
+  runnable client smoke example at
+  [`examples/integration/mcp-server/`](../../examples/integration/mcp-server/).
+  Only `validate_change` is exposed intentionally; ask for
+  `validate_diff` / `get_signals` if you need them.
 
 You can stack them. The git hook + CI gate + MCP server are
 complementary: each catches a different timing of the same kind of
