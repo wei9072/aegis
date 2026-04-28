@@ -300,6 +300,7 @@ Tier 2 的多語言支援在 Rust port 的 V1.4–V1.7 落地（見
 | Swift | ✅ | ✅ | ✅ | `.swift` |
 | Kotlin | ✅ | ✅ | ✅ | `.kt`、`.kts` |
 | Dart | ✅ | ✅ | 🟡 | `.dart` |
+| Rust | ✅ | ✅ | ✅ | `.rs` |
 
 🟡 = 預設的 chain-depth walker 在這個語言的 AST 形狀上會少算；
 計畫的修法路徑是逐語言 override（`LanguageAdapter::max_chain_depth`）。

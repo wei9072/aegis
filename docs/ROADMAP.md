@@ -30,9 +30,9 @@ For the full per-phase port history (V1.0 → V2.0), see
 | **Executor + Snapshot** | atomic apply with backup-dir rollback | `aegis pipeline run` only |
 | **Stalemate / Thrashing detector** | sequence-level; halts the loop with a named reason | `aegis pipeline run` only |
 
-10 source languages registered (Python, TypeScript, JavaScript, Go,
-Java, C#, PHP, Swift, Kotlin, Dart). See README "Supported source
-languages" for per-language status.
+11 source languages registered (Python, TypeScript, JavaScript, Go,
+Java, C#, PHP, Swift, Kotlin, Dart, Rust). See README "Supported
+source languages" for per-language status.
 
 ### What got deleted in V1.10 (and won't come back unless real users hit a wall)
 

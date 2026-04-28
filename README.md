@@ -310,6 +310,7 @@ LLM provider). Run `aegis languages` for the live registry.
 | Swift | ✅ | ✅ | ✅ | `.swift` |
 | Kotlin | ✅ | ✅ | ✅ | `.kt`, `.kts` |
 | Dart | ✅ | ✅ | 🟡 | `.dart` |
+| Rust | ✅ | ✅ | ✅ | `.rs` |
 
 🟡 = the default chain-depth walker under-counts on this language's
 AST shape; per-language overrides are the planned fix path
