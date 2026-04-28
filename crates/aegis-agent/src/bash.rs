@@ -15,27 +15,40 @@
 //! explicit `Allow` rule. `Plan` mode rejects it (no dry-run
 //! semantic for arbitrary shell — what would we even simulate?).
 //!
-//! ## Aegis-aware redirect parsing (V0)
+//! ## Aegis-aware redirect parsing
 //!
 //! `parse_redirect_targets()` extracts write-destination paths from
-//! the most common shell shapes (`>`, `>>`, `tee`, `tee -a`). The
-//! predictor uses the result for a stderr banner that names the
-//! files this command will touch. V0 does NOT use these targets to
-//! BLOCK — that requires content synthesis (knowing what the
-//! command would write), which lands incrementally as dogfood
-//! reveals real cases worth catching.
+//! the most common shell shapes (`>`, `>>`, `tee`, `tee -a`). Two
+//! things happen with the result:
 //!
-//! Documented limitations of the V0 parser (work for V1):
+//!   1. **Blocking workspace-boundary check.** Each target is run
+//!      through `ReadOnlyTools::resolve_impl` — the same lexical
+//!      `..`-walk + absolute-path-prefix check the file-write tools
+//!      use. If any redirect target lexically escapes the workspace
+//!      (`> /etc/cron.d/evil`, `>> ../../home/user/.ssh/...`), the
+//!      command is rejected before `sh -c` is spawned. This brings
+//!      Bash's enforcement up to parity with Read/Write/Edit/Glob;
+//!      the README's "Aegis catches: workspace-boundary escape via
+//!      shell redirect" is now matched by code, not just claimed.
+//!
+//!   2. **stderr surveillance banner.** The detected targets are
+//!      printed for the user to see ("[aegis] bash will write to:
+//!      ..."), even when the workspace check passes. Helps the
+//!      operator notice a write they didn't expect.
+//!
+//! Documented limitations of the parser (a bypass walks past both
+//! the banner AND the boundary check, so they are real):
 //!   - quoted strings (`echo "a > b"`) — would over-match
 //!   - heredocs (`<<EOF`) — not detected
 //!   - subshells (`sh -c '...'`) — not recursed
 //!   - exec redirects (`2>&1`) — skipped
 //!   - no-space forms (`cmd>file`) — not detected
 //!
-//! Conservative bias: missed targets are silent (no false alarm),
-//! over-detection only spends a banner line. PostToolUse cost
-//! observer still runs — anything that actually changed structural
-//! cost surfaces there even when the parser missed the target.
+//! Conservative bias: missed targets are silent (no false alarm,
+//! no false block). The PostToolUse cost observer still runs —
+//! anything that actually changed structural cost surfaces there
+//! even when the parser missed the target. Defence in depth, not
+//! fortress.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -44,6 +57,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::agent_tools::ReadOnlyTools;
 use crate::api::ToolDefinition;
 use crate::tool::{ToolError, ToolExecutor};
 
@@ -111,10 +125,25 @@ impl BashTool {
 
         let targets = parse_redirect_targets(&parsed.command);
         if !targets.is_empty() {
-            // Surface the planned mutation so the user can see it
-            // without needing --verbose. Predictor doesn't have
-            // content to validate yet (V0); cost observer catches
-            // anything that actually changed.
+            // Workspace-boundary check on detected targets. Same
+            // lexical rule the file-write tools (Read / Write /
+            // Edit / Glob) apply: absolute paths must live under
+            // workspace; relative + workspace-rooted paths must
+            // not escape via `..`. First escape rejects the whole
+            // command — `sh -c` is never spawned. Limitations of
+            // the parser (quoted strings, heredocs, no-space form)
+            // are upstream; anything the parser misses bypasses
+            // this check too, by design (see module docs).
+            for target in &targets {
+                ReadOnlyTools::resolve_impl(&self.workspace, target).map_err(|e| {
+                    ToolError::new(format!(
+                        "Bash redirect target rejected — {}",
+                        e.message()
+                    ))
+                })?;
+            }
+            // All targets within bounds — surface them so the user
+            // sees the planned mutation without needing --verbose.
             eprintln!(
                 "[aegis] bash will write to: {}",
                 targets.join(", ")
@@ -374,5 +403,112 @@ mod tests {
         let mut tool = BashTool::new(dir.path());
         let err = tool.execute("Bash", "not json").unwrap_err();
         assert!(err.message().contains("not valid JSON"));
+    }
+
+    // ----------------------------------------------------------------
+    // Workspace-boundary enforcement on redirect targets.
+    //
+    // These tests pin the rule that `parse_redirect_targets` is now
+    // load-bearing for security, not just surveillance. If a future
+    // refactor pulls the boundary check back out of run(), the README
+    // claim "Aegis catches workspace-boundary escape via shell
+    // redirect" stops being true and these tests fail loudly.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn bash_blocks_redirect_to_absolute_path_outside_workspace() {
+        let dir = tempdir().unwrap();
+        let mut tool = BashTool::new(dir.path());
+        // The redirect target is an absolute path well outside the
+        // workspace. The boundary check must reject before `sh -c`
+        // is spawned.
+        let input = json!({
+            "command": "echo malicious > /tmp/aegis_test_escape_target"
+        })
+        .to_string();
+        let err = tool.execute("Bash", &input).unwrap_err();
+        assert!(
+            err.message().contains("redirect target rejected"),
+            "expected redirect rejection, got: {}",
+            err.message()
+        );
+        assert!(
+            err.message().contains("absolute path outside workspace"),
+            "expected absolute-path message, got: {}",
+            err.message()
+        );
+        // The file must NOT have been created — a process never ran.
+        assert!(
+            !std::path::Path::new("/tmp/aegis_test_escape_target").exists(),
+            "redirect target was created despite rejection"
+        );
+    }
+
+    #[test]
+    fn bash_blocks_redirect_with_parent_dir_traversal() {
+        let dir = tempdir().unwrap();
+        let mut tool = BashTool::new(dir.path());
+        let input = json!({
+            "command": "echo malicious >> ../../etc/aegis_traversal_test"
+        })
+        .to_string();
+        let err = tool.execute("Bash", &input).unwrap_err();
+        assert!(
+            err.message().contains("redirect target rejected"),
+            "expected redirect rejection, got: {}",
+            err.message()
+        );
+        assert!(
+            err.message().contains("escapes workspace root"),
+            "expected escape message, got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn bash_blocks_tee_redirect_outside_workspace() {
+        let dir = tempdir().unwrap();
+        let mut tool = BashTool::new(dir.path());
+        // tee form should be checked the same way as `>` / `>>`.
+        let input = json!({
+            "command": "echo malicious | tee -a /tmp/aegis_tee_escape_target"
+        })
+        .to_string();
+        let err = tool.execute("Bash", &input).unwrap_err();
+        assert!(
+            err.message().contains("redirect target rejected"),
+            "expected tee redirect rejection, got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn bash_allows_redirect_to_workspace_relative_path() {
+        let dir = tempdir().unwrap();
+        let mut tool = BashTool::new(dir.path());
+        let input = json!({
+            "command": "echo allowed > inside.txt"
+        })
+        .to_string();
+        let out = tool.execute("Bash", &input).unwrap();
+        assert!(out.contains("exit_code: 0"));
+        assert!(dir.path().join("inside.txt").exists());
+    }
+
+    #[test]
+    fn bash_allows_redirect_to_absolute_path_inside_workspace() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("nested.txt");
+        let mut tool = BashTool::new(dir.path());
+        // Absolute path that lives under the workspace root must
+        // still pass — boundary rejects only when path is OUTSIDE
+        // the workspace.
+        let input = json!({
+            "command": format!("echo allowed > {}", target.display())
+        })
+        .to_string();
+        let out = tool.execute("Bash", &input).unwrap();
+        assert!(out.contains("exit_code: 0"));
+        assert!(target.exists());
     }
 }

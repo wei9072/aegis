@@ -704,7 +704,7 @@ impl ReadOnlyTools {
         ReadOnlyTools::resolve_impl(&self.workspace, path_str)
     }
 
-    fn resolve_impl(workspace: &Path, path_str: &str) -> Result<PathBuf, ToolError> {
+    pub(crate) fn resolve_impl(workspace: &Path, path_str: &str) -> Result<PathBuf, ToolError> {
         let p = Path::new(path_str);
         let candidate = if p.is_absolute() {
             // V6 boundary fix: absolute paths MUST live under the
