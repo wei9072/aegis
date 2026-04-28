@@ -14,6 +14,8 @@
 
 use std::collections::BTreeSet;
 
+use glob::Pattern;
+
 /// Permission modes covering inspection-only through full-access.
 /// `Plan` is aegis-specific: write tools route through the predictor
 /// for cost-delta scoring but are NOT executed — see `Plan` doc and
@@ -39,6 +41,35 @@ pub enum PermissionMode {
     DangerFullAccess,
 }
 
+/// One row in `~/.config/aegis/permissions.toml`. Walked in order;
+/// first match wins. The bare `tool_glob` pattern is required; the
+/// `path_glob` is optional — when present, the rule only fires for
+/// tool calls whose `path` field (extracted from the JSON input)
+/// matches both patterns. Both patterns use POSIX glob syntax via
+/// the `glob` crate (`*`, `?`, `[abc]`, `**` for path crossing).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PermissionRule {
+    pub tool_glob: String,
+    pub path_glob: Option<String>,
+    pub decision: RuleDecision,
+}
+
+/// What a matched rule resolves to. Distinct from `PermissionDecision`
+/// because rules can request user prompting — only the runtime knows
+/// whether a `PermissionPrompter` is wired in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleDecision {
+    Allow,
+    Deny,
+    /// Defer to the runtime's `PermissionPrompter` (B3.3). When no
+    /// prompter is attached, prompt rules collapse to `Deny` — the
+    /// safe default for unattended runs.
+    Prompt,
+    /// Same semantics as `PermissionMode::Plan` but per-rule: write
+    /// flows through the predictor without touching disk.
+    DryRun,
+}
+
 /// Policy decision for one tool call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PermissionDecision {
@@ -46,8 +77,17 @@ pub enum PermissionDecision {
     Allow,
     /// Tool is permitted but must NOT execute against disk / shell —
     /// runtime calls the predictor for structural-cost scoring and
-    /// returns a synthesized result. Used by `Plan` mode.
+    /// returns a synthesized result. Used by `Plan` mode and by
+    /// `RuleDecision::DryRun` rule matches.
     AllowDryRun,
+    /// Rule matched with `RuleDecision::Prompt` — runtime should
+    /// consult its `PermissionPrompter` (or fall through to deny if
+    /// none configured). Carries the rule's tool/path info so the
+    /// prompter can show the user what's being asked.
+    Prompt {
+        tool_name: String,
+        path: Option<String>,
+    },
     /// Tool blocked. `reason` goes back to the LLM as the tool
     /// result — facts only, no coaching.
     Deny { reason: String },
@@ -74,6 +114,9 @@ pub struct PermissionPolicy {
     read_tools: BTreeSet<String>,
     write_tools: BTreeSet<String>,
     dangerous_tools: BTreeSet<String>,
+    /// Walked in order before falling back to mode-based decision.
+    /// Empty by default; `with_rules()` populates from a TOML config.
+    rules: Vec<PermissionRule>,
 }
 
 impl PermissionPolicy {
@@ -85,7 +128,19 @@ impl PermissionPolicy {
             read_tools: READ_TOOLS.iter().map(|s| (*s).to_string()).collect(),
             write_tools: WRITE_TOOLS.iter().map(|s| (*s).to_string()).collect(),
             dangerous_tools: DANGEROUS_TOOLS.iter().map(|s| (*s).to_string()).collect(),
+            rules: Vec::new(),
         }
+    }
+
+    /// Attach a rule list (typically loaded from
+    /// `~/.config/aegis/permissions.toml` by the CLI). Rules are
+    /// walked in order on each `authorize_with_input` call and the
+    /// first match wins; non-matching tool calls fall through to
+    /// the mode-based decision so rules are strictly additive.
+    #[must_use]
+    pub fn with_rules(mut self, rules: Vec<PermissionRule>) -> Self {
+        self.rules = rules;
+        self
     }
 
     pub fn mode(&self) -> PermissionMode {
@@ -161,6 +216,100 @@ impl PermissionPolicy {
             }
         }
     }
+
+    /// Like `authorize`, but consults the `rules` list first. The
+    /// `input` JSON is parsed for a `path` field — rules with
+    /// `path_glob` only match when both the tool glob AND the path
+    /// glob succeed. Tool calls with no `path` field skip rules that
+    /// require one.
+    pub fn authorize_with_input(&self, tool_name: &str, input: &str) -> PermissionDecision {
+        let path = parse_path_field(input);
+        for rule in &self.rules {
+            if !glob_matches(&rule.tool_glob, tool_name) {
+                continue;
+            }
+            if let Some(path_glob) = &rule.path_glob {
+                let Some(p) = path.as_deref() else { continue };
+                if !glob_matches(path_glob, p) {
+                    continue;
+                }
+            }
+            return decision_for(rule.decision, tool_name, path);
+        }
+        // No rule matched — fall through to the mode-based decision.
+        self.authorize(tool_name)
+    }
+}
+
+fn decision_for(
+    rule: RuleDecision,
+    tool_name: &str,
+    path: Option<String>,
+) -> PermissionDecision {
+    match rule {
+        RuleDecision::Allow => PermissionDecision::Allow,
+        RuleDecision::Deny => PermissionDecision::Deny {
+            reason: format!(
+                "permission denied by rule: tool {tool_name:?}{}",
+                path.as_deref()
+                    .map(|p| format!(" path {p:?}"))
+                    .unwrap_or_default()
+            ),
+        },
+        RuleDecision::DryRun => PermissionDecision::AllowDryRun,
+        RuleDecision::Prompt => PermissionDecision::Prompt {
+            tool_name: tool_name.to_string(),
+            path,
+        },
+    }
+}
+
+/// Parse the `path` field out of a JSON tool-input string. Used by
+/// `authorize_with_input` so rules with `path_glob` can match. Tools
+/// whose schemas don't expose a `path` field (e.g. `Bash`) get
+/// `None` — rules with `path_glob` then skip them, falling through
+/// to whatever rule matches by tool name only.
+fn parse_path_field(input: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(input).ok()?;
+    value
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+fn glob_matches(pattern: &str, value: &str) -> bool {
+    Pattern::new(pattern)
+        .map(|p| p.matches(value))
+        .unwrap_or(false)
+}
+
+// ---------- B3.3: PermissionPrompter trait ----------
+
+/// Outcome of a `PermissionPrompter::ask` call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptOutcome {
+    /// Allow this single call only.
+    AllowOnce,
+    /// Allow this AND all future calls matching the same
+    /// (tool, path) pair within the session.
+    AllowAlways,
+    /// Deny this single call.
+    DenyOnce,
+    /// Deny this AND all future calls matching the same pair.
+    DenyAlways,
+}
+
+/// User-facing prompter — invoked by the runtime when a
+/// `PermissionDecision::Prompt` arrives. Implementations decide how
+/// to ask (REPL TTY, GUI dialog, web hook). The runtime never
+/// blocks on a prompter that doesn't exist — when no prompter is
+/// configured, prompt decisions collapse to deny, matching the
+/// safe default for unattended runs.
+pub trait PermissionPrompter: Send {
+    /// `tool_name` and `path` come straight from the matched rule.
+    /// `reason` describes the rule (e.g. "rule #2: tool=Bash
+    /// path=*"). Implementations should show all three to the user.
+    fn ask(&mut self, tool_name: &str, path: Option<&str>, reason: &str) -> PromptOutcome;
 }
 
 #[cfg(test)]
@@ -236,5 +385,109 @@ mod tests {
             p.authorize("totally_new_tool"),
             PermissionDecision::Deny { .. }
         ));
+    }
+
+    // ---------- B3.2: rule-based authorization ----------
+
+    fn rule(tool: &str, path: Option<&str>, decision: RuleDecision) -> PermissionRule {
+        PermissionRule {
+            tool_glob: tool.to_string(),
+            path_glob: path.map(String::from),
+            decision,
+        }
+    }
+
+    #[test]
+    fn no_rules_falls_back_to_mode_decision() {
+        let p = PermissionPolicy::standard(PermissionMode::ReadOnly);
+        let v = p.authorize_with_input("Edit", r#"{"path":"x.py"}"#);
+        assert!(matches!(v, PermissionDecision::Deny { .. }));
+    }
+
+    #[test]
+    fn rule_matching_tool_and_path_grants_allow() {
+        let p = PermissionPolicy::standard(PermissionMode::ReadOnly).with_rules(vec![rule(
+            "Edit",
+            Some("src/**/*.rs"),
+            RuleDecision::Allow,
+        )]);
+        let v = p.authorize_with_input("Edit", r#"{"path":"src/foo/bar.rs"}"#);
+        assert_eq!(v, PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn rule_path_glob_skipped_when_input_lacks_path_field() {
+        // Bash inputs typically have no "path" field — a path-bound
+        // rule should NOT match, falling through to mode decision.
+        let p = PermissionPolicy::standard(PermissionMode::DangerFullAccess).with_rules(vec![
+            rule("*", Some("src/**"), RuleDecision::Deny),
+        ]);
+        let v = p.authorize_with_input("Bash", r#"{"command":"ls"}"#);
+        assert_eq!(v, PermissionDecision::Allow); // mode allows; no path → rule skipped
+    }
+
+    #[test]
+    fn first_matching_rule_wins() {
+        let p = PermissionPolicy::standard(PermissionMode::ReadOnly).with_rules(vec![
+            rule("Edit", Some("src/**"), RuleDecision::Allow),
+            rule("Edit", Some("**"), RuleDecision::Deny),
+        ]);
+        let v = p.authorize_with_input("Edit", r#"{"path":"src/foo.rs"}"#);
+        assert_eq!(v, PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn deny_rule_overrides_workspace_write_mode() {
+        let p = PermissionPolicy::standard(PermissionMode::WorkspaceWrite).with_rules(vec![
+            rule("Edit", Some("vendor/**"), RuleDecision::Deny),
+        ]);
+        let v = p.authorize_with_input("Edit", r#"{"path":"vendor/dep.rs"}"#);
+        assert!(matches!(v, PermissionDecision::Deny { .. }));
+        // Same tool, different path → falls through to mode → Allow.
+        let v2 = p.authorize_with_input("Edit", r#"{"path":"src/main.rs"}"#);
+        assert_eq!(v2, PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn dry_run_rule_yields_allow_dry_run_decision() {
+        let p = PermissionPolicy::standard(PermissionMode::WorkspaceWrite).with_rules(vec![
+            rule("Edit", Some("**/*.toml"), RuleDecision::DryRun),
+        ]);
+        let v = p.authorize_with_input("Edit", r#"{"path":"Cargo.toml"}"#);
+        assert_eq!(v, PermissionDecision::AllowDryRun);
+    }
+
+    #[test]
+    fn prompt_rule_returns_prompt_decision_with_context() {
+        let p = PermissionPolicy::standard(PermissionMode::ReadOnly).with_rules(vec![
+            rule("Bash", None, RuleDecision::Prompt),
+        ]);
+        let v = p.authorize_with_input("Bash", r#"{"command":"ls"}"#);
+        match v {
+            PermissionDecision::Prompt { tool_name, path } => {
+                assert_eq!(tool_name, "Bash");
+                assert_eq!(path, None);
+            }
+            other => panic!("expected Prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_glob_wildcard_matches_anything() {
+        let p = PermissionPolicy::standard(PermissionMode::WorkspaceWrite).with_rules(vec![
+            rule("*", Some("secrets/*"), RuleDecision::Deny),
+        ]);
+        let v = p.authorize_with_input("Edit", r#"{"path":"secrets/key.txt"}"#);
+        assert!(matches!(v, PermissionDecision::Deny { .. }));
+        let v2 = p.authorize_with_input("Read", r#"{"path":"secrets/key.txt"}"#);
+        assert!(matches!(v2, PermissionDecision::Deny { .. }));
+    }
+
+    #[test]
+    fn parse_path_field_handles_missing_or_invalid_json() {
+        assert_eq!(parse_path_field(r#"{"path":"x"}"#), Some("x".into()));
+        assert_eq!(parse_path_field(r#"{"command":"ls"}"#), None);
+        assert_eq!(parse_path_field("not json at all"), None);
+        assert_eq!(parse_path_field(""), None);
     }
 }

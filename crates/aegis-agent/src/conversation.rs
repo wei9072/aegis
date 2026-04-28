@@ -358,7 +358,7 @@ where
                 // the predictor or executor (no point asking
                 // aegis-mcp about a write that's already banned).
                 let permission = match &self.permission_policy {
-                    Some(policy) => policy.authorize(&tool_name),
+                    Some(policy) => policy.authorize_with_input(&tool_name, &input),
                     None => PermissionDecision::Allow,
                 };
                 let (output, is_error) = match permission {
@@ -394,6 +394,23 @@ where
                             ),
                         };
                         (result, false)
+                    }
+                    PermissionDecision::Prompt { tool_name: t, path } => {
+                        // No prompter wired into the runtime yet
+                        // (B3.3 only declares the trait). Safe
+                        // default for unattended runs: collapse
+                        // Prompt → Deny. CLI hookup lands in a
+                        // follow-up.
+                        let path_str = path
+                            .as_deref()
+                            .map(|p| format!(" path {p:?}"))
+                            .unwrap_or_default();
+                        (
+                            format!(
+                                "permission rule requested user prompt for tool {t:?}{path_str}; no prompter configured — denied"
+                            ),
+                            true,
+                        )
                     }
                 };
 

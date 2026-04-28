@@ -1,6 +1,9 @@
 //! V3.6 — permission policy wired into ConversationRuntime.
+//! V3.9 (B3.2) — path-based PermissionRule end-to-end coverage.
 
-use aegis_agent::permission::{PermissionMode, PermissionPolicy};
+use aegis_agent::permission::{
+    PermissionMode, PermissionPolicy, PermissionRule, RuleDecision,
+};
 use aegis_agent::testing::{ScriptedApiClient, ScriptedToolExecutor};
 use aegis_agent::{
     AgentConfig, ConversationRuntime, ContentBlock, MessageRole, Session, StoppedReason,
@@ -165,6 +168,74 @@ fn plan_mode_denies_bash_explicitly() {
         ContentBlock::ToolResult { output, is_error, .. } => {
             assert!(*is_error);
             assert!(output.contains("permission denied") && output.contains("Plan"));
+        }
+        _ => panic!("expected ToolResult"),
+    }
+}
+
+#[test]
+fn rule_denies_edit_in_protected_path_even_under_workspace_write() {
+    // Mode = WorkspaceWrite would normally allow Edit; rule overrides
+    // for paths matching vendor/**.
+    let api = ScriptedApiClient::new()
+        .push_tool_call("c1", "Edit", r#"{"path":"vendor/dep.rs","old_string":"a","new_string":"b"}"#)
+        .push_text_then_done("blocked, ok");
+    let tools = ScriptedToolExecutor::new();
+
+    let policy = PermissionPolicy::standard(PermissionMode::WorkspaceWrite).with_rules(vec![
+        PermissionRule {
+            tool_glob: "Edit".into(),
+            path_glob: Some("vendor/**".into()),
+            decision: RuleDecision::Deny,
+        },
+    ]);
+
+    let mut rt = ConversationRuntime::new(Session::new(), api, tools, vec![], vec![], cfg())
+        .with_permission_policy(policy);
+
+    let _ = rt.run_turn("touch vendor");
+
+    let tool_msg = &rt.session().messages[2];
+    match &tool_msg.blocks[0] {
+        ContentBlock::ToolResult { output, is_error, .. } => {
+            assert!(*is_error);
+            assert!(
+                output.contains("permission denied by rule"),
+                "expected rule-denial message; got: {output}"
+            );
+            assert!(output.contains("vendor/dep.rs"));
+        }
+        _ => panic!("expected ToolResult"),
+    }
+}
+
+#[test]
+fn rule_prompt_collapses_to_deny_when_no_prompter_configured() {
+    // B3.3 — without a PermissionPrompter wired in, Prompt rules
+    // safely default to deny.
+    let api = ScriptedApiClient::new()
+        .push_tool_call("c1", "Edit", r#"{"path":"x.py","old_string":"a","new_string":"b"}"#)
+        .push_text_then_done("ok");
+    let tools = ScriptedToolExecutor::new();
+
+    let policy = PermissionPolicy::standard(PermissionMode::WorkspaceWrite).with_rules(vec![
+        PermissionRule {
+            tool_glob: "Edit".into(),
+            path_glob: None,
+            decision: RuleDecision::Prompt,
+        },
+    ]);
+
+    let mut rt = ConversationRuntime::new(Session::new(), api, tools, vec![], vec![], cfg())
+        .with_permission_policy(policy);
+
+    let _ = rt.run_turn("ask permission");
+
+    let tool_msg = &rt.session().messages[2];
+    match &tool_msg.blocks[0] {
+        ContentBlock::ToolResult { output, is_error, .. } => {
+            assert!(*is_error);
+            assert!(output.contains("no prompter configured"));
         }
         _ => panic!("expected ToolResult"),
     }

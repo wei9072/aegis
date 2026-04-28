@@ -180,38 +180,32 @@ mod tests {
         assert!(err.contains("not found"));
     }
 
+    /// Both `list_sessions` tests set `XDG_DATA_HOME`, which is process-
+    /// wide. Running them in parallel races (one removes the var while
+    /// the other reads). Combining into one test serialises the env-var
+    /// usage. (Could split with a `Mutex` static, but a single test is
+    /// simpler and keeps assertion granularity.)
     #[test]
-    fn list_sessions_returns_empty_when_dir_missing() {
-        // Point XDG_DATA_HOME at a temp dir that never had a sessions/
-        // subdir created — list_sessions must NOT panic.
+    fn list_sessions_empty_dir_then_three_files_sorts_newest_first() {
+        // Phase 1 — empty dir → empty Vec, no panic.
         let td = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_DATA_HOME", td.path());
-        assert!(list_sessions().is_empty());
-        std::env::remove_var("XDG_DATA_HOME");
-    }
+        assert!(list_sessions().is_empty(), "empty dir should yield empty Vec");
 
-    #[test]
-    fn list_sessions_sorts_newest_first_and_skips_non_json() {
-        let td = tempfile::tempdir().unwrap();
+        // Phase 2 — write three sessions + one non-json, expect newest first.
         let sess_dir = td.path().join("aegis").join("sessions");
         std::fs::create_dir_all(&sess_dir).unwrap();
-        std::env::set_var("XDG_DATA_HOME", td.path());
-
-        // Three sessions written in order; later writes have later
-        // mtimes (filesystem mtime resolution is OS-dependent but
-        // separate writes always produce monotonic order on Linux).
         for stem in ["a", "b", "c"] {
             let p = sess_dir.join(format!("{stem}.json"));
             Session::new().save_to(&p).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        // A non-json file that should be skipped.
         std::fs::write(sess_dir.join("note.txt"), "x").unwrap();
 
         let listing = list_sessions();
         std::env::remove_var("XDG_DATA_HOME");
 
-        assert_eq!(listing.len(), 3);
+        assert_eq!(listing.len(), 3, "non-json file must be skipped");
         // Newest first → c, b, a
         assert!(listing[0].path.ends_with("c.json"));
         assert!(listing[2].path.ends_with("a.json"));
