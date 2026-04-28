@@ -137,6 +137,15 @@ where
         self.event_callback = callback;
     }
 
+    /// Mutable access to the wrapped API client. The REPL `/model`
+    /// command uses this to call `ConfigurableModel::set_model`
+    /// without the runtime needing to know about every capability
+    /// trait providers might gain. Most callers should not reach
+    /// in here.
+    pub fn api_client_mut(&mut self) -> &mut C {
+        &mut self.api_client
+    }
+
     /// Apply a permission policy. Tool calls denied by the policy
     /// short-circuit before reaching the predictor or executor.
     /// Default = no policy (everything allowed at this layer; the

@@ -15,7 +15,7 @@
 //!   - No safety settings configuration (uses Google defaults).
 //!   - No "thinking" mode for newer Gemini reasoning models.
 
-use crate::api::{ApiClient, ApiRequest, AssistantEvent, RuntimeError};
+use crate::api::{ApiClient, ApiRequest, AssistantEvent, ConfigurableModel, RuntimeError};
 use crate::message::{ContentBlock, ConversationMessage, MessageRole};
 use crate::providers::http::{friendly_http_status, HttpClient};
 use serde::{Deserialize, Serialize};
@@ -79,6 +79,15 @@ impl GeminiProvider {
             ("content-type".into(), "application/json".into()),
             ("x-goog-api-key".into(), self.config.api_key.clone()),
         ]
+    }
+}
+
+impl ConfigurableModel for GeminiProvider {
+    fn set_model(&mut self, model: String) {
+        self.config.model = model;
+    }
+    fn current_model(&self) -> &str {
+        &self.config.model
     }
 }
 

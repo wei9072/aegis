@@ -145,7 +145,12 @@ fn system_prompt_lands_in_top_level_field_not_messages() {
         .unwrap();
 
     let body: Value = serde_json::from_str(&stub.recorded_requests()[0].body).unwrap();
-    assert_eq!(body["system"], "line a\n\nline b");
+    // V3.9 (B5.4): system is now a typed block array (so cache_control
+    // can ride along when supported). The text content stays the same.
+    let system_blocks = body["system"].as_array().unwrap();
+    assert_eq!(system_blocks.len(), 1);
+    assert_eq!(system_blocks[0]["type"], "text");
+    assert_eq!(system_blocks[0]["text"], "line a\n\nline b");
 
     // The messages array must NOT contain a system-role message.
     let messages = body["messages"].as_array().unwrap();
@@ -513,4 +518,109 @@ fn transport_error_surfaces_as_runtime_error() {
     let err = result.unwrap_err();
     assert!(err.message().contains("connection refused"));
     assert_eq!(stub.recorded_requests().len(), 1);
+}
+
+// ---------- B5.4: Anthropic ephemeral cache_control ----------
+
+fn provider_with_model(model: &str) -> (AnthropicProvider, Arc<StubHttpClient>) {
+    let stub = Arc::new(StubHttpClient::new());
+    let stub_for_provider = stub.clone();
+    let provider = AnthropicProvider::new(
+        AnthropicConfig {
+            base_url: "https://anthropic.test".into(),
+            api_key: "sk-ant-test".into(),
+            model: model.into(),
+            max_tokens: 1024,
+            anthropic_version: "2023-06-01".into(),
+        },
+        Box::new(StubHttpRef(stub_for_provider)),
+    );
+    (provider, stub)
+}
+
+#[test]
+fn cache_control_is_set_on_system_block_for_known_anthropic_model() {
+    // claude-haiku-4-5 has supports_cache_control = true in the registry.
+    let (mut provider, stub) = provider_with_model("claude-haiku-4-5");
+    stub.push_ok(200, ok_text_response("hi"));
+
+    provider
+        .stream(ApiRequest {
+            system_prompt: vec!["you are an aegis test".into()],
+            messages: vec![ConversationMessage::user_text("hi")],
+            tools: vec![],
+        })
+        .unwrap();
+
+    let body: Value = serde_json::from_str(&stub.recorded_requests()[0].body).unwrap();
+    let blocks = body["system"].as_array().unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+}
+
+#[test]
+fn cache_control_omitted_for_unknown_model() {
+    // "claude-test" isn't in the registry → defaults to no cache.
+    let (mut provider, stub) = provider_with_stub();
+    stub.push_ok(200, ok_text_response("hi"));
+
+    provider
+        .stream(ApiRequest {
+            system_prompt: vec!["sys".into()],
+            messages: vec![ConversationMessage::user_text("hi")],
+            tools: vec![],
+        })
+        .unwrap();
+
+    let body: Value = serde_json::from_str(&stub.recorded_requests()[0].body).unwrap();
+    let blocks = body["system"].as_array().unwrap();
+    // Block must NOT carry a cache_control key (omitted by serde
+    // skip_serializing_if = "Option::is_none").
+    assert!(
+        blocks[0].as_object().unwrap().get("cache_control").is_none(),
+        "unknown model should not get cache_control: {:?}",
+        blocks[0]
+    );
+}
+
+#[test]
+fn configurable_model_set_then_used_in_request() {
+    use aegis_agent::api::ConfigurableModel;
+    let (mut provider, stub) = provider_with_model("claude-haiku-4-5");
+    assert_eq!(provider.current_model(), "claude-haiku-4-5");
+
+    provider.set_model("claude-opus-4-7".into());
+    assert_eq!(provider.current_model(), "claude-opus-4-7");
+
+    stub.push_ok(200, ok_text_response("hi"));
+    provider
+        .stream(ApiRequest {
+            system_prompt: vec![],
+            messages: vec![ConversationMessage::user_text("hi")],
+            tools: vec![],
+        })
+        .unwrap();
+    let body: Value = serde_json::from_str(&stub.recorded_requests()[0].body).unwrap();
+    assert_eq!(body["model"], "claude-opus-4-7");
+}
+
+#[test]
+fn cache_control_omitted_when_system_prompt_empty() {
+    let (mut provider, stub) = provider_with_model("claude-haiku-4-5");
+    stub.push_ok(200, ok_text_response("hi"));
+
+    provider
+        .stream(ApiRequest {
+            system_prompt: vec![],
+            messages: vec![ConversationMessage::user_text("hi")],
+            tools: vec![],
+        })
+        .unwrap();
+
+    let body: Value = serde_json::from_str(&stub.recorded_requests()[0].body).unwrap();
+    // Empty system → field omitted entirely (skip_serializing_if).
+    assert!(
+        body.get("system").is_none(),
+        "empty system_prompt must omit the system field, got: {body}"
+    );
 }

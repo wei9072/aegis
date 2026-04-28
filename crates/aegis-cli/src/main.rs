@@ -420,7 +420,7 @@ fn cmd_chat(
     };
 
     // Pick a provider from env vars. First match wins.
-    let (provider, provider_label): (Box<dyn ApiClient>, String) =
+    let (provider, provider_label): (Box<dyn aegis_agent::api::ChatProvider>, String) =
         if let Some(c) = OpenAiCompatConfig::from_env() {
             let label = format!("openai-compat ({} {})", c.base_url, c.model);
             (
@@ -683,7 +683,7 @@ fn run_repl<C, T>(
     verbose: bool,
 ) -> ExitCode
 where
-    C: aegis_agent::api::ApiClient,
+    C: aegis_agent::api::ApiClient + aegis_agent::api::ConfigurableModel,
     T: aegis_agent::tool::ToolExecutor,
 {
     use aegis_agent::StoppedReason;
@@ -760,6 +760,7 @@ where
                 println!("  /reset        — clear conversation history");
                 println!("  /cost         — current cost-tracker snapshot");
                 println!("  /history      — message count");
+                println!("  /model [name] — show or switch the model (alias-resolved)");
                 println!("  /scan         — Ring 0 + Ring 0.5 + cycle detection across the workspace");
                 println!("  /sessions     — list saved sessions (newest first)");
                 println!("  /save [path]  — save session (default: auto-save target)");

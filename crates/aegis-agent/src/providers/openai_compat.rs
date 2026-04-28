@@ -24,7 +24,9 @@
 //!   - No prompt-cache opt-in
 //!   - No tool_choice control (always "auto" — model decides)
 
-use crate::api::{ApiClient, ApiRequest, AssistantEvent, RuntimeError, ToolDefinition};
+use crate::api::{
+    ApiClient, ApiRequest, AssistantEvent, ConfigurableModel, RuntimeError, ToolDefinition,
+};
 use crate::message::{ContentBlock, ConversationMessage, MessageRole};
 use crate::providers::http::{friendly_http_status, HttpClient};
 use serde::{Deserialize, Serialize};
@@ -98,6 +100,15 @@ impl OpenAiCompatProvider {
             headers.push(("authorization".into(), format!("Bearer {key}")));
         }
         headers
+    }
+}
+
+impl ConfigurableModel for OpenAiCompatProvider {
+    fn set_model(&mut self, model: String) {
+        self.config.model = model;
+    }
+    fn current_model(&self) -> &str {
+        &self.config.model
     }
 }
 

@@ -47,6 +47,22 @@ pub struct ApiRequest {
     pub tools: Vec<ToolDefinition>,
 }
 
+/// Capability mixin: providers that support runtime model switching.
+/// REPL `/model <name>` calls this; non-supporting providers (e.g.
+/// future fixed-model gateways) just don't impl it.
+pub trait ConfigurableModel {
+    fn set_model(&mut self, model: String);
+    fn current_model(&self) -> &str;
+}
+
+/// Trait alias combining `ApiClient` + `ConfigurableModel`. The CLI
+/// stores the picked provider as `Box<dyn ChatProvider>` so the REPL
+/// can both stream messages and switch models without naming the
+/// concrete type. Auto-impl covers anything that already implements
+/// both traits (the three production providers all do).
+pub trait ChatProvider: ApiClient + ConfigurableModel {}
+impl<T: ApiClient + ConfigurableModel + ?Sized> ChatProvider for T {}
+
 /// Streamed events emitted while processing a single assistant turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssistantEvent {
@@ -109,6 +125,18 @@ impl<T: ApiClient + ?Sized> ApiClient for Box<T> {
         on_event: &mut dyn FnMut(&AssistantEvent),
     ) -> Result<Vec<AssistantEvent>, RuntimeError> {
         (**self).stream_with_callback(request, on_event)
+    }
+}
+
+/// Same trick for `ConfigurableModel`: forward through a Box. Lets
+/// the CLI keep `Box<dyn ChatProvider>` as the runtime's `C` and
+/// still call `set_model` from REPL.
+impl<T: ConfigurableModel + ?Sized> ConfigurableModel for Box<T> {
+    fn set_model(&mut self, model: String) {
+        (**self).set_model(model);
+    }
+    fn current_model(&self) -> &str {
+        (**self).current_model()
     }
 }
 

@@ -16,9 +16,12 @@
 //!     (the agent doesn't surface model internal reasoning yet).
 //!   - No prompt-cache opt-in.
 
-use crate::api::{ApiClient, ApiRequest, AssistantEvent, RuntimeError, ToolDefinition};
+use crate::api::{
+    ApiClient, ApiRequest, AssistantEvent, ConfigurableModel, RuntimeError, ToolDefinition,
+};
 use crate::message::{ContentBlock, ConversationMessage, MessageRole};
 use crate::providers::http::{friendly_http_status, HttpClient};
+use crate::providers::registry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -96,6 +99,15 @@ impl AnthropicProvider {
     }
 }
 
+impl ConfigurableModel for AnthropicProvider {
+    fn set_model(&mut self, model: String) {
+        self.config.model = model;
+    }
+    fn current_model(&self) -> &str {
+        &self.config.model
+    }
+}
+
 impl ApiClient for AnthropicProvider {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         let messages_request = build_messages_request(&self.config, &request)?;
@@ -133,11 +145,45 @@ impl ApiClient for AnthropicProvider {
 struct MessagesRequest {
     model: String,
     max_tokens: u32,
+    /// System prompt as a vector of typed blocks rather than a flat
+    /// string — the block form is what carries `cache_control`. When
+    /// the selected model doesn't support caching we still emit the
+    /// vector (single Text block, no cache_control) so the wire shape
+    /// stays uniform.
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<Vec<SystemBlock>>,
     messages: Vec<WireMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<WireTool>>,
+}
+
+/// Anthropic system-prompt block. Carries `cache_control` for
+/// ephemeral cache (5-minute TTL on the server side, dramatic cost
+/// drop on repeated turns with the same system prompt).
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum SystemBlock {
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+struct CacheControl {
+    /// Anthropic supports `"ephemeral"` (5-min server cache) today.
+    /// Held as a typed enum-as-string so future kinds (`"persistent"`)
+    /// stay additive.
+    #[serde(rename = "type")]
+    kind: CacheControlKind,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CacheControlKind {
+    Ephemeral,
 }
 
 #[derive(Debug, Serialize)]
@@ -216,11 +262,23 @@ fn build_messages_request(
     request: &ApiRequest,
 ) -> Result<MessagesRequest, RuntimeError> {
     // Anthropic puts the system prompt in a top-level field, not a
-    // message. Multiple system lines join into one block.
+    // message. Multiple system lines join into one block. When the
+    // model supports prompt caching we annotate the block with
+    // cache_control: ephemeral — the system prompt is the most stable
+    // part of an agent loop and cache hits cut input cost roughly 90%
+    // on subsequent turns within the 5-minute TTL window.
     let system = if request.system_prompt.is_empty() {
         None
     } else {
-        Some(request.system_prompt.join("\n\n"))
+        let supports_cache = registry::metadata_for(&config.model)
+            .map(|m| m.supports_cache_control)
+            .unwrap_or(false);
+        Some(vec![SystemBlock::Text {
+            text: request.system_prompt.join("\n\n"),
+            cache_control: supports_cache.then_some(CacheControl {
+                kind: CacheControlKind::Ephemeral,
+            }),
+        }])
     };
 
     let mut messages = Vec::new();
