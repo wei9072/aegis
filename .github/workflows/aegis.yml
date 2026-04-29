@@ -1,0 +1,61 @@
+name: Aegis Ring 0
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "**/*.py"
+      - "**/*.ts"
+      - "**/*.tsx"
+      - "**/*.js"
+      - "**/*.jsx"
+      - "**/*.go"
+      - "**/*.java"
+      - "**/*.cs"
+      - "**/*.php"
+      - "**/*.swift"
+      - "**/*.kt"
+      - "**/*.dart"
+
+jobs:
+  ring0:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Install Aegis from a pinned source build ---
+      # When V2.0 release artifacts ship, replace these with
+      # `wget` of the pre-built linux-x86_64 tarball.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+        with:
+          repository: wei9072/aegis
+          path: _aegis
+          ref: v0.1.2          # pinned to released tag for reproducibility
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            _aegis/target
+          key: ${{ runner.os }}-aegis-${{ hashFiles('_aegis/Cargo.lock') }}
+
+      - name: Install aegis CLI
+        working-directory: _aegis
+        run: cargo install --path crates/aegis-cli --locked
+
+      # --- Run Ring 0 against the PR's changed source files ---
+      - name: Run Aegis check on PR diff
+        run: |
+          EXT_PATTERN='\.(py|pyi|ts|tsx|mts|cts|js|mjs|cjs|jsx|go|java|cs|php|phtml|swift|kt|kts|dart)$'
+          files=$(git diff --name-only --diff-filter=ACM \
+                    "${{ github.event.pull_request.base.sha }}" \
+                    "${{ github.event.pull_request.head.sha }}" \
+                  | grep -E "$EXT_PATTERN" || true)
+          if [ -z "$files" ]; then
+            echo "No supported source changes — skipping."
+            exit 0
+          fi
+          echo "$files" | xargs aegis check

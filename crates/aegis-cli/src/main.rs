@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use aegis_core::ast::registry::LanguageRegistry;
-use aegis_core::signal_layer_pyapi::extract_signals_native;
+use aegis_core::validate::validate_change;
 use aegis_providers::{LLMPlanner, OpenAIChatProvider, OpenAIChatProviderConfig};
 use aegis_runtime::{
     run_pipeline, PipelineOptions, WorkspaceContextBuilder,
@@ -325,16 +325,22 @@ fn print_scan_report_human(
 
 fn cmd_check(files: &[PathBuf], json: bool) -> ExitCode {
     let mut all_results = Vec::with_capacity(files.len());
-    let mut had_error = false;
+    let mut had_block = false;
+    let mut had_io_error = false;
+
     for file in files {
         let path_str = file.to_string_lossy().into_owned();
-        match extract_signals_native(&path_str) {
-            Ok(signals) => {
-                all_results.push((path_str, Ok(signals)));
+        match std::fs::read_to_string(file) {
+            Ok(content) => {
+                let verdict = validate_change(&path_str, &content, None);
+                if verdict.blocked() {
+                    had_block = true;
+                }
+                all_results.push((path_str, Ok(verdict)));
             }
             Err(e) => {
-                all_results.push((path_str, Err(e)));
-                had_error = true;
+                all_results.push((path_str, Err(format!("read failed: {e}"))));
+                had_io_error = true;
             }
         }
     }
@@ -343,17 +349,12 @@ fn cmd_check(files: &[PathBuf], json: bool) -> ExitCode {
         let mut arr = Vec::new();
         for (path, result) in &all_results {
             let entry = match result {
-                Ok(signals) => serde_json::json!({
+                Ok(v) => serde_json::json!({
                     "path": path,
-                    "ok": true,
-                    "signals": signals
-                        .iter()
-                        .map(|s| serde_json::json!({
-                            "name": s.name,
-                            "value": s.value,
-                            "description": s.description,
-                        }))
-                        .collect::<Vec<_>>(),
+                    "ok": !v.blocked(),
+                    "decision": v.decision,
+                    "reasons": v.reasons,
+                    "signals": v.signals_after,
                 }),
                 Err(e) => serde_json::json!({
                     "path": path,
@@ -368,12 +369,24 @@ fn cmd_check(files: &[PathBuf], json: bool) -> ExitCode {
         for (path, result) in &all_results {
             println!("== {path} ==");
             match result {
-                Ok(signals) if signals.is_empty() => {
-                    println!("  (no signals)");
-                }
-                Ok(signals) => {
-                    for s in signals {
-                        println!("  {} = {:.0}  ({})", s.name, s.value, s.description);
+                Ok(v) => {
+                    if v.blocked() {
+                        println!("  decision: {}", v.decision);
+                        for r in &v.reasons {
+                            let layer = r.get("layer").and_then(|l| l.as_str()).unwrap_or("");
+                            let detail = r.get("detail").and_then(|d| d.as_str()).unwrap_or("");
+                            println!("  ! [{layer}] {detail}");
+                        }
+                    }
+                    if v.signals_after.is_empty() {
+                        if !v.blocked() {
+                            println!("  (no signals)");
+                        }
+                    } else {
+                        for (name, value) in &v.signals_after {
+                            let n = value.as_f64().unwrap_or(0.0);
+                            println!("  {name} = {n:.0}");
+                        }
                     }
                 }
                 Err(e) => {
@@ -383,7 +396,7 @@ fn cmd_check(files: &[PathBuf], json: bool) -> ExitCode {
         }
     }
 
-    if had_error {
+    if had_block || had_io_error {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS

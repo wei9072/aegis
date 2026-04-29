@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "aegis": {
+      "command": "aegis-mcp"
+    }
+  }
+}
