@@ -333,10 +333,20 @@ fn cmd_check(files: &[PathBuf], json: bool) -> ExitCode {
         match std::fs::read_to_string(file) {
             Ok(content) => {
                 let verdict = validate_change(&path_str, &content, None);
-                if verdict.blocked() {
+                // unsupported extension is "skip", not "violation" — `aegis check`
+                // is forgiving on input so that pre-commit hooks and CI gates
+                // can pass mixed-extension file lists without per-call filtering.
+                // The MCP gate (same validate_change) keeps its strict default.
+                let only_unsupported = verdict.blocked()
+                    && !verdict.reasons.is_empty()
+                    && verdict.reasons.iter().all(|r| {
+                        r.get("reason").and_then(|v| v.as_str())
+                            == Some("unsupported_extension")
+                    });
+                if verdict.blocked() && !only_unsupported {
                     had_block = true;
                 }
-                all_results.push((path_str, Ok(verdict)));
+                all_results.push((path_str, Ok((verdict, only_unsupported))));
             }
             Err(e) => {
                 all_results.push((path_str, Err(format!("read failed: {e}"))));
@@ -349,10 +359,11 @@ fn cmd_check(files: &[PathBuf], json: bool) -> ExitCode {
         let mut arr = Vec::new();
         for (path, result) in &all_results {
             let entry = match result {
-                Ok(v) => serde_json::json!({
+                Ok((v, only_unsupported)) => serde_json::json!({
                     "path": path,
-                    "ok": !v.blocked(),
-                    "decision": v.decision,
+                    "ok": !v.blocked() || *only_unsupported,
+                    "skipped": *only_unsupported,
+                    "decision": if *only_unsupported { "SKIP" } else { v.decision.as_str() },
                     "reasons": v.reasons,
                     "signals": v.signals_after,
                 }),
@@ -369,7 +380,10 @@ fn cmd_check(files: &[PathBuf], json: bool) -> ExitCode {
         for (path, result) in &all_results {
             println!("== {path} ==");
             match result {
-                Ok(v) => {
+                Ok((_, true)) => {
+                    println!("  (skipped — unsupported extension)");
+                }
+                Ok((v, false)) => {
                     if v.blocked() {
                         println!("  decision: {}", v.decision);
                         for r in &v.reasons {

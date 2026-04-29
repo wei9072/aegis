@@ -53,7 +53,7 @@ set -euo pipefail
 
 # All extensions Aegis can parse.  Run `aegis languages` for the
 # live registry.
-EXT_PATTERN='\.(py|pyi|ts|tsx|mts|cts|js|mjs|cjs|jsx|go|java|cs|php|phtml|swift|kt|kts|dart)$'
+EXT_PATTERN='\.(py|pyi|ts|tsx|mts|cts|js|mjs|cjs|jsx|go|java|cs|php|phtml|swift|kt|kts|dart|rs)$'
 
 files=$(git diff --cached --name-only --diff-filter=ACM | grep -E "$EXT_PATTERN" || true)
 [ -z "$files" ] && exit 0

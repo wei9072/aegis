@@ -16,6 +16,7 @@ on:
       - "**/*.swift"
       - "**/*.kt"
       - "**/*.dart"
+      - "**/*.rs"
 
 jobs:
   ring0:
@@ -31,7 +32,7 @@ jobs:
         with:
           repository: wei9072/aegis
           path: _aegis
-          ref: v0.1.2          # pinned to released tag for reproducibility
+          ref: v0.1.3          # pinned to released tag for reproducibility
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -49,7 +50,7 @@ jobs:
       # --- Run Ring 0 against the PR's changed source files ---
       - name: Run Aegis check on PR diff
         run: |
-          EXT_PATTERN='\.(py|pyi|ts|tsx|mts|cts|js|mjs|cjs|jsx|go|java|cs|php|phtml|swift|kt|kts|dart)$'
+          EXT_PATTERN='\.(py|pyi|ts|tsx|mts|cts|js|mjs|cjs|jsx|go|java|cs|php|phtml|swift|kt|kts|dart|rs)$'
           files=$(git diff --name-only --diff-filter=ACM \
                     "${{ github.event.pull_request.base.sha }}" \
                     "${{ github.event.pull_request.head.sha }}" \

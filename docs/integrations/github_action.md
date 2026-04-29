@@ -68,7 +68,7 @@ jobs:
       # --- Run Ring 0 against the PR's changed source files ---
       - name: Run Aegis check on PR diff
         run: |
-          EXT_PATTERN='\.(py|pyi|ts|tsx|mts|cts|js|mjs|cjs|jsx|go|java|cs|php|phtml|swift|kt|kts|dart)$'
+          EXT_PATTERN='\.(py|pyi|ts|tsx|mts|cts|js|mjs|cjs|jsx|go|java|cs|php|phtml|swift|kt|kts|dart|rs)$'
           files=$(git diff --name-only --diff-filter=ACM \
                     "${{ github.event.pull_request.base.sha }}" \
                     "${{ github.event.pull_request.head.sha }}" \
