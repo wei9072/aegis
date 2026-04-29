@@ -6,8 +6,8 @@
 //!
 //! Same logic that `aegis-mcp` exposes over JSON-RPC and that the
 //! Claude Code PreToolUse hook calls via `aegis check`. Lifting
-//! it into a library lets aegis-agent's `LocalAegisPredictor` call
-//! it in-process — no MCP subprocess needed.
+//! it into a library lets in-process callers invoke the gate
+//! directly — no MCP subprocess needed.
 //!
 //! Negative-space contract preserved: this function only emits a
 //! verdict. It never modifies disk, never proposes a fix, never
