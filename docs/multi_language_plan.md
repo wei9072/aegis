@@ -4,8 +4,7 @@
 > in 2026-04-26.** All 10 Tier A languages (Python, TypeScript,
 > JavaScript, Go, Java, C#, PHP, Swift, Kotlin, Dart) are live in
 > the Rust workspace; run `aegis languages` for the live registry.
-> **V3.9 (2026-04-27)** added Rust as Tier A #11 so aegis can
-> dogfood itself.
+> **2026-04-27** added Rust as Tier A #11 so aegis can dogfood itself.
 > Per-phase status is at the bottom of this file.
 >
 > **What survives as canonical:** the `LanguageAdapter` trait shape
@@ -62,7 +61,7 @@ flip.
 | 8 | **Swift** | `tree-sitter-swift` (need to add) | iOS / macOS code |
 | 9 | **Kotlin** | `tree-sitter-kotlin` (community-maintained, verify quality) | Android + JVM |
 | 10 | **Dart** | `tree-sitter-dart` (community-maintained) | needed for Flutter (Tier B #14) |
-| 11 | **Rust** | `tree-sitter-rust` (added 2026-04-27, V3.9) | aegis self-dogfood — without it `aegis scan` skips its own crates |
+| 11 | **Rust** | `tree-sitter-rust` (added 2026-04-27) | aegis self-dogfood — without it `aegis scan` skips its own crates |
 
 ### Tier B — Frameworks (specialisation on a Tier A language)
 
@@ -368,13 +367,13 @@ Same verification needed.
 
 **Estimated session count:** 2.
 
-### Phase 4.5 — Rust (V3.9, 2026-04-27)
+### Phase 4.5 — Rust (2026-04-27)
 
 **Why retroactively:** the original plan stopped at Dart because the
-audience was assumed to be polyglot end-users. V3.9 added the
-`aegis chat` agent — at which point aegis became a Rust workspace
-that wanted to scan itself, and "skip 1,300 of your own files" was
-not acceptable. Adding Rust is dogfood, not feature.
+audience was assumed to be polyglot end-users. On 2026-04-27 aegis
+became a Rust workspace that wanted to scan itself, and "skip 1,300
+of your own files" was not acceptable. Adding Rust is dogfood, not
+feature.
 
 **Files added:**
 - `Cargo.toml`: `tree-sitter-rust = "0.20"` (one line)

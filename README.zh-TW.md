@@ -20,7 +20,7 @@ Aegis 是給 LLM 系統用的、以約束為基礎的行為控管框架。
 （廣義地說：一個驗證環境，而不是代理驅動器。）
 
 跨領域的框架層定義請見 [`docs/framework.md`](docs/framework.md)。
-`aegis-agent` 是其中一個實作案例：把 Aegis 套用到代理驅動的
+本 repo 是程式碼變動域上的 reference implementation：把 Aegis 套用到代理驅動的
 程式碼變更上。
 
 **Aegis 不寫程式，也不告訴 LLM 該怎麼寫程式。它只裁決 LLM
@@ -205,50 +205,6 @@ aegis-mcp     # stdio JSON-RPC，MCP protocol 2025-06-18
 `validate_change(path, new_content, old_content?)` 拿回一個
 `{decision, reasons, signals_after, …}` 的裁決。純觀察——
 絕不指導代理（見 [Design principles](#設計原則)）。
-
-### `aegis chat` — 互動式編碼代理（V3）
-
-建在同一組原語上，`aegis chat` 是個 substrate 模式的代理：
-透過環境變數選 provider，進到一個有行編輯 + slash 命令 +
-markdown 渲染的 REPL。三種模式自動偵測：
-
-```bash
-aegis chat "explain this concept"        # 一次性
-echo "task" | aegis chat                 # 透過 pipe → 一次性
-aegis chat                               # tty → 互動 REPL
-```
-
-Provider 環境變數（先 match 的優先）：
-
-```bash
-# OpenAI 相容（涵蓋 OpenRouter / Groq / Ollama / vLLM / 等）
-export AEGIS_OPENAI_BASE_URL=https://openrouter.ai/api/v1
-export AEGIS_OPENAI_API_KEY=sk-or-v1-...
-export AEGIS_OPENAI_MODEL=meta-llama/llama-3.3-70b-instruct
-
-# Anthropic
-export AEGIS_ANTHROPIC_API_KEY=sk-ant-...
-export AEGIS_ANTHROPIC_MODEL=claude-haiku-4-5
-
-# Gemini
-export AEGIS_GEMINI_API_KEY=AIza...
-export AEGIS_GEMINI_MODEL=gemini-2.5-flash
-```
-
-常用旗標：
-
-```bash
-aegis chat --tools --workspace .                # 加上 Read/Glob/Grep 工具
-aegis chat --tools --mcp aegis-mcp              # 把 aegis-mcp 掛成工具
-aegis chat --verify                             # 自動偵測測試 runner
-aegis chat --cost-budget 5.0                    # 累積退化超過時終止
-aegis chat --permission-mode read-only          # 最安全的沙箱模式
-```
-
-V3 的四個區隔點（PreToolUse aegis-predict、跨輪成本追蹤、
-verifier 驅動完成、stalemate 偵測）都已接好；完整使用流程
-見 [`docs/v3_dogfood.md`](docs/v3_dogfood.md)，設計依據見
-[`docs/v3_agent_design.md`](docs/v3_agent_design.md)。
 
 ---
 

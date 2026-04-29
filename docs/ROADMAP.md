@@ -51,61 +51,34 @@ framing (each is a rejection valve, none is a goal-direction signal).
 
 ---
 
-## V3 — substrate + hand (DONE 2026-04-27)
+## V3 — substrate + hand (REMOVED 2026-04-29)
 
-**`aegis-agent` — a coding agent built on aegis primitives.**
-Full design rationale in
-[`docs/v3_agent_design.md`](v3_agent_design.md). All eight V3 phases
-(V3.0 through V3.7) shipped in one day. Workspace test count went
-from 140 → 260 (+120 from V3 work).
+V3 (`aegis-agent`) was a coding agent built on aegis primitives.
+All eight phases (V3.0 through V3.8) shipped in one day on
+2026-04-27, adding 295 tests to the workspace.
 
-Why V3 takes priority over V2 release polish:
+On 2026-04-29 the crate was removed to keep this repository
+focused on the control surface — aegis is the harness, not the
+agent. Pre-removal V3 codebase is recoverable at tag
+[`v0.1.1-pre-extract`](https://github.com/wei9072/aegis/tree/v0.1.1-pre-extract).
 
-- Side-channel mode (`aegis-mcp` + PreToolUse hook) covers vibe-coding
-  but `aegis pipeline run` is too primitive for "give it a ticket and
-  walk away" agentic-development scenarios
-- Without an agent surface, aegis cannot serve the use case it claims
-  to support — releasing V2 binaries on top of an under-served use
-  case is premature
-- `claw-code` (MIT) provides ~11k LOC of conversation / tool / API /
-  session / hook scaffolding that aegis-agent can borrow, cutting the
-  estimated time from 6+ months (zero) to 8–12 weeks
-
-The four aegis-specific differentiation points (which no other coding
-agent has):
+The four aegis-specific differentiation patterns V3 explored
+remain valid for any future proposer-side implementation:
 1. PreToolUse aegis-verdict prediction (agent self-rejects bad plans)
 2. Cross-turn structural cost tracking
 3. Verifier-driven done (LLM cannot single-handedly claim "done")
 4. Stalemate / thrashing detection at session level
 
-### V3 phase status
-
-| Phase | Content | Status |
-|---|---|---|
-| **V3.0** — Skeleton + contract tests | Crate exists, type scaffolding, 9 framing contract tests | ✅ Done (2026-04-27) |
-| **V3.1a** — Conversation skeleton from claw-code | `ConversationRuntime`, `ApiClient` / `ToolExecutor` traits, message types, scripted stubs | ✅ Done (2026-04-27) |
-| **V3.1b** — OpenAI-compat provider | `HttpClient` abstraction (UreqClient + StubHttpClient), `OpenAiCompatProvider` covering OpenRouter / Groq / Ollama / vLLM / llama.cpp / LMStudio / DashScope via `base_url` config; non-streaming, no-auto-retry on every error path | ✅ Done (2026-04-27) |
-| **V3.2a** — Anthropic Messages provider | `AnthropicProvider` — different wire format from OpenAI (system as top-level field, content blocks inside messages, tool_result as user-role messages, x-api-key auth, anthropic-version header). Thinking blocks dropped, no streaming. | ✅ Done (2026-04-27) |
-| **V3.2b** — MCP client | Hand-rolled JSON-RPC 2.0 over stdio. `JsonRpcTransport` trait abstraction (StdioTransport for subprocess, ScriptedTransport for tests). McpClient handles initialize handshake + tools/list + tools/call. McpToolExecutor wraps as ToolExecutor for the conversation runtime. End-to-end verified against real `aegis-mcp` binary. NO retry on any failure path. | ✅ Done (2026-04-27) |
-| **V3.2c** — Gemini provider | Google's `generateContent` format — URL-embedded model, `model` role, `parts[]` blocks, `functionCall` parts, `systemInstruction` field, `x-goog-api-key` auth | ✅ Done (2026-04-27) |
-| **V3.3** — Differentiation A + B | PreToolUse aegis-predict (calls aegis-mcp validate_change before file-write tools; BLOCK skips execution + LLM sees structured reasons) + cross-turn cost tracker (per-file baseline + cumulative regression; CostBudgetExceeded terminates session) | ✅ Done (2026-04-27) |
-| **V3.4** — Differentiation C | Verifier integration: AgentTaskVerifier trait + ShellVerifier / TestVerifier / BuildVerifier / CompositeVerifier impls. When LLM stops emitting tool_use, verifier runs and overrides claim → PlanDoneVerified / PlanDoneVerifierRejected | ✅ Done (2026-04-27) |
-| **V3.5** — Differentiation D | StalemateDetector at session level (3 successive identical cost totals → StoppedReason::StalemateDetected; matches aegis-runtime threshold for cadence parity) | ✅ Done (2026-04-27) |
-| **V3.6** — Hooks + permissions parity | PermissionPolicy with three modes (ReadOnly / WorkspaceWrite / DangerFullAccess); PreToolUseHookPredictor for shell-command hooks compatible with Claude Code's protocol (exit 2 = block) | ✅ Done (2026-04-27) |
-| **V3.7** — Session + compaction + dogfood | Session serde + atomic save_to / load_from; compact_drop_oldest helper; chat_demo example wiring all 3 providers end-to-end | ✅ Done (2026-04-27) |
-| **V3.8** — `aegis chat` CLI + REPL polish | `aegis chat` subcommand with one-shot / pipe / interactive REPL modes; markdown rendering + spinner + rustyline editor + slash-command tab completion (adapted from claw-code MIT); `/reset` clears session; ReadOnlyTools (Read/Glob/Grep) + `--tools` flag; MultiToolExecutor for combining sources; `--mcp` flag mounts MCP servers (including aegis-mcp) as additional tool sources; OpenAI-compat SSE streaming via `stream_with_callback` (non-streaming providers fall back to event-vec replay); per-event REPL rendering with markdown finalisation. Dogfood doc in [`v3_dogfood.md`](v3_dogfood.md). | ✅ Done (2026-04-27) |
-
 ---
 
-## Deferred — V2 release artifacts
+## V2 release artifacts
 
 V2.0 templates (cross-platform release workflow, Homebrew formula,
 npm wrapper) are committed under `.github/workflows/` + `packaging/`.
-**Activation deferred until V3.5** — no point shipping pre-built
-binaries before the agent surface is usable. Once V3.5 lands, the
-activation steps remain mechanical:
+With V3 removed, the activation gate that previously blocked them
+no longer applies. Activation steps remain mechanical:
 
-1. `git tag v0.1.0 && git push origin v0.1.0` — triggers cross-platform build
+1. `git tag v0.1.1 && git push origin v0.1.1` — triggers cross-platform build
 2. Create `wei9072/homebrew-aegis` tap repo + paste formula + fill sha256s
 3. `npm publish --access public` from `packaging/npm/`
 4. `cargo publish` each crate in dep order
@@ -127,20 +100,10 @@ run` to confirm the framework is implementation-independent.
 user having LLM API budget for ~70 minutes of wall-clock per
 sweep matrix. Not a code task.
 
-### Batteries-included `TaskVerifier` impls (unblocks V3.4)
-
-The `TaskVerifier` trait exists in `crates/aegis-decision/src/task.rs`
-but no concrete impls ship. V3.4 needs at least two:
-- `TestVerifier` (auto-detect `cargo test` / `pytest` / `npm test`)
-- `BuildVerifier` (auto-detect `cargo check` / `tsc --noEmit` / `mypy`)
-
-Plus a `ShellVerifier` escape hatch (any user-supplied command). See
-the three-wave integration plan in earlier design discussion (also
-captured in [`v3_agent_design.md`](v3_agent_design.md) §"Differentiation point 3").
 
 ---
 
-## Backlog (post-V3, evidence-gated)
+## Backlog (evidence-gated)
 
 These are recorded so that PRs proposing them get a structured
 "yes/no" rather than ad-hoc reasoning. **None of them get built
@@ -161,12 +124,12 @@ framing. All three.
 | What | Why deferred | Trigger |
 | :--- | :--- | :--- |
 | Per-language `max_chain_depth` overrides (Java, Dart) | Default walker under-counts on these — flagged 🟡 in README | A user complains the chain-depth signal is wrong on their codebase |
-| Cross-edit regression detection in MCP/hook mode | Currently each Edit is judged individually; LLM can do 5 separately-OK edits that compound to bad. **V3 substrate mode covers this natively; MCP-mode session memory is the back-port.** | Empirical case where this matters AND user is on Claude Code (not aegis-agent) |
+| Cross-edit regression detection in MCP/hook mode | Currently each Edit is judged individually; LLM can do 5 separately-OK edits that compound to bad. Needs MCP-mode session memory across calls. | Empirical case where this matters from a real user on Cursor / Claude Code / Aider |
 | `aegis sweep` subcommand | Replaces `scripts/v1_validation.py`; needed to run V1.8 in batch | When V1.8 sweep starts |
 | Per-language tree-sitter grammar bumps to 0.22+ | Kotlin / Dart pinned to old crates because of ABI mismatch | If grammar quality on those languages becomes a problem |
 | `cyclic_dependency` Ring 0 signal | Petgraph + import-query, ~150 LOC. V0.x designed but never shipped | Any time — clean structural signal, passes negative-space check |
 | `cognitive_complexity` Ring 0.5 signal | Per-function AST walk, ~200 LOC + 10 `.scm` queries. SonarSource's definition is the cross-language standard | Any time — same rationale |
-| `LLMJudgeVerifier` for SRP / cohesion / SoC checks | One LLM call per verify; subject to its own self-eval bias (smaller than first-LLM bias, but real) | After V3.4 ships and a real user reports verifier coverage gap |
+| `LLMJudgeVerifier` for SRP / cohesion / SoC checks | One LLM call per verify; subject to its own self-eval bias (smaller than first-LLM bias, but real) | A real user reports verifier coverage gap on the `TaskVerifier` trait in `aegis-decision` |
 
 ### Explicitly NOT on the roadmap
 
@@ -184,10 +147,12 @@ for the full list and rationale.
   built **on top of** Aegis, not in Aegis itself
 - **Auto-retry / verifier-feedback loop** — non-negotiable hill;
   structurally enforced by
-  `crates/aegis-decision/src/task.rs::tests::task_verdict_has_no_feedback_field`
-  AND (V3) the three contract tests in `crates/aegis-agent/tests/`
+  `crates/aegis-decision/src/task.rs::tests::task_verdict_has_no_feedback_field`.
+  The V3 era added three additional contract tests
   (`no_auto_retry.rs`, `verifier_drives_done.rs`,
-  `no_coaching_injection.rs`)
+  `no_coaching_injection.rs`) which were removed alongside the
+  `aegis-agent` crate on 2026-04-29; if a future proposer-side
+  implementation is built, the same contracts should travel with it.
 
 ---
 

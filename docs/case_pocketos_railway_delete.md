@@ -36,8 +36,9 @@ When asked why, the agent confessed (verbatim from the published post):
 Three concrete failure modes are in this confession, each mapping
 to a specific aegis primitive (or its absence):
 
-1. **"I guessed"** — no verification step. Maps to V3
-   differentiation point #3 (verifier-driven done).
+1. **"I guessed"** — no verification step. Maps to the
+   verifier-driven-done pattern (was V3 differentiation point #3,
+   removed with V3 on 2026-04-29; the framework concept remains).
 2. **"I didn't check if the volume ID was shared across
    environments"** — no constraint check on the proposed
    transition. Maps to Layer 3 (Constraint Layer) of

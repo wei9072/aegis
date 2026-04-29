@@ -4,15 +4,20 @@ This document defines Aegis at the framework level.
 
 > **Status of this document.** Aegis as a five-layer admission
 > control framework is articulated here for the first time. The
-> reference implementation (`aegis-agent`) realises the framework
-> on the code-change domain. Other domains named in §2 are framework
-> targets, not validated cases. This document defines intent +
-> abstraction; per-domain evidence accumulates separately.
+> code-change domain adapter (this repo — `aegis-core`,
+> `aegis-runtime`, `aegis-mcp`) realises layers 1–5 for proposed
+> file-write transitions; the proposer (an agent that produces
+> those proposals) is out of scope for this codebase. Other
+> domains named in §2 are framework targets, not validated cases.
+> This document defines intent + abstraction; per-domain evidence
+> accumulates separately.
 
-`aegis-agent` is one implementation case: Aegis applied to
-agent-driven code changes. The framework itself is broader. It is a
-layered control architecture for deciding whether an agent-proposed
-state transition may persist in an external system.
+This repository is one implementation case: Aegis applied to the
+code-change domain — file-write transitions proposed by any
+upstream agent (Cursor, Claude Code, Aider, or a custom proposer).
+The framework itself is broader. It is a layered control
+architecture for deciding whether an agent-proposed state
+transition may persist in an external system.
 
 ---
 
@@ -58,12 +63,12 @@ operating mode. Humans appear when rules are insufficient, risk is
 too high, or competing constraints cannot be safely resolved by the
 system.
 
-> **Reference implementation status.** `aegis-agent` currently
-> realises `allow` / `warn` / `block` (`PolicyVerdict` in
-> `crates/aegis-core/src/policy.rs`). `escalate` is part of the
-> framework definition and lands in the reference impl when the
-> first concrete escalation case emerges in the code domain — the
-> trigger condition is pinned in the [PR #4
+> **Reference implementation status.** The code-domain adapter in
+> this repo currently realises `allow` / `warn` / `block`
+> (`PolicyVerdict` in `crates/aegis-core/src/policy.rs`).
+> `escalate` is part of the framework definition and lands when
+> the first concrete escalation case emerges — the trigger
+> condition is pinned in the [PR #4
 > review](https://github.com/wei9072/aegis/pull/4#issuecomment-4332452909).
 
 ---
@@ -117,7 +122,7 @@ This is the key boundary:
 > Aegis defines the control architecture; adapters define the state
 > semantics.
 
-Under this view, `aegis-agent` is simply:
+Under this view, this repository is simply:
 
 `Aegis Core + Code Adapter`
 
@@ -160,6 +165,6 @@ The practical consequence is that Aegis is not primarily a tool for
 improving model behavior. It is a framework for controlling how
 agent behavior is admitted into real-world state.
 
-That is why `aegis-agent` should be understood as a reference
-implementation, not the full definition of Aegis. The broader value
-lies in the control framework itself.
+That is why this repository should be understood as one reference
+implementation (the code-domain adapter), not the full definition
+of Aegis. The broader value lies in the control framework itself.

@@ -84,7 +84,7 @@ debug across user machines).
 - New Rust-native CLI replacing `aegis.cli`
 - New plugin SDK so third parties can add adapters/verifiers/providers
 
-**Explicitly NOT in scope (deferred to V3+):**
+**Explicitly NOT in scope:**
 
 - Vue / Angular SFC parsing (mixed-content; per
   multi_language_plan.md Phase 6)
