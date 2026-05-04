@@ -11,6 +11,7 @@ pub mod graph;
 pub mod signals;
 pub mod incremental;
 pub mod enforcement;
+pub mod reasons;
 pub mod security;
 pub mod scan;
 pub mod validate;

@@ -18,7 +18,7 @@
 
 use std::io::{self, BufRead, Write};
 
-use aegis_core::validate::validate_change;
+use aegis_core::validate::{validate_change, validate_change_with_workspace};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -137,13 +137,15 @@ fn handle_initialize(id: Value) -> JsonRpcResponse {
 }
 
 fn handle_tools_list(id: Value) -> JsonRpcResponse {
-    let tool = json!({
+    let single_file_tool = json!({
         "name": "validate_change",
-        "description": "Run Aegis Ring 0 + structural-signal extraction + \
-                        cost-aware regression detection on a proposed file \
-                        write. Returns the decision verdict without applying \
-                        the change. Pure observation — never coaches the \
-                        agent (post_launch_discipline.md).",
+        "description": "Fast single-file gate. Run Aegis Ring 0 (syntax) + \
+                        Ring 0.5 (structural signals + cost regression) + \
+                        Ring 0.7 (security anti-patterns) on a proposed file \
+                        write. Returns the decision without applying the \
+                        change. Pure observation — never coaches the agent. \
+                        Use this when the change is contained to one file or \
+                        when speed matters more than cross-file safety.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -167,17 +169,55 @@ fn handle_tools_list(id: Value) -> JsonRpcResponse {
             "required": ["path", "new_content"]
         }
     });
+    let workspace_tool = json!({
+        "name": "validate_change_with_workspace",
+        "description": "Workspace-aware gate (Ring 0 + 0.5 + 0.7 + R2). Adds \
+                        cross-file checks on top of validate_change: detects \
+                        when a change introduces a module import cycle, or \
+                        deletes a public symbol that other files in the \
+                        workspace still reference. Slower than validate_change \
+                        because it walks the workspace tree; prefer this when \
+                        the change touches a public API or shared module.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute or workspace-relative path the \
+                                    agent intends to write."
+                },
+                "new_content": {
+                    "type": "string",
+                    "description": "Full file contents the agent intends to write."
+                },
+                "old_content": {
+                    "type": "string",
+                    "description": "Optional baseline for cost-aware regression."
+                },
+                "workspace_root": {
+                    "type": "string",
+                    "description": "Absolute path to the project root. Used to \
+                                    build a one-shot workspace index for cycle \
+                                    detection and public-symbol reference \
+                                    tracking."
+                }
+            },
+            "required": ["path", "new_content", "workspace_root"]
+        }
+    });
     JsonRpcResponse {
         jsonrpc: "2.0",
         id,
-        result: Some(json!({ "tools": [tool] })),
+        result: Some(json!({
+            "tools": [single_file_tool, workspace_tool]
+        })),
         error: None,
     }
 }
 
 fn handle_tools_call(id: Value, params: &Value) -> JsonRpcResponse {
     let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    if name != "validate_change" {
+    if name != "validate_change" && name != "validate_change_with_workspace" {
         return JsonRpcResponse {
             jsonrpc: "2.0",
             id,
@@ -206,7 +246,23 @@ fn handle_tools_call(id: Value, params: &Value) -> JsonRpcResponse {
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    let verdict = validate_change(&path, &new_content, old_content.as_deref()).to_value();
+    let verdict = if name == "validate_change_with_workspace" {
+        let workspace_root = match args.get("workspace_root").and_then(|v| v.as_str()) {
+            Some(r) => r.to_string(),
+            None => {
+                return tool_error(id, "missing required argument 'workspace_root'");
+            }
+        };
+        validate_change_with_workspace(
+            &path,
+            &new_content,
+            old_content.as_deref(),
+            &workspace_root,
+        )
+        .to_value()
+    } else {
+        validate_change(&path, &new_content, old_content.as_deref()).to_value()
+    };
     JsonRpcResponse {
         jsonrpc: "2.0",
         id,
