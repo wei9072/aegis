@@ -108,7 +108,7 @@ fn is_transparent_wrapper(kind: &str) -> bool {
     )
 }
 
-fn default_chain_depth(node: Node) -> usize {
+pub fn default_chain_depth(node: Node) -> usize {
     let kind = node.kind();
     // Transparent wrappers — recurse into the inner expression
     // without consuming a depth unit. `(await x).y.z` should still

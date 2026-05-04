@@ -69,6 +69,13 @@ pub struct ValidateVerdict {
     /// public_symbol_removed > Ring 0.5 signal regression.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_blocker: Option<Value>,
+    /// S7.2: file's structural role in the workspace. Populated only
+    /// by `validate_change_with_workspace` (single-file callers don't
+    /// have enough context to compute it). Lets reviewers and agents
+    /// see whether high fan_out is "expected for an entry file" or
+    /// "suspicious for a core utility".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_role: Option<Value>,
 }
 
 fn default_schema_version() -> String {
@@ -170,6 +177,7 @@ pub fn validate_change(
             regression_detail: None,
             signal_deltas: None,
             primary_blocker: None,
+            file_role: None,
         };
     }
 
@@ -190,6 +198,7 @@ pub fn validate_change(
                 regression_detail: None,
                 signal_deltas: None,
                 primary_blocker: None,
+            file_role: None,
             };
         }
     };
@@ -233,6 +242,7 @@ pub fn validate_change(
             regression_detail: None,
             signal_deltas: None,
             primary_blocker: primary,
+        file_role: None,
         };
     }
 
@@ -266,6 +276,9 @@ pub fn validate_change(
                 value: unresolved_local_import_count(path, new_content),
                 file_path: path.to_string(),
                 description: "Relative imports that don't resolve to an existing file".into(),
+                severity: crate::signal_layer_pyapi::severity_for(
+                    "unresolved_local_import_count",
+                ),
             });
             v
         }
@@ -285,6 +298,7 @@ pub fn validate_change(
                 regression_detail: None,
                 signal_deltas: None,
                 primary_blocker: None,
+            file_role: None,
             };
         }
     };
@@ -312,6 +326,9 @@ pub fn validate_change(
                 value: unresolved_local_import_count(path, old),
                 file_path: path.to_string(),
                 description: "Relative imports that don't resolve to an existing file".into(),
+                severity: crate::signal_layer_pyapi::severity_for(
+                    "unresolved_local_import_count",
+                ),
             });
             cleanup(&old_path);
 
@@ -333,6 +350,12 @@ pub fn validate_change(
             let mut growers: Map<String, Value> = Map::new();
             let mut shrinkers: Map<String, Value> = Map::new();
             let mut deltas: Map<String, Value> = Map::new();
+            // S7.1: split growers by severity. Only Block-severity
+            // regressions cause a BLOCK reason. Warn-severity
+            // regressions emit a separate `signal_warning` reason
+            // that does not, by itself, fail the verdict.
+            let mut block_growers: Map<String, Value> = Map::new();
+            let mut warn_growers: Map<String, Value> = Map::new();
             let keys: std::collections::BTreeSet<String> = signals_after
                 .keys()
                 .chain(sb.keys())
@@ -341,28 +364,70 @@ pub fn validate_change(
             for key in keys {
                 let a = signals_after.get(&key).and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let b = sb.get(&key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let sev = crate::signal_layer_pyapi::severity_for(&key);
                 if a > b {
                     let delta = ((a - b) * 10_000.0).round() / 10_000.0;
                     growers.insert(key.clone(), json!(delta));
-                    deltas.insert(key, json!({"status": "regressed", "delta": delta}));
+                    deltas.insert(
+                        key.clone(),
+                        json!({
+                            "status": "regressed",
+                            "delta": delta,
+                            "severity": sev.as_str(),
+                        }),
+                    );
+                    match sev {
+                        crate::signal_layer_pyapi::SignalSeverity::Block => {
+                            block_growers.insert(key, json!(delta));
+                        }
+                        crate::signal_layer_pyapi::SignalSeverity::Warn => {
+                            warn_growers.insert(key, json!(delta));
+                        }
+                        crate::signal_layer_pyapi::SignalSeverity::Info => {}
+                    }
                 } else if b > a {
                     let delta = ((b - a) * 10_000.0).round() / 10_000.0;
                     shrinkers.insert(key.clone(), json!(delta));
-                    deltas.insert(key, json!({"status": "improved", "delta": delta}));
+                    deltas.insert(
+                        key,
+                        json!({
+                            "status": "improved",
+                            "delta": delta,
+                            "severity": sev.as_str(),
+                        }),
+                    );
                 } else {
-                    deltas.insert(key, json!({"status": "unchanged", "delta": 0.0}));
+                    deltas.insert(
+                        key,
+                        json!({
+                            "status": "unchanged",
+                            "delta": 0.0,
+                            "severity": sev.as_str(),
+                        }),
+                    );
                 }
             }
             signal_deltas = Some(deltas);
-            if !growers.is_empty() {
-                regression_detail = Some(growers.clone());
+            if !block_growers.is_empty() {
+                regression_detail = Some(block_growers.clone());
                 reasons.push(json!({
                     "layer": "regression",
                     "decision": "block",
                     "reason": "signal_regressed",
                     "detail": format!(
-                        "regressed signals: {:?}; improved: {:?}",
-                        growers, shrinkers
+                        "block-severity signals regressed: {:?}; improved: {:?}",
+                        block_growers, shrinkers
+                    ),
+                }));
+            }
+            if !warn_growers.is_empty() {
+                reasons.push(json!({
+                    "layer": "regression",
+                    "decision": "warn",
+                    "reason": "signal_warning",
+                    "detail": format!(
+                        "heuristic signals regressed (informational, not blocking): {:?}",
+                        warn_growers
                     ),
                 }));
             }
@@ -395,6 +460,7 @@ pub fn validate_change(
         regression_detail,
         signal_deltas,
         primary_blocker: primary,
+        file_role: None,
     }
 }
 
@@ -440,6 +506,48 @@ pub fn validate_change_with_workspace(
     // S5: use the cached build so repeated PreToolUse hook calls
     // re-parse only changed files, not the whole tree every time.
     let baseline = WorkspaceIndex::build_cached(root);
+
+    // S7.2 + S7.3: file-role classification with z-scores against
+    // the workspace baseline. Compute against the *post-change*
+    // index so the role reflects what we're about to commit.
+    let after_for_role = baseline.with_change(&path_buf, new_content);
+    let role = after_for_role.role_hint(&path_buf);
+    let fan_in = after_for_role.fan_in(&path_buf);
+    let fan_out_proj = after_for_role.fan_out(&path_buf);
+    let instability = after_for_role.instability(&path_buf);
+    let fan_out_z = after_for_role.fan_out_z_score(&path_buf);
+    let fan_in_z = after_for_role.fan_in_z_score(&path_buf);
+    let project_fan_out_stats = after_for_role.fan_out_stats();
+    verdict.file_role = Some(json!({
+        "role": role,
+        "fan_in": fan_in,
+        "fan_out": fan_out_proj,
+        "instability": instability,
+        "fan_out_z_score": fan_out_z,
+        "fan_in_z_score": fan_in_z,
+        "project_fan_out_median": project_fan_out_stats.map(|(m, _, _)| m),
+        "project_fan_out_std": project_fan_out_stats.map(|(_, s, _)| s),
+    }));
+
+    // S7.2: when fan_out warning fires on an "entry" file, suppress
+    // it — high fan_out is the expected shape for an integration
+    // layer. Keep the warn for "core" / "ordinary" / "hub" files
+    // where fan_out growth is genuinely a coupling signal.
+    if role == "entry" {
+        verdict.reasons.retain(|r| {
+            let layer = r.get("layer").and_then(|v| v.as_str()).unwrap_or("");
+            let reason = r.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+            let detail = r.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+            // Drop only the warn-level signal_warning that names
+            // exclusively `fan_out` — keep everything else.
+            !(layer == "regression"
+                && reason == "signal_warning"
+                && detail.contains("fan_out")
+                && !detail.contains("max_chain_depth")
+                && !detail.contains("cyclomatic_complexity")
+                && !detail.contains("nesting_depth"))
+        });
+    }
 
     // --- Cycle introduction ---
     let after = baseline.with_change(&path_buf, new_content);
@@ -608,36 +716,53 @@ mod tests {
     }
 
     #[test]
-    fn block_on_cost_regression() {
-        // Old: simple file with 1 import. New: same file with many
-        // imports → fan_out grows → cost regresses.
+    fn fan_out_growth_warns_not_blocks_after_severity_split() {
+        // S7.1: fan_out is now warn-level. Adding many imports should
+        // be reported (so reviewers see it) but does not by itself
+        // cause BLOCK — a healthy entry/integration file legitimately
+        // grows imports as the system grows.
         let old = "import os\n";
         let new = "import os\nimport sys\nimport json\nimport time\nimport random\n\
                    import math\nimport re\nimport itertools\nimport functools\n\
                    import collections\nimport pathlib\nimport hashlib\n";
         let v = validate_change("foo.py", new, Some(old));
-        assert_eq!(v.decision, "BLOCK", "expected regression to BLOCK; got {v:?}");
-        assert!(v.regression_detail.is_some());
+        assert_eq!(v.decision, "WARN", "expected WARN, got {v:?}");
+        assert!(
+            v.reasons
+                .iter()
+                .any(|r| r["reason"] == "signal_warning"),
+            "expected signal_warning reason; got {v:?}"
+        );
     }
 
     #[test]
-    fn block_when_one_signal_regresses_even_if_total_unchanged() {
-        // Regression: previously a sum-only check let one signal mask another.
-        // Old: many shallow imports (high fan_out, low chain_depth).
-        // New: few imports but a deep call chain — total may be similar
-        //   or even lower, but chain_depth got worse → still BLOCK.
-        let old = "import os\nimport sys\nimport json\nimport re\nx = 1\n";
-        let new = "import os\nresult = a.b.c.d.e.f.g.h.i.j.k.l.m.n.o\n";
-        let v = validate_change("mix.py", new, Some(old));
-        assert_eq!(
-            v.decision, "BLOCK",
-            "per-signal regression should BLOCK even when sum drops; got {v:?}"
-        );
+    fn block_when_block_severity_signal_regresses() {
+        // S7.1: block-severity signals (e.g. unfinished_marker_count)
+        // still BLOCK. Adding a TODO is "verifiably bad" — there is
+        // no legitimate refactoring use case for "add more TODOs".
+        let old = "x = 1\n";
+        let new = "x = 1\n# TODO: revisit me\n# FIXME: race condition\n";
+        let v = validate_change("foo.py", new, Some(old));
+        assert_eq!(v.decision, "BLOCK", "expected BLOCK on TODO growth; got {v:?}");
         let detail = v.regression_detail.expect("regression_detail must be set");
         assert!(
-            detail.contains_key("max_chain_depth"),
-            "expected max_chain_depth in growers; got {detail:?}"
+            detail.contains_key("unfinished_marker_count"),
+            "expected unfinished_marker_count in block growers; got {detail:?}"
         );
+    }
+
+    #[test]
+    fn warn_growers_do_not_pollute_block_growers() {
+        // chain_depth (warn) regresses but unfinished_marker (block)
+        // doesn't — verdict should be WARN, not BLOCK. The chain
+        // delta still appears in signal_deltas for visibility.
+        let old = "import os\nx = 1\n";
+        let new = "import os\nresult = a.b.c.d.e.f.g.h.i.j.k.l.m.n.o\n";
+        let v = validate_change("mix.py", new, Some(old));
+        assert_eq!(v.decision, "WARN", "warn-level regression alone shouldn't BLOCK; got {v:?}");
+        let deltas = v.signal_deltas.expect("signal_deltas must be set");
+        assert_eq!(deltas["max_chain_depth"]["status"], "regressed");
+        assert_eq!(deltas["max_chain_depth"]["severity"], "warn");
     }
 
     #[test]

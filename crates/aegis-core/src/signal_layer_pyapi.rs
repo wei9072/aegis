@@ -4,7 +4,52 @@
 //! the `_pyapi` suffix is now historical — the file is pure Rust as
 //! of V1.10. A rename is a backlogged hygiene item.
 
+use serde::{Deserialize, Serialize};
+
 use crate::signals::{chain_depth_signal, fan_out_signal, smell_counts};
+
+/// S7.1 — How seriously the cost-regression layer should treat a
+/// regression of this signal.
+///
+/// - `Block`: the signal is "verifiably bad" — its growth has
+///   essentially no legitimate use case. A regression triggers BLOCK.
+///   Examples: empty_handler, unreachable_stmt, mutable_default_arg,
+///   suspicious_literal, unresolved_local_import, test_count_lost.
+///
+/// - `Warn`: the signal is "heuristically suspicious" — usually bad
+///   but a refactoring legitimately raises it (adding a guard clause
+///   raises cyclomatic; an entry file legitimately raises fan_out).
+///   A regression is reported but does NOT trigger BLOCK on its own.
+///   Examples: fan_out, max_chain_depth, cyclomatic_complexity,
+///   nesting_depth.
+///
+/// - `Info`: pure observation. Reported in signal_deltas but never
+///   flagged. Currently unused; reserved for project-statistics
+///   signals where there is no inherent direction (yet).
+///
+/// Why this exists: aegis's earlier sum-then-per-signal evolution
+/// treated all signals as block-level, which produced false positives
+/// on legitimate refactors that shifted shape (e.g., splitting a god
+/// function into modules raised fan_out → BLOCK). Severity-tagged
+/// signals let the discipline ("only reject what is verifiably bad")
+/// hold for the strict ones while the heuristic ones become advice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalSeverity {
+    Block,
+    Warn,
+    Info,
+}
+
+impl SignalSeverity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SignalSeverity::Block => "block",
+            SignalSeverity::Warn => "warn",
+            SignalSeverity::Info => "info",
+        }
+    }
+}
 
 /// Pure-data signal record. The Python-facing `Signal` struct that
 /// previously lived here was deleted along with the `aegis-pyshim`
@@ -17,6 +62,41 @@ pub struct SignalData {
     pub value: f64,
     pub file_path: String,
     pub description: String,
+    pub severity: SignalSeverity,
+}
+
+/// Severity registry. Looking it up by name lets `validate.rs`
+/// classify a signal that came in via cost regression. Used for
+/// constructing SignalData in this module too.
+pub fn severity_for(name: &str) -> SignalSeverity {
+    match name {
+        // Verifiably bad — these have no legitimate growth case.
+        "empty_handler_count"
+        | "unreachable_stmt_count"
+        | "mutable_default_arg_count"
+        | "shadowed_local_count"
+        | "suspicious_literal_count"
+        | "unresolved_local_import_count"
+        | "unfinished_marker_count"
+        | "test_count_lost" => SignalSeverity::Block,
+        // Heuristically suspicious — fan_out / chain_depth /
+        // cyclomatic / nesting_depth are valid signals to report
+        // but should never solely block a change. They false-positive
+        // on entry files, on legitimate guard clauses, on adding new
+        // branches for new business logic, etc.
+        "fan_out"
+        | "max_chain_depth"
+        | "cyclomatic_complexity"
+        | "nesting_depth" => SignalSeverity::Warn,
+        // S7.4 — pure visibility, never blocks or warns alone.
+        "member_access_count" | "type_leakage_count" => SignalSeverity::Info,
+        // S7.5 — heuristic Demeter signal; warn-level so reviewers
+        // see it but it doesn't block by itself.
+        "cross_module_chain_count" => SignalSeverity::Warn,
+        // Default: unknown signals get Warn so they're at least
+        // visible without making the verdict noisy.
+        _ => SignalSeverity::Warn,
+    }
 }
 
 /// Pure-Rust signal extraction. Returns the union of:
@@ -32,109 +112,140 @@ pub fn extract_signals_native(filepath: &str) -> Result<Vec<SignalData>, String>
     let depth = chain_depth_signal(filepath)?;
     let smells = smell_counts(filepath).unwrap_or_default();
 
+    fn make(name: &str, value: f64, filepath: &str, description: String) -> SignalData {
+        SignalData {
+            name: name.to_string(),
+            value,
+            file_path: filepath.to_string(),
+            description,
+            severity: severity_for(name),
+        }
+    }
     Ok(vec![
-        SignalData {
-            name: "fan_out".to_string(),
-            value: fan_out,
-            file_path: filepath.to_string(),
-            description: format!(
-                "Number of unique external imports (fan-out = {})",
-                fan_out as usize
-            ),
-        },
-        SignalData {
-            name: "max_chain_depth".to_string(),
-            value: depth,
-            file_path: filepath.to_string(),
-            description: format!(
-                "Maximum method/attribute chain depth (depth = {})",
-                depth as usize
-            ),
-        },
-        SignalData {
-            name: "empty_handler_count".to_string(),
-            value: smells.empty_handler_count,
-            file_path: filepath.to_string(),
-            description: format!(
-                "Empty catch/except handlers (count = {})",
+        make(
+            "fan_out",
+            fan_out,
+            filepath,
+            format!("Unique external imports (fan-out = {})", fan_out as usize),
+        ),
+        make(
+            "max_chain_depth",
+            depth,
+            filepath,
+            format!("Max method/attribute chain depth ({})", depth as usize),
+        ),
+        make(
+            "empty_handler_count",
+            smells.empty_handler_count,
+            filepath,
+            format!(
+                "Empty catch/except handlers ({})",
                 smells.empty_handler_count as usize
             ),
-        },
-        SignalData {
-            name: "unfinished_marker_count".to_string(),
-            value: smells.unfinished_marker_count,
-            file_path: filepath.to_string(),
-            description: format!(
-                "TODO/FIXME/todo!() markers (count = {})",
+        ),
+        make(
+            "unfinished_marker_count",
+            smells.unfinished_marker_count,
+            filepath,
+            format!(
+                "TODO/FIXME/todo!() markers ({})",
                 smells.unfinished_marker_count as usize
             ),
-        },
-        SignalData {
-            name: "unreachable_stmt_count".to_string(),
-            value: smells.unreachable_stmt_count,
-            file_path: filepath.to_string(),
-            description: format!(
-                "Statements after a return/throw/break/continue (count = {})",
+        ),
+        make(
+            "unreachable_stmt_count",
+            smells.unreachable_stmt_count,
+            filepath,
+            format!(
+                "Statements after return/throw/break/continue ({})",
                 smells.unreachable_stmt_count as usize
             ),
-        },
-        SignalData {
-            name: "cyclomatic_complexity".to_string(),
-            value: smells.cyclomatic_complexity,
-            file_path: filepath.to_string(),
-            description: format!(
-                "Branching constructs (count = {})",
+        ),
+        make(
+            "cyclomatic_complexity",
+            smells.cyclomatic_complexity,
+            filepath,
+            format!(
+                "Branching constructs ({})",
                 smells.cyclomatic_complexity as usize
             ),
-        },
-        SignalData {
-            name: "nesting_depth".to_string(),
-            value: smells.nesting_depth,
-            file_path: filepath.to_string(),
-            description: format!(
-                "Max nesting depth (depth = {})",
-                smells.nesting_depth as usize
-            ),
-        },
-        SignalData {
-            name: "suspicious_literal_count".to_string(),
-            value: smells.suspicious_literal_count,
-            file_path: filepath.to_string(),
-            description: format!(
-                "Hardcoded secrets/localhost/local-paths (count = {})",
+        ),
+        make(
+            "nesting_depth",
+            smells.nesting_depth,
+            filepath,
+            format!("Max nesting depth ({})", smells.nesting_depth as usize),
+        ),
+        make(
+            "suspicious_literal_count",
+            smells.suspicious_literal_count,
+            filepath,
+            format!(
+                "Hardcoded secrets / localhost / local paths ({})",
                 smells.suspicious_literal_count as usize
             ),
-        },
-        SignalData {
-            name: "mutable_default_arg_count".to_string(),
-            value: smells.mutable_default_arg_count,
-            file_path: filepath.to_string(),
-            description: format!(
-                "Mutable default args like def f(x=[]) (count = {})",
+        ),
+        make(
+            "mutable_default_arg_count",
+            smells.mutable_default_arg_count,
+            filepath,
+            format!(
+                "Mutable default args like def f(x=[]) ({})",
                 smells.mutable_default_arg_count as usize
             ),
-        },
-        SignalData {
-            name: "shadowed_local_count".to_string(),
-            value: smells.shadowed_local_count,
-            file_path: filepath.to_string(),
-            description: format!(
-                "Same-scope variable rebinds (count = {})",
+        ),
+        make(
+            "shadowed_local_count",
+            smells.shadowed_local_count,
+            filepath,
+            format!(
+                "Same-scope variable rebinds ({})",
                 smells.shadowed_local_count as usize
             ),
-        },
+        ),
         // S4.1: test_count is INVERSE — losing tests is the smell.
         // We negate it before participating in cost regression so the
-        // delta layer treats "test_count goes from 10 → 7" as growth.
-        SignalData {
-            name: "test_count_lost".to_string(),
-            value: -smells.test_count,
-            file_path: filepath.to_string(),
-            description: format!(
-                "Negated test count (smaller = more tests = better). \
-                 Current test_count={}",
+        // delta layer treats test_count 10→7 as growth.
+        make(
+            "test_count_lost",
+            -smells.test_count,
+            filepath,
+            format!(
+                "Negated test count (lower = more tests = better). Current = {}",
                 smells.test_count as usize
             ),
-        },
+        ),
+        // S7.4: member-access count and type-leakage. Both info-
+        // level — they're context for reviewers, not block triggers.
+        make(
+            "member_access_count",
+            smells.member_access_count,
+            filepath,
+            format!(
+                "Attribute / member-access expressions ({})",
+                smells.member_access_count as usize
+            ),
+        ),
+        make(
+            "type_leakage_count",
+            smells.type_leakage_count,
+            filepath,
+            format!(
+                "External-type references in public signatures ({})",
+                smells.type_leakage_count as usize
+            ),
+        ),
+        // S7.5: chains depth >= 3 whose root looks external. Closer
+        // proxy for "Demeter violation across modules" than
+        // max_chain_depth alone, but still a heuristic.
+        make(
+            "cross_module_chain_count",
+            smells.cross_module_chain_count,
+            filepath,
+            format!(
+                "Chains depth>=3 with externally-rooted receiver ({})",
+                smells.cross_module_chain_count as usize
+            ),
+        ),
     ])
 }

@@ -107,6 +107,101 @@ impl WorkspaceIndex {
             .count()
     }
 
+    /// fan_out of `path` from this index (count of unique imports
+    /// it makes). Returns 0 if the path is unknown to the index —
+    /// matches `fan_in`'s convention.
+    pub fn fan_out(&self, path: &Path) -> usize {
+        self.files
+            .get(path)
+            .map(|s| s.imports.len())
+            .unwrap_or(0)
+    }
+
+    /// S7.2 — Robert Martin's instability metric:
+    ///     I = fan_out / (fan_in + fan_out)
+    /// Range [0.0, 1.0]:
+    ///   - 0.0  → "stable": many depend on me, I depend on nobody.
+    ///           Should be abstract (interface / contract). Changing
+    ///           this file ripples through the workspace.
+    ///   - 1.0  → "unstable": I depend on many, nobody depends on me.
+    ///           Probably an entry point / leaf consumer. Changing
+    ///           this file is local to itself.
+    /// Returns None when both fan_in and fan_out are zero (file has
+    /// no relationships either direction — I is undefined).
+    pub fn instability(&self, path: &Path) -> Option<f64> {
+        let fan_in = self.fan_in(path) as f64;
+        let fan_out = self.fan_out(path) as f64;
+        let total = fan_in + fan_out;
+        if total == 0.0 {
+            None
+        } else {
+            Some(fan_out / total)
+        }
+    }
+
+    /// S7.3 — project-wide statistics for fan_out / fan_in. Used by
+    /// callers to compute z-scores and tell whether one file's
+    /// numbers are unusual for THIS project. fan_out=20 is normal in
+    /// a Java enterprise codebase, anomalous in a small Python tool.
+    /// Returns `(median, std_dev, count)` or None if the workspace
+    /// has fewer than 2 files (std is undefined).
+    pub fn fan_out_stats(&self) -> Option<(f64, f64, usize)> {
+        let values: Vec<f64> = self
+            .files
+            .values()
+            .map(|s| s.imports.len() as f64)
+            .collect();
+        descriptive_stats(&values)
+    }
+
+    pub fn fan_in_stats(&self) -> Option<(f64, f64, usize)> {
+        let values: Vec<f64> = self
+            .files
+            .keys()
+            .map(|p| self.fan_in(p) as f64)
+            .collect();
+        descriptive_stats(&values)
+    }
+
+    /// Z-score for `path`'s fan_out against the workspace median.
+    /// Returns None when stats are unavailable (< 2 files) or std is
+    /// zero (every file has the same fan_out — z-score undefined).
+    pub fn fan_out_z_score(&self, path: &Path) -> Option<f64> {
+        let (median, std, _) = self.fan_out_stats()?;
+        if std == 0.0 {
+            return None;
+        }
+        let v = self.fan_out(path) as f64;
+        Some((v - median) / std)
+    }
+
+    pub fn fan_in_z_score(&self, path: &Path) -> Option<f64> {
+        let (median, std, _) = self.fan_in_stats()?;
+        if std == 0.0 {
+            return None;
+        }
+        let v = self.fan_in(path) as f64;
+        Some((v - median) / std)
+    }
+
+    /// Coarse role classification used by `file_role` payload. Rules
+    /// of thumb consistent with the stable-abstractions principle:
+    ///   - instability >= 0.8 AND fan_in <= 1  →  "entry"
+    ///   - instability <= 0.2 AND fan_in >= 3  →  "core"
+    ///   - fan_in >= 3 AND fan_out >= 3        →  "hub"
+    ///   - otherwise                           →  "ordinary"
+    pub fn role_hint(&self, path: &Path) -> &'static str {
+        let fan_in = self.fan_in(path);
+        let fan_out = self.fan_out(path);
+        let instability = self.instability(path);
+        match instability {
+            Some(i) if i >= 0.8 && fan_in <= 1 => "entry",
+            Some(i) if i <= 0.2 && fan_in >= 3 => "core",
+            _ if fan_in >= 3 && fan_out >= 3 => "hub",
+            _ => "ordinary",
+        }
+    }
+
     /// Does the index contain a module-import cycle?
     pub fn has_cycle(&self) -> bool {
         !self.find_cycle().is_empty()
@@ -412,6 +507,27 @@ pub fn public_symbols_lost(before: &FileSummary, after: &FileSummary) -> Vec<Str
         .collect()
 }
 
+/// Median + sample standard deviation for a slice of values.
+/// Returns None when count < 2. Median used (instead of mean) so a
+/// single 5000-line god function file doesn't drag the baseline.
+fn descriptive_stats(values: &[f64]) -> Option<(f64, f64, usize)> {
+    if values.len() < 2 {
+        return None;
+    }
+    let n = values.len();
+    let mut sorted: Vec<f64> = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = if n % 2 == 0 {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    } else {
+        sorted[n / 2]
+    };
+    let mean: f64 = values.iter().sum::<f64>() / n as f64;
+    let variance: f64 = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
+    let std = variance.sqrt();
+    Some((median, std, n))
+}
+
 /// Process-global cache of `InMemoryStore<FileSummary>` per workspace
 /// root. Populated on first `build_cached` for that root; subsequent
 /// calls reuse the same store and only re-parse files whose mtime
@@ -629,6 +745,59 @@ mod tests {
         write(dir.path(), "b.py", "x = 1\n");
         let idx = WorkspaceIndex::build(dir.path());
         assert!(!idx.has_cycle());
+    }
+
+    #[test]
+    fn fan_out_z_score_marks_outlier() {
+        // 4 small files (fan_out 1) + one outlier (fan_out 6) →
+        // outlier should have z-score > 1.
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..4 {
+            write(
+                dir.path(),
+                &format!("small_{i}.py"),
+                "import os\n",
+            );
+        }
+        write(
+            dir.path(),
+            "outlier.py",
+            "import os\nimport sys\nimport json\nimport re\nimport time\nimport math\n",
+        );
+        let idx = WorkspaceIndex::build(dir.path());
+        let z = idx.fan_out_z_score(&dir.path().join("outlier.py")).unwrap();
+        assert!(z >= 1.0, "expected z>=1 for outlier, got {z}");
+        let z_normal = idx
+            .fan_out_z_score(&dir.path().join("small_0.py"))
+            .unwrap();
+        assert!(z_normal <= 0.0, "expected normal file z<=0, got {z_normal}");
+    }
+
+    #[test]
+    fn instability_classifies_entry_vs_core() {
+        let dir = tempfile::tempdir().unwrap();
+        // utils.py is imported by 3 callers; doesn't import anything → core
+        write(dir.path(), "utils.py", "def helper(): pass\n");
+        write(dir.path(), "a.py", "from .utils import helper\n");
+        write(dir.path(), "b.py", "from .utils import helper\n");
+        write(dir.path(), "c.py", "from .utils import helper\n");
+        // main.py imports many; nothing imports main → entry
+        write(
+            dir.path(),
+            "main.py",
+            "from .a import x\nfrom .b import y\nfrom .c import z\nfrom .utils import helper\n",
+        );
+        let idx = WorkspaceIndex::build(dir.path());
+
+        let utils = dir.path().join("utils.py");
+        let utils_i = idx.instability(&utils).unwrap();
+        assert!(utils_i <= 0.2, "utils should be stable; got I={utils_i}");
+        assert_eq!(idx.role_hint(&utils), "core");
+
+        let main = dir.path().join("main.py");
+        let main_i = idx.instability(&main).unwrap();
+        assert!(main_i >= 0.8, "main should be unstable; got I={main_i}");
+        assert_eq!(idx.role_hint(&main), "entry");
     }
 
     #[test]

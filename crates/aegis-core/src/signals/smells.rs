@@ -38,6 +38,25 @@ pub struct SmellCounts {
     /// on test removals (which would otherwise look like "code got
     /// shorter, congrats").
     pub test_count: f64,
+    /// S7.4: count of attribute / member-access expressions —
+    /// proxy for "how heavily does this file lean on its imports".
+    /// Combined with fan_out, lets reviewers see whether N imports
+    /// = N tight couplings or N weak couplings. Reported as info-
+    /// level only; raw value alone says nothing without context.
+    pub member_access_count: f64,
+    /// S7.4: count of external type references in public function /
+    /// method signatures. Each occurrence is a leak of an outside
+    /// type into this file's public contract — pulling the rug
+    /// under that import becomes a breaking API change.
+    pub type_leakage_count: f64,
+    /// S7.5: count of method chains depth >= 3 whose leftmost
+    /// identifier looks like an external module / class — a heuristic
+    /// for "this chain probably crosses module boundaries", which is
+    /// where Demeter violations actually matter. Heuristic: chain
+    /// root starts uppercase OR is in the file's import set. Not a
+    /// substitute for real symbol resolution; reported info-level
+    /// only as a hint to reviewers.
+    pub cross_module_chain_count: f64,
 }
 
 /// Walk a file once and return all smell counters.
@@ -56,12 +75,180 @@ pub fn smell_counts(filepath: &str) -> Result<SmellCounts, String> {
 
 fn scan(root: Node, src: &[u8]) -> SmellCounts {
     let mut out = SmellCounts::default();
+    // S7.5: collect names that are likely "external" — imported
+    // names brought into this file, used to classify chain roots.
+    let import_names = collect_import_names(root, src);
     walk(root, src, 0, &mut out);
+    // S7.5: chain root analysis runs as its own pass after the
+    // primary walk so we don't conflate chain-depth tracking with
+    // chain-root tracking.
+    out.cross_module_chain_count = count_cross_module_chains(root, src, &import_names);
     // unfinished_marker scan is on raw source (catches comments
     // tree-sitter sometimes hides under `comment` kind anyway, plus
     // we already cover marker tokens like todo!() through walk()).
     out.unfinished_marker_count += scan_text_markers(src);
     out
+}
+
+/// Collect identifier names that this file binds via import-style
+/// statements. Best-effort across grammars — covers the common
+/// Python / TS / JS / Rust forms. Misses exotic re-exports;
+/// the caller treats this as a heuristic, not a complete picture.
+fn collect_import_names(node: Node, src: &[u8]) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    let mut names = HashSet::new();
+    walk_imports(node, src, &mut names);
+    names
+}
+
+fn walk_imports(node: Node, src: &[u8], out: &mut std::collections::HashSet<String>) {
+    let kind = node.kind();
+    match kind {
+        // Python: `import X`, `import X as Y`, `from M import X, Y`.
+        "import_statement" | "import_from_statement" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                add_import_local_name(child, src, out);
+            }
+        }
+        // TS / JS: `import { a, b as c } from 'm'`, `import d from 'm'`.
+        "import_specifier" | "import_clause" | "namespace_import" => {
+            let n = node
+                .child_by_field_name("alias")
+                .or_else(|| node.child_by_field_name("name"))
+                .or_else(|| node.named_child(0));
+            if let Some(n) = n {
+                if let Ok(text) = n.utf8_text(src) {
+                    out.insert(text.to_string());
+                }
+            }
+        }
+        // Rust: `use foo::Bar`, `use foo::Bar as Baz`.
+        "use_declaration" => {
+            if let Some(text) = node.utf8_text(src).ok() {
+                if let Some(last) = text.split("::").last() {
+                    let cleaned = last.trim_end_matches(';').trim();
+                    let final_name = if let Some(idx) = cleaned.rfind(" as ") {
+                        cleaned[idx + 4..].trim_end_matches('}').trim()
+                    } else {
+                        cleaned.trim_end_matches('}').trim()
+                    };
+                    if !final_name.is_empty() && !final_name.contains('{') {
+                        out.insert(final_name.to_string());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_imports(child, src, out);
+    }
+}
+
+fn add_import_local_name(node: Node, src: &[u8], out: &mut std::collections::HashSet<String>) {
+    let kind = node.kind();
+    match kind {
+        "dotted_name" => {
+            // For `import os.path`, the local binding is `os`.
+            if let Some(first) = node.named_child(0) {
+                if let Ok(t) = first.utf8_text(src) {
+                    out.insert(t.to_string());
+                }
+            }
+        }
+        "aliased_import" => {
+            if let Some(alias) = node.child_by_field_name("alias") {
+                if let Ok(t) = alias.utf8_text(src) {
+                    out.insert(t.to_string());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn count_cross_module_chains(
+    node: Node,
+    src: &[u8],
+    imports: &std::collections::HashSet<String>,
+) -> f64 {
+    use crate::ast::adapter::default_chain_depth;
+    let mut count = 0.0;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        // Look at chain heads — chain nodes whose parent is NOT
+        // also a chain node (so we count `a.b.c.d` once at the
+        // outer attribute, not three times for nested `a.b.c`,
+        // `a.b`, `a`).
+        let is_chain = matches!(
+            child.kind(),
+            "attribute"
+                | "member_expression"
+                | "field_access"
+                | "field_expression"
+                | "selector_expression"
+                | "navigation_expression"
+                | "scoped_property_access_expression"
+        );
+        let parent_is_chain = matches!(
+            node.kind(),
+            "attribute"
+                | "member_expression"
+                | "field_access"
+                | "field_expression"
+                | "selector_expression"
+                | "navigation_expression"
+                | "scoped_property_access_expression"
+        );
+        if is_chain && !parent_is_chain {
+            let depth = default_chain_depth(child);
+            if depth >= 3 {
+                if let Some(root_name) = chain_root_identifier(child, src) {
+                    if looks_external(&root_name, imports) {
+                        count += 1.0;
+                    }
+                }
+            }
+        }
+        count += count_cross_module_chains(child, src, imports);
+    }
+    count
+}
+
+fn chain_root_identifier(node: Node, src: &[u8]) -> Option<String> {
+    // Walk down the chain until we hit an identifier leaf. Receivers
+    // can be in field "object", "operand", or named_child(0).
+    let mut cur = node;
+    for _ in 0..12 {
+        if cur.kind() == "identifier" {
+            return cur.utf8_text(src).ok().map(|s| s.to_string());
+        }
+        let next = cur
+            .child_by_field_name("object")
+            .or_else(|| cur.child_by_field_name("operand"))
+            .or_else(|| cur.child_by_field_name("expression"))
+            .or_else(|| cur.child_by_field_name("scope"))
+            .or_else(|| cur.child_by_field_name("value"))
+            .or_else(|| cur.named_child(0));
+        match next {
+            Some(n) if n.id() != cur.id() => cur = n,
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn looks_external(name: &str, imports: &std::collections::HashSet<String>) -> bool {
+    if imports.contains(name) {
+        return true;
+    }
+    // PascalCase heuristic — common convention for "this is a class
+    // / module identifier" rather than a local variable. Not used
+    // alone (would false-positive on local Class assignments), but
+    // combined with chain depth >= 3 it's a useful proxy.
+    name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
 }
 
 fn walk(node: Node, src: &[u8], depth: usize, out: &mut SmellCounts) {
@@ -102,6 +289,38 @@ fn walk(node: Node, src: &[u8], depth: usize, out: &mut SmellCounts) {
     // decorators / wrapped in describe/it blocks).
     if is_test_function(node, src) {
         out.test_count += 1.0;
+    }
+    // S7.4: count attribute / member-access nodes (proxy for
+    // import usage intensity). We don't try to attribute each use
+    // back to a specific import — the coarse total per file divided
+    // by fan_out is informative enough as an info-level signal.
+    if matches!(
+        kind,
+        "attribute" | "member_expression" | "field_access"
+            | "selector_expression" | "navigation_expression"
+            | "scoped_property_access_expression" | "field_expression"
+    ) {
+        out.member_access_count += 1.0;
+    }
+    // S7.4: count type-annotation positions in public function
+    // signatures. Heuristic: any identifier inside a `type`,
+    // `return_type`, or annotation field of a public function/
+    // method definition. We don't resolve whether the type is
+    // imported (would need symbol table) — caller correlates with
+    // fan_out / instability to decide if it matters.
+    if matches!(
+        kind,
+        "function_definition" | "function_declaration"
+            | "function_item" | "method_declaration"
+            | "method_definition"
+    ) {
+        if let Some(name_node) = node.child_by_field_name("name") {
+            if let Ok(name) = name_node.utf8_text(src) {
+                if !name.starts_with('_') {
+                    out.type_leakage_count += count_type_annotations(node);
+                }
+            }
+        }
     }
 
     let next_depth = if is_nesting_introducer(kind) { depth + 1 } else { depth };
@@ -147,6 +366,62 @@ fn default_value_is_mutable(node: Node, src: &[u8]) -> bool {
         }
     }
     false
+}
+
+fn count_type_annotations(node: Node) -> f64 {
+    // Walk the function definition node looking for nodes that
+    // tree-sitter grammars use to wrap parameter type / return type.
+    // Each such annotation is one leakage point.
+    let mut count = 0.0;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        let kind = child.kind();
+        if matches!(
+            kind,
+            "type"
+                | "type_annotation"
+                | "return_type"
+                | "type_identifier"
+                | "primitive_type"
+                | "generic_type"
+        ) {
+            count += 1.0;
+        }
+        // Look inside parameter lists for typed parameters.
+        if matches!(
+            kind,
+            "parameters" | "formal_parameters" | "parameter_list"
+        ) {
+            count += count_type_annotations_in_params(child);
+        }
+        if matches!(
+            kind,
+            "function_signature" | "block" | "compound_statement" | "function_body"
+        ) {
+            // skip body — only signature counts
+            continue;
+        }
+    }
+    count
+}
+
+fn count_type_annotations_in_params(node: Node) -> f64 {
+    let mut count = 0.0;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        let kind = child.kind();
+        if matches!(
+            kind,
+            "typed_parameter" | "typed_default_parameter" | "formal_parameter"
+                | "required_parameter" | "optional_parameter"
+        ) {
+            // Look for a `type` field inside.
+            if child.child_by_field_name("type").is_some() {
+                count += 1.0;
+            }
+        }
+    }
+    count
 }
 
 fn is_test_function(node: Node, src: &[u8]) -> bool {
@@ -573,6 +848,75 @@ mod tests {
         );
         let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
         assert!(c.test_count >= 2.0, "got {c:?}");
+    }
+
+    #[test]
+    fn member_access_count_tracks_usage() {
+        // Two files, same fan_out but very different usage density.
+        let light = write_tmp(".py", "import requests\nrequests.get('x')\n");
+        let heavy = write_tmp(
+            ".py",
+            "import requests\n\
+             requests.get('a')\nrequests.post('b')\nrequests.put('c')\n\
+             requests.delete('d')\nrequests.options('e')\n",
+        );
+        let l = smell_counts(light.path().to_str().unwrap()).unwrap();
+        let h = smell_counts(heavy.path().to_str().unwrap()).unwrap();
+        assert!(
+            h.member_access_count > l.member_access_count,
+            "heavy={h:?}, light={l:?}"
+        );
+    }
+
+    #[test]
+    fn type_leakage_picks_up_typed_signatures() {
+        let bare = write_tmp(".py", "def process(data, opts):\n    return data\n");
+        let typed = write_tmp(
+            ".py",
+            "from numpy import ndarray\ndef process(data: ndarray, opts: dict) -> ndarray:\n    return data\n",
+        );
+        let b = smell_counts(bare.path().to_str().unwrap()).unwrap();
+        let t = smell_counts(typed.path().to_str().unwrap()).unwrap();
+        assert!(
+            t.type_leakage_count > b.type_leakage_count,
+            "typed={t:?}, bare={b:?}"
+        );
+    }
+
+    #[test]
+    fn cross_module_chain_flags_capitalized_root() {
+        // PascalCase root + chain >= 3 — Order.customer.address.country
+        // is the textbook Demeter violation crossing modules.
+        let tmp = write_tmp(
+            ".py",
+            "def show(order):\n    return Order.customer.address.country\n",
+        );
+        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        assert!(c.cross_module_chain_count >= 1.0, "got {c:?}");
+    }
+
+    #[test]
+    fn cross_module_chain_skips_local_chain() {
+        // self.x.y is intra-class — not a cross-module Demeter
+        // violation in any meaningful sense.
+        let tmp = write_tmp(
+            ".py",
+            "class Foo:\n    def bar(self):\n        return self.x.y\n",
+        );
+        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        assert_eq!(c.cross_module_chain_count, 0.0, "got {c:?}");
+    }
+
+    #[test]
+    fn cross_module_chain_flags_imported_root() {
+        // Local-named (lowercase) but imported → root should still
+        // count via the import set, not just PascalCase.
+        let tmp = write_tmp(
+            ".py",
+            "from store import session\nsession.user.profile.email_address\n",
+        );
+        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        assert!(c.cross_module_chain_count >= 1.0, "got {c:?}");
     }
 
     #[test]
