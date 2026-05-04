@@ -69,20 +69,34 @@ Cost-aware rollback is the only cross-iteration consistent criterion.
 Other checks (validation, structural constraints) act as local
 guards, not global direction signals.
 
-### What actually gets checked (V1.10, six layers)
+### What actually gets checked (V1.10, eight layers)
 
 | Layer | Checks | Where it runs |
 | :--- | :--- | :--- |
-| **Ring 0** — syntax | tree-sitter parse; ERROR / MISSING node → BLOCK | `aegis check`, MCP, pipeline |
-| **Ring 0.5** — structural signals | `fan_out` (unique imports), `max_chain_depth` (longest method chain) — numeric only | `aegis check`, MCP, pipeline |
-| **Cost regression** | `sum(signals_after) > sum(signals_before)` → BLOCK / ROLLBACK | MCP (when `old_content` given), pipeline (every iter) |
+| **Ring 0** — syntax | tree-sitter parse; ERROR / MISSING node → BLOCK | `aegis check`, MCP, pipeline, `aegis attest` |
+| **Ring 0.5** — structural signals | 14 single-pass AST counters across 3 severity tiers — **block** (`empty_handler_count`, `unreachable_stmt_count`, `mutable_default_arg_count`, `shadowed_local_count`, `suspicious_literal_count`, `unresolved_local_import_count`, `unfinished_marker_count`, `test_count_lost`), **warn** (`fan_out`, `max_chain_depth`, `cyclomatic_complexity`, `nesting_depth`, `cross_module_chain_count`, `import_usage_count`), **info** (`member_access_count`, `type_leakage_count`). Severity decides whether a regression blocks. See [`signal_layer_pyapi.rs::severity_for`](crates/aegis-core/src/signal_layer_pyapi.rs). | `aegis check`, MCP, pipeline |
+| **Ring 0.7** — security | 10 boolean rules (`SEC001`–`SEC010`): shell injection, SQL injection, JWT verify-disabled, weak crypto (md5/sha1), insecure RNG in security context, dangerous deserialization (`pickle`/`yaml.load`/`marshal`/Java `readObject`), …. Per-line opt-out: `// aegis-allow: SEC00X` (or `# aegis-allow: …`). | `aegis check`, MCP, pipeline, `aegis attest` |
+| **Cost regression** | Per-signal delta — **any block-severity signal grew → BLOCK; any warn-severity signal grew → WARN** (reason recorded, doesn't fail by itself). The earlier sum-based check was retired because cross-signal cancellation hid real regressions. | MCP (when `old_content` given), pipeline (every iter) |
+| **Ring R2** — workspace structure | Cross-file checks single-file `validate_change` can't do: **cycle introduction** (would the change create a new module import cycle?), **public-symbol-removed-while-callers-remain**, file-role classification (entry / core / hub / ordinary), z-scores of fan_in / fan_out / signals against the project baseline. `entry`-role files auto-suppress the `fan_out` warn (high fan_out is the expected shape). | `aegis-mcp validate_change_with_workspace`, `aegis attest --workspace`, pipeline |
 | **PlanValidator** | path safety / scope / dangerous_path / virtual-FS simulation | `aegis pipeline run` only |
 | **Executor + Snapshot** | atomic apply with backup-dir rollback | `aegis pipeline run` only |
 | **Stalemate / Thrashing detector** | sequence-level; halts the loop with a named reason | `aegis pipeline run` only |
 
-`aegis check` and the MCP server expose the first three layers
-(single-file judgement); the multi-turn pipeline adds the last
-three (cross-iteration loop control).
+`aegis check` and the MCP server expose the first five layers
+(single-file + workspace judgement); the multi-turn pipeline adds
+the last three (cross-iteration loop control).
+
+Each verdict carries one of four `decision` values:
+
+- **PASS** — every gate passed.
+- **WARN** — at least one warn-severity gate fired (e.g. heuristic
+  signal regressed); the change is allowed but the reason is
+  surfaced.
+- **BLOCK** — at least one block-severity gate fired (Ring 0,
+  Ring 0.7, block-severity Ring 0.5 regression, Ring R2 cycle, …).
+- **SKIP** — the file extension has no language adapter
+  (`.md`, `.toml`, `.json`, …); aegis has no opinion. Returning
+  BLOCK here would just confuse upstream agents editing markdown.
 
 ---
 
@@ -164,8 +178,8 @@ in [`docs/v1_rust_port_plan.md`](docs/v1_rust_port_plan.md).
 
 ### Static analysis (no LLM, no API key)
 
-`aegis check` runs Ring 0 (syntax) + Ring 0.5 (structural signals
-— fan-out, max chain depth) on any supported source file:
+`aegis check` runs Ring 0 (syntax) + Ring 0.5 (the 14 structural
+signals) + Ring 0.7 (10 security rules) on any supported source file:
 
 ```bash
 aegis languages                       # list supported languages
@@ -173,9 +187,38 @@ aegis check path/to/file.py           # human-readable signals
 aegis check path/to/file.py --json    # machine-readable
 ```
 
-The intent: drop this into a pre-commit hook or CI gate so bad
-diffs never make it past the boundary you care about. See
-[`docs/integrations/`](docs/integrations/) for paste-ready examples.
+For an entire workspace — parallel scan with persistent mtime+size
+cache (rescans on a maintained codebase finish in <1s) plus
+import-graph cycle detection across files:
+
+```bash
+aegis scan --workspace .              # parallel scan + cycle detection
+aegis scan --workspace . --top 20     # top-N highest-cost files
+aegis scan --no-cache --no-cycles     # skip the cache / skip cycle pass
+```
+
+Post-write attestation — read the on-disk content and run every
+**absolute** check (Ring 0 + Ring 0.7 + optional Ring R2 cycle).
+Intended for `PostToolUse` hooks / CI so writes that bypass the
+pre-write gate still get judged. Appends a sha256-stamped JSONL
+row to `<workspace>/.aegis/attestations.jsonl`:
+
+```bash
+aegis attest path/to/file.py --workspace .
+aegis attest path/to/file.py --workspace . --json    # machine-readable
+```
+
+Setup wizard — interactive TOML writer for
+`~/.config/aegis/config.toml` (provider, base URL, model, API-key
+env var). Doesn't export anything to your shell:
+
+```bash
+aegis setup
+```
+
+The intent: drop these into a pre-commit hook, CI gate, or hook
+chain so bad diffs never make it past the boundary you care about.
+See [`docs/integrations/`](docs/integrations/) for paste-ready examples.
 
 ### LLM-backed multi-turn pipeline
 
@@ -239,7 +282,7 @@ Index + per-path detail: [`docs/integrations/`](docs/integrations/).
 | Layer | State | Notes |
 | :--- | :--- | :--- |
 | Execution Engine | ✅ | Pipeline + Executor + cost-aware regression rollback. Native Rust loop in `aegis-runtime::native_pipeline`. |
-| Static analysis | ✅ | Ring 0 (syntax) + Ring 0.5 (`fan_out`, `max_chain_depth`) shared by `aegis check` + `aegis pipeline run` + `aegis-mcp validate_change`. |
+| Static analysis | ✅ | Ring 0 (syntax) + Ring 0.5 (14 severity-tagged signals) + Ring 0.7 (10 security rules, `SEC001`–`SEC010`) + Ring R2 (cross-file cycle / public-symbol-removed / file-role + z-scores) shared by `aegis check` + `aegis scan` + `aegis attest` + `aegis pipeline run` + `aegis-mcp validate_change` / `validate_change_with_workspace`. |
 | Decision Trace | ✅ | `DecisionTrace` + 10-value `DecisionPattern` + 5-value `TaskVerdict`; Python-era cross-model evidence in [`docs/v1_validation.md`](docs/v1_validation.md). Rust re-validation is gated on LLM API budget (V1.8). |
 | MCP server | ✅ | `aegis-mcp` — hand-rolled JSON-RPC 2.0 over stdio; one tool: `validate_change` per [`docs/integrations/mcp_design.md`](docs/integrations/mcp_design.md). |
 | Cross-model sweep harness | 🟡 | `aegis pipeline run` works scenario-by-scenario; batch sweep (`aegis sweep`) is V1.8 backlog — gated on API budget. |

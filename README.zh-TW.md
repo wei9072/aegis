@@ -63,19 +63,32 @@ Sₙ → Sₙ₊₁ 只有當所有約束都滿足、且沒有退化發生時才
 成本感知（cost-aware）回滾是唯一跨輪一致的判準。其他檢查
 （驗證、結構約束）只擔任區域守衛角色，不是全域方向訊號。
 
-### V1.10 實際檢查的項目（六層）
+### V1.10 實際檢查的項目（八層）
 
 | 層 | 檢查項目 | 在哪裡執行 |
 | :--- | :--- | :--- |
-| **Ring 0** — 語法 | tree-sitter 解析；遇到 ERROR / MISSING 節點 → BLOCK | `aegis check`、MCP、pipeline |
-| **Ring 0.5** — 結構訊號 | `fan_out`（唯一 import 數）、`max_chain_depth`（最長方法鏈深度）—— 純數值 | `aegis check`、MCP、pipeline |
-| **成本退化** | `sum(signals_after) > sum(signals_before)` → BLOCK / ROLLBACK | MCP（傳入 `old_content` 時）、pipeline（每輪）|
+| **Ring 0** — 語法 | tree-sitter 解析；遇到 ERROR / MISSING 節點 → BLOCK | `aegis check`、MCP、pipeline、`aegis attest` |
+| **Ring 0.5** — 結構訊號 | 一次 AST 巡訪抽出 14 個訊號，並依嚴重度分為三級 —— **block 級**（`empty_handler_count`、`unreachable_stmt_count`、`mutable_default_arg_count`、`shadowed_local_count`、`suspicious_literal_count`、`unresolved_local_import_count`、`unfinished_marker_count`、`test_count_lost`）、**warn 級**（`fan_out`、`max_chain_depth`、`cyclomatic_complexity`、`nesting_depth`、`cross_module_chain_count`、`import_usage_count`）、**info 級**（`member_access_count`、`type_leakage_count`）。嚴重度決定退化是否升級為 BLOCK。詳見 [`signal_layer_pyapi.rs::severity_for`](crates/aegis-core/src/signal_layer_pyapi.rs)。 | `aegis check`、MCP、pipeline |
+| **Ring 0.7** — 安全 | 10 條布林規則（`SEC001`–`SEC010`）：shell 注入、SQL 注入、JWT 關閉驗證、弱雜湊（md5/sha1）、安全脈絡內的不安全亂數、危險反序列化（`pickle`、`yaml.load`、`marshal`、Java `readObject` 等）。每行可用 `// aegis-allow: SEC00X`（或 `# aegis-allow: …`）豁免。 | `aegis check`、MCP、pipeline、`aegis attest` |
+| **成本退化** | 逐訊號 delta —— **任一 block 級訊號上升 → BLOCK；任一 warn 級訊號上升 → WARN**（記錄理由，但不單獨 fail）。早期的 sum-based 檢查已淘汰，因為跨訊號相消會掩蓋真正的退化。 | MCP（傳入 `old_content` 時）、pipeline（每輪）|
+| **Ring R2** — workspace 結構 | 單檔 `validate_change` 做不到的跨檔檢查：**循環引入偵測**（這次變更會不會新增 module import cycle？）、**公開符號被刪但仍有呼叫端**、檔案角色分類（entry / core / hub / ordinary）、針對專案基線的 fan_in / fan_out / 訊號 z-score。`entry` 角色的檔案會自動抑制 `fan_out` warn（entry 檔本來就該 import 多）。 | `aegis-mcp validate_change_with_workspace`、`aegis attest --workspace`、pipeline |
 | **PlanValidator** | 路徑安全 / 範圍 / 危險路徑 / 虛擬檔案系統模擬 | 僅 `aegis pipeline run` |
 | **Executor + Snapshot** | 原子套用，失敗時靠備份目錄回滾 | 僅 `aegis pipeline run` |
 | **Stalemate / Thrashing 偵測器** | 序列層級；用具名理由中止迴圈 | 僅 `aegis pipeline run` |
 
-`aegis check` 跟 MCP server 暴露前三層（單檔判定）；多輪
-pipeline 額外加上後三層（跨輪迴圈控制）。
+`aegis check` 跟 MCP server 暴露前五層（單檔 + workspace 判定）；
+多輪 pipeline 額外加上後三層（跨輪迴圈控制）。
+
+每一份 verdict 的 `decision` 會是下列四值之一：
+
+- **PASS** —— 所有 gate 都通過。
+- **WARN** —— 至少有一個 warn 級 gate 觸發（例如啟發式訊號退化）；
+  變更允許通過，但理由會被記錄出來。
+- **BLOCK** —— 至少有一個 block 級 gate 觸發（Ring 0、Ring 0.7、
+  block 級 Ring 0.5 退化、Ring R2 cycle 等）。
+- **SKIP** —— 副檔名沒有對應的語言 adapter（`.md`、`.toml`、
+  `.json` 等）；aegis 明確「沒意見」。在這裡回 BLOCK 只會讓
+  上游代理以為它的 markdown 寫錯了。
 
 ---
 
@@ -159,7 +172,7 @@ x86_64/aarch64、Windows x86_64）會經由 GitHub Releases
 ### 靜態分析（不需 LLM、不需 API key）
 
 `aegis check` 對任何支援的原始檔執行 Ring 0（語法）+
-Ring 0.5（結構訊號 —— fan-out、max chain depth）：
+Ring 0.5（14 個結構訊號）+ Ring 0.7（10 條安全規則）：
 
 ```bash
 aegis languages                       # 列出支援的語言
@@ -167,8 +180,36 @@ aegis check path/to/file.py           # 人類可讀的訊號
 aegis check path/to/file.py --json    # 機器可讀
 ```
 
-意圖：放進 pre-commit hook 或 CI gate，讓壞 diff 過不了你
-在意的那道邊界。可以直接貼的範例見
+整 workspace 掃描 —— 平行掃描 + 持久 mtime+size 快取（穩定
+codebase 重掃 < 1 秒），加上跨檔 import-graph cycle 偵測：
+
+```bash
+aegis scan --workspace .              # 平行掃描 + cycle 偵測
+aegis scan --workspace . --top 20     # 列出成本最高的前 N 個檔案
+aegis scan --no-cache --no-cycles     # 跳過快取 / 跳過 cycle pass
+```
+
+Post-write 證明 —— 讀檔案的 disk 內容，跑所有**絕對性**檢查
+（Ring 0 + Ring 0.7 + 可選的 Ring R2 cycle）。設計給
+`PostToolUse` hook / CI 用，讓繞過 pre-write 閘門的寫入仍然
+會被裁決。會把 sha256 戳記過的 JSONL row 附加到
+`<workspace>/.aegis/attestations.jsonl`：
+
+```bash
+aegis attest path/to/file.py --workspace .
+aegis attest path/to/file.py --workspace . --json    # 機器可讀
+```
+
+設定精靈 —— 互動式寫 `~/.config/aegis/config.toml`（provider、
+base URL、模型、API key 環境變數）。不會 export 任何東西到
+你的 shell：
+
+```bash
+aegis setup
+```
+
+意圖：放進 pre-commit hook、CI gate 或 hook chain，讓壞 diff
+過不了你在意的那道邊界。可以直接貼的範例見
 [`docs/integrations/`](docs/integrations/)。
 
 ### LLM 驅動的多輪 pipeline
@@ -229,7 +270,7 @@ aegis-mcp     # stdio JSON-RPC，MCP protocol 2025-06-18
 | 層 | 狀態 | 備註 |
 | :--- | :--- | :--- |
 | Execution Engine | ✅ | Pipeline + Executor + 成本感知退化回滾。原生 Rust 迴圈在 `aegis-runtime::native_pipeline`。|
-| Static analysis | ✅ | Ring 0（語法）+ Ring 0.5（`fan_out`、`max_chain_depth`），共用於 `aegis check` + `aegis pipeline run` + `aegis-mcp validate_change`。|
+| Static analysis | ✅ | Ring 0（語法）+ Ring 0.5（14 個分嚴重度的訊號）+ Ring 0.7（10 條安全規則 `SEC001`–`SEC010`）+ Ring R2（跨檔 cycle / 公開符號刪除 / 檔案角色 + z-score），共用於 `aegis check` + `aegis scan` + `aegis attest` + `aegis pipeline run` + `aegis-mcp validate_change` / `validate_change_with_workspace`。|
 | Decision Trace | ✅ | `DecisionTrace` + 10 種 `DecisionPattern` + 5 種 `TaskVerdict`；Python 時期的跨模型證據在 [`docs/v1_validation.md`](docs/v1_validation.md)。Rust 重新驗證受 LLM API 預算所限（V1.8）。|
 | MCP server | ✅ | `aegis-mcp` —— 自行實作的 JSON-RPC 2.0 over stdio；只暴露一個工具：`validate_change`，依 [`docs/integrations/mcp_design.md`](docs/integrations/mcp_design.md)。|
 | Cross-model sweep harness | 🟡 | `aegis pipeline run` 可逐一場景跑；批次 sweep（`aegis sweep`）是 V1.8 backlog —— 受 API 預算所限。|
