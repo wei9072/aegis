@@ -93,6 +93,10 @@ pub fn severity_for(name: &str) -> SignalSeverity {
         // S7.5 — heuristic Demeter signal; warn-level so reviewers
         // see it but it doesn't block by itself.
         "cross_module_chain_count" => SignalSeverity::Warn,
+        // S7.6 — real coupling proxy (uses-of-imports per file).
+        // Warn level: growth indicates increased reliance on
+        // external code, which deserves a look but isn't always bad.
+        "import_usage_count" => SignalSeverity::Warn,
         // Default: unknown signals get Warn so they're at least
         // visible without making the verdict noisy.
         _ => SignalSeverity::Warn,
@@ -245,6 +249,19 @@ pub fn extract_signals_native(filepath: &str) -> Result<Vec<SignalData>, String>
             format!(
                 "Chains depth>=3 with externally-rooted receiver ({})",
                 smells.cross_module_chain_count as usize
+            ),
+        ),
+        // S7.6: subset of member-access calls actually attributable
+        // to imported names. The honest "real coupling" indicator —
+        // member_access_count counts any . expression including
+        // self / locals; this counts only those rooted at imports.
+        make(
+            "import_usage_count",
+            smells.import_usage_count,
+            filepath,
+            format!(
+                "Member-accesses rooted at an imported identifier ({})",
+                smells.import_usage_count as usize
             ),
         ),
     ])

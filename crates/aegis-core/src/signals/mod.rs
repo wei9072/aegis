@@ -6,4 +6,4 @@ pub mod smells;
 pub use coupling::fan_out_signal;
 pub use demeter::chain_depth_signal;
 pub use imports_local::unresolved_local_import_count;
-pub use smells::{smell_counts, SmellCounts};
+pub use smells::{smell_counts, smell_counts_for_code, SmellCounts};

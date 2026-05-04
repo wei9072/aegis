@@ -24,7 +24,7 @@ use aegis_index::{InMemoryStore, IndexStore};
 use tree_sitter::{Parser, Query, QueryCursor};
 
 use crate::ast::registry::LanguageRegistry;
-use crate::signals::unresolved_local_import_count;
+use crate::signals::{smell_counts_for_code, unresolved_local_import_count};
 
 /// Per-file structural snapshot at a point in time.
 #[derive(Debug, Clone, Default)]
@@ -36,6 +36,11 @@ pub struct FileSummary {
     /// R2 to detect broken-reference deletes. Best-effort across
     /// languages.
     pub imported_symbols: HashSet<String>,
+    /// S7.7 — per-file numeric signals (cyclomatic, chain_depth,
+    /// member_access_count, import_usage_count, type_leakage_count,
+    /// cross_module_chain_count, …). Populated by summarize_file so
+    /// project-wide z-score can be computed for any of them.
+    pub signals: HashMap<String, f64>,
 }
 
 /// Eagerly-built workspace index. One pass over every supported
@@ -181,6 +186,30 @@ impl WorkspaceIndex {
             return None;
         }
         let v = self.fan_in(path) as f64;
+        Some((v - median) / std)
+    }
+
+    /// S7.7 — generic project-wide stats for any signal stored on
+    /// FileSummary.signals. Returns (median, std, count) or None
+    /// when fewer than 2 files have a value for `name`.
+    pub fn signal_stats(&self, name: &str) -> Option<(f64, f64, usize)> {
+        let values: Vec<f64> = self
+            .files
+            .values()
+            .filter_map(|s| s.signals.get(name).copied())
+            .collect();
+        descriptive_stats(&values)
+    }
+
+    /// Z-score of `path`'s value for `signal_name` against the
+    /// workspace baseline. Returns None when stats are unavailable
+    /// or std is zero.
+    pub fn signal_z_score(&self, path: &Path, signal_name: &str) -> Option<f64> {
+        let (median, std, _) = self.signal_stats(signal_name)?;
+        if std == 0.0 {
+            return None;
+        }
+        let v = self.files.get(path).and_then(|s| s.signals.get(signal_name))?;
         Some((v - median) / std)
     }
 
@@ -338,10 +367,45 @@ pub fn summarize_file(path: &Path, code: &str) -> FileSummary {
     let mut imported_symbols = HashSet::new();
     extract_imported_symbols(tree.root_node(), src, &mut imported_symbols);
 
+    // S7.7 — populate per-file numeric signals so project z-scores
+    // can be computed without re-parsing each file when stats are
+    // queried. This adds the smell scan to summarize_file; for
+    // workspaces of any size the cost is amortised across the
+    // mtime cache (S5).
+    let mut signals: HashMap<String, f64> = HashMap::new();
+    signals.insert("fan_out".into(), imports.len() as f64);
+    signals.insert("public_symbols".into(), public_symbols.len() as f64);
+    signals.insert("imported_symbols".into(), imported_symbols.len() as f64);
+    if let Ok(s) = smell_counts_for_code(&path_str, code) {
+        signals.insert("max_chain_depth".into(), 0.0); // filled below
+        signals.insert("empty_handler_count".into(), s.empty_handler_count);
+        signals.insert("unfinished_marker_count".into(), s.unfinished_marker_count);
+        signals.insert("unreachable_stmt_count".into(), s.unreachable_stmt_count);
+        signals.insert("cyclomatic_complexity".into(), s.cyclomatic_complexity);
+        signals.insert("nesting_depth".into(), s.nesting_depth);
+        signals.insert("suspicious_literal_count".into(), s.suspicious_literal_count);
+        signals.insert("mutable_default_arg_count".into(), s.mutable_default_arg_count);
+        signals.insert("shadowed_local_count".into(), s.shadowed_local_count);
+        signals.insert("test_count".into(), s.test_count);
+        signals.insert("member_access_count".into(), s.member_access_count);
+        signals.insert("type_leakage_count".into(), s.type_leakage_count);
+        signals.insert("cross_module_chain_count".into(), s.cross_module_chain_count);
+        signals.insert("import_usage_count".into(), s.import_usage_count);
+    }
+    // chain_depth lives on adapter — compute directly off the parsed
+    // tree we already have.
+    if let Some(a) = LanguageRegistry::global().for_path(&path_str) {
+        signals.insert(
+            "max_chain_depth".into(),
+            a.max_chain_depth(tree.root_node()) as f64,
+        );
+    }
+
     FileSummary {
         imports,
         public_symbols,
         imported_symbols,
+        signals,
     }
 }
 
@@ -745,6 +809,26 @@ mod tests {
         write(dir.path(), "b.py", "x = 1\n");
         let idx = WorkspaceIndex::build(dir.path());
         assert!(!idx.has_cycle());
+    }
+
+    #[test]
+    fn signal_z_score_works_for_arbitrary_signal() {
+        // S7.7: verify signal_z_score generalizes beyond fan_out.
+        // Five files with simple cyclomatic; one with many branches.
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..4 {
+            write(dir.path(), &format!("simple_{i}.py"), "def f(): return 1\n");
+        }
+        write(
+            dir.path(),
+            "complex.py",
+            "def f(x):\n    if x: pass\n    elif x==1: pass\n    elif x==2: pass\n    elif x==3: pass\n    elif x==4: pass\n",
+        );
+        let idx = WorkspaceIndex::build(dir.path());
+        let z = idx
+            .signal_z_score(&dir.path().join("complex.py"), "cyclomatic_complexity")
+            .unwrap();
+        assert!(z >= 1.0, "expected z>=1 on complex outlier; got {z}");
     }
 
     #[test]

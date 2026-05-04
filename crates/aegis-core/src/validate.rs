@@ -529,6 +529,24 @@ pub fn validate_change_with_workspace(
         "project_fan_out_std": project_fan_out_stats.map(|(_, s, _)| s),
     }));
 
+    // S7.7 — annotate signal_deltas with z-scores from the
+    // post-change workspace index. Outlier values become visible
+    // even when the absolute delta is small, and small deltas in
+    // a workspace where the signal is uniformly low get flagged
+    // as significant.
+    if let Some(deltas) = verdict.signal_deltas.as_mut() {
+        for (signal_name, delta_entry) in deltas.iter_mut() {
+            let z = after_for_role.signal_z_score(&path_buf, signal_name);
+            if let (Some(z), Some(obj)) = (z, delta_entry.as_object_mut()) {
+                obj.insert("z_score_after".to_string(), json!(z));
+                if let Some((median, std, _)) = after_for_role.signal_stats(signal_name) {
+                    obj.insert("project_median".to_string(), json!(median));
+                    obj.insert("project_std".to_string(), json!(std));
+                }
+            }
+        }
+    }
+
     // S7.2: when fan_out warning fires on an "entry" file, suppress
     // it — high fan_out is the expected shape for an integration
     // layer. Keep the warn for "core" / "ordinary" / "hub" files

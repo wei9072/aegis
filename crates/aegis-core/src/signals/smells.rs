@@ -57,11 +57,30 @@ pub struct SmellCounts {
     /// substitute for real symbol resolution; reported info-level
     /// only as a hint to reviewers.
     pub cross_module_chain_count: f64,
+    /// S7.6: subset of `member_access_count` attributable to *imported*
+    /// names — the chain root is in the file's import set. This is
+    /// the "real" coupling indicator; a file with 100 member-access
+    /// expressions where 90 are on `self` is internally cohesive,
+    /// but a file with 100 where 90 are on imports is heavily coupled.
+    pub import_usage_count: f64,
+    /// S7.6: per-import count map. Lets reviewers see which imports
+    /// the file leans on most heavily. Not in cost regression (a
+    /// HashMap doesn't fit the f64-delta model); exposed for
+    /// inspection via signal_layer's `extract_smell_details`.
+    pub per_import_usage: std::collections::HashMap<String, f64>,
 }
 
 /// Walk a file once and return all smell counters.
 pub fn smell_counts(filepath: &str) -> Result<SmellCounts, String> {
     let code = std::fs::read_to_string(filepath).map_err(|e| e.to_string())?;
+    smell_counts_for_code(filepath, &code)
+}
+
+/// S7.7 — same scan but operating on in-memory `code` rather than
+/// reading from disk. Used by WorkspaceIndex::summarize_file so the
+/// per-file SmellCounts can be cached alongside imports and symbols
+/// without an extra disk hit.
+pub fn smell_counts_for_code(filepath: &str, code: &str) -> Result<SmellCounts, String> {
     let Some(adapter) = LanguageRegistry::global().for_path(filepath) else {
         return Ok(SmellCounts::default());
     };
@@ -69,7 +88,7 @@ pub fn smell_counts(filepath: &str) -> Result<SmellCounts, String> {
     parser
         .set_language(adapter.tree_sitter_language())
         .map_err(|e| e.to_string())?;
-    let tree = parser.parse(&code, None).ok_or("parse returned None")?;
+    let tree = parser.parse(code, None).ok_or("parse returned None")?;
     Ok(scan(tree.root_node(), code.as_bytes()))
 }
 
@@ -79,15 +98,137 @@ fn scan(root: Node, src: &[u8]) -> SmellCounts {
     // names brought into this file, used to classify chain roots.
     let import_names = collect_import_names(root, src);
     walk(root, src, 0, &mut out);
-    // S7.5: chain root analysis runs as its own pass after the
+    // S7.5/S7.6: chain root analysis runs as its own pass after the
     // primary walk so we don't conflate chain-depth tracking with
     // chain-root tracking.
     out.cross_module_chain_count = count_cross_module_chains(root, src, &import_names);
+    // S7.6: per-import attribution + total import_usage_count.
+    accumulate_import_usage(root, src, &import_names, &mut out);
+    // S7.6: replace heuristic type_leakage with the import-verified
+    // version — a type annotation only "leaks" if it actually
+    // names an imported identifier. Stdlib-only signatures don't
+    // create coupling we care about for this metric.
+    out.type_leakage_count = count_imported_type_annotations(root, src, &import_names);
     // unfinished_marker scan is on raw source (catches comments
     // tree-sitter sometimes hides under `comment` kind anyway, plus
     // we already cover marker tokens like todo!() through walk()).
     out.unfinished_marker_count += scan_text_markers(src);
     out
+}
+
+/// S7.6 — walk every attribute/member-access expression and bump
+/// per-import usage where the root identifier is imported.
+fn accumulate_import_usage(
+    node: Node,
+    src: &[u8],
+    imports: &std::collections::HashSet<String>,
+    out: &mut SmellCounts,
+) {
+    let kind = node.kind();
+    if matches!(
+        kind,
+        "attribute"
+            | "member_expression"
+            | "field_access"
+            | "field_expression"
+            | "selector_expression"
+            | "navigation_expression"
+            | "scoped_property_access_expression"
+    ) {
+        // Only count once per chain — at the outermost head, like
+        // count_cross_module_chains does.
+        let parent = node.parent();
+        let parent_is_chain = parent.map(|p| matches!(
+            p.kind(),
+            "attribute"
+                | "member_expression"
+                | "field_access"
+                | "field_expression"
+                | "selector_expression"
+                | "navigation_expression"
+                | "scoped_property_access_expression"
+        )).unwrap_or(false);
+        if !parent_is_chain {
+            if let Some(root_name) = chain_root_identifier(node, src) {
+                if imports.contains(&root_name) {
+                    out.import_usage_count += 1.0;
+                    *out.per_import_usage.entry(root_name).or_insert(0.0) += 1.0;
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        accumulate_import_usage(child, src, imports, out);
+    }
+}
+
+/// S7.6 — count type annotations on PUBLIC function/method
+/// signatures whose type identifier matches an imported name.
+/// Replaces the heuristic count_type_annotations which counted any
+/// type annotation regardless of whether it referenced an external
+/// identifier. The new version is what "type leakage" actually
+/// means: external types in our public surface.
+fn count_imported_type_annotations(
+    node: Node,
+    src: &[u8],
+    imports: &std::collections::HashSet<String>,
+) -> f64 {
+    let kind = node.kind();
+    let mut count = 0.0;
+    if matches!(
+        kind,
+        "function_definition"
+            | "function_declaration"
+            | "function_item"
+            | "method_declaration"
+            | "method_definition"
+    ) {
+        let is_public = node
+            .child_by_field_name("name")
+            .and_then(|n| n.utf8_text(src).ok())
+            .map(|s| !s.starts_with('_'))
+            .unwrap_or(false);
+        if is_public {
+            count += count_imported_types_in_signature(node, src, imports);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        // Skip walking into bodies once we've credited the
+        // signature — nested defs handle themselves at top level.
+        if matches!(child.kind(), "block" | "compound_statement" | "function_body") {
+            continue;
+        }
+        count += count_imported_type_annotations(child, src, imports);
+    }
+    count
+}
+
+fn count_imported_types_in_signature(
+    node: Node,
+    src: &[u8],
+    imports: &std::collections::HashSet<String>,
+) -> f64 {
+    let mut count = 0.0;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if matches!(child.kind(), "block" | "compound_statement" | "function_body") {
+            continue;
+        }
+        // Identifier nodes inside the signature region — params /
+        // return type. Treat each identifier whose text matches an
+        // imported name as one leakage point.
+        if matches!(child.kind(), "identifier" | "type_identifier") {
+            if let Ok(text) = child.utf8_text(src) {
+                if imports.contains(text) {
+                    count += 1.0;
+                }
+            }
+        }
+        count += count_imported_types_in_signature(child, src, imports);
+    }
+    count
 }
 
 /// Collect identifier names that this file binds via import-style
@@ -302,26 +443,12 @@ fn walk(node: Node, src: &[u8], depth: usize, out: &mut SmellCounts) {
     ) {
         out.member_access_count += 1.0;
     }
-    // S7.4: count type-annotation positions in public function
-    // signatures. Heuristic: any identifier inside a `type`,
-    // `return_type`, or annotation field of a public function/
-    // method definition. We don't resolve whether the type is
-    // imported (would need symbol table) — caller correlates with
-    // fan_out / instability to decide if it matters.
-    if matches!(
-        kind,
-        "function_definition" | "function_declaration"
-            | "function_item" | "method_declaration"
-            | "method_definition"
-    ) {
-        if let Some(name_node) = node.child_by_field_name("name") {
-            if let Ok(name) = name_node.utf8_text(src) {
-                if !name.starts_with('_') {
-                    out.type_leakage_count += count_type_annotations(node);
-                }
-            }
-        }
-    }
+    // S7.4 → S7.6 — type_leakage now uses the import-verified
+    // count_imported_type_annotations() in scan() instead of the
+    // heuristic count_type_annotations() that fired on any type
+    // annotation. We leave count_type_annotations in place because
+    // it's still useful for the (now-removed) old behaviour and
+    // tests that need raw type-position counts.
 
     let next_depth = if is_nesting_introducer(kind) { depth + 1 } else { depth };
     let mut cursor = node.walk();
@@ -870,6 +997,11 @@ mod tests {
 
     #[test]
     fn type_leakage_picks_up_typed_signatures() {
+        // S7.6: only types that match an imported name count.
+        // The bare version has no imports → 0. The typed version
+        // imports `ndarray` and uses it as both param and return →
+        // count >= 2. `dict` (Python builtin, not imported) does NOT
+        // count, which is the right behaviour.
         let bare = write_tmp(".py", "def process(data, opts):\n    return data\n");
         let typed = write_tmp(
             ".py",
@@ -877,9 +1009,36 @@ mod tests {
         );
         let b = smell_counts(bare.path().to_str().unwrap()).unwrap();
         let t = smell_counts(typed.path().to_str().unwrap()).unwrap();
+        assert_eq!(b.type_leakage_count, 0.0, "no imports → no leakage; got {b:?}");
         assert!(
-            t.type_leakage_count > b.type_leakage_count,
-            "typed={t:?}, bare={b:?}"
+            t.type_leakage_count >= 2.0,
+            "expected ndarray to count twice; got {t:?}"
+        );
+    }
+
+    #[test]
+    fn import_usage_count_attributes_to_imports_only() {
+        // self.x, self.y, self.z should not count — they're not on
+        // imported identifiers.
+        let intra = write_tmp(
+            ".py",
+            "class Foo:\n    def bar(self):\n        return self.x.y.z\n",
+        );
+        let i = smell_counts(intra.path().to_str().unwrap()).unwrap();
+        assert_eq!(i.import_usage_count, 0.0, "self.x.y.z is intra-class; got {i:?}");
+
+        // requests.get / requests.post / requests.delete — all rooted
+        // at the imported `requests` name. Should count 3.
+        let extern_uses = write_tmp(
+            ".py",
+            "import requests\nrequests.get('a')\nrequests.post('b')\nrequests.delete('c')\n",
+        );
+        let e = smell_counts(extern_uses.path().to_str().unwrap()).unwrap();
+        assert!(e.import_usage_count >= 3.0, "expected >=3; got {e:?}");
+        // Per-import map should also be populated.
+        assert_eq!(
+            e.per_import_usage.get("requests").copied().unwrap_or(0.0),
+            e.import_usage_count
         );
     }
 
