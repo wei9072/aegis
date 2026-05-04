@@ -23,6 +23,7 @@ name = "aegis-core"
 version = "0.1.0"
 dependencies = [
  "aegis-decision",
+ "aegis-index",
  "aegis-trace",
  "bincode",
  "petgraph",
@@ -30,6 +31,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "tempfile",
  "thiserror",
  "tree-sitter",
@@ -52,6 +54,15 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "aegis-index"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

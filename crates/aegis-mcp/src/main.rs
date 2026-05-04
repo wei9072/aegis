@@ -18,6 +18,7 @@
 
 use std::io::{self, BufRead, Write};
 
+use aegis_core::attest::{append_attestation_log, attest};
 use aegis_core::validate::{validate_change, validate_change_with_workspace};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -205,11 +206,36 @@ fn handle_tools_list(id: Value) -> JsonRpcResponse {
             "required": ["path", "new_content", "workspace_root"]
         }
     });
+    let attest_tool = json!({
+        "name": "attest_path",
+        "description": "Post-write attestation. Reads on-disk content of \
+                        `path` and runs absolute checks (Ring 0 syntax + \
+                        Ring 0.7 security + optional Ring R2 cycle). Use \
+                        from PostToolUse hooks / CI / after any write that \
+                        bypasses the pre-write gate. Writes the verdict to \
+                        `<workspace_root>/.aegis/attestations.jsonl` for \
+                        audit when workspace_root is provided.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute path of the file to attest."
+                },
+                "workspace_root": {
+                    "type": "string",
+                    "description": "Optional. Enables Ring R2 cycle detection \
+                                    and JSONL audit log."
+                }
+            },
+            "required": ["path"]
+        }
+    });
     JsonRpcResponse {
         jsonrpc: "2.0",
         id,
         result: Some(json!({
-            "tools": [single_file_tool, workspace_tool]
+            "tools": [single_file_tool, workspace_tool, attest_tool]
         })),
         error: None,
     }
@@ -217,7 +243,10 @@ fn handle_tools_list(id: Value) -> JsonRpcResponse {
 
 fn handle_tools_call(id: Value, params: &Value) -> JsonRpcResponse {
     let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    if name != "validate_change" && name != "validate_change_with_workspace" {
+    if !matches!(
+        name,
+        "validate_change" | "validate_change_with_workspace" | "attest_path"
+    ) {
         return JsonRpcResponse {
             jsonrpc: "2.0",
             id,
@@ -235,33 +264,47 @@ fn handle_tools_call(id: Value, params: &Value) -> JsonRpcResponse {
             return tool_error(id, "missing required argument 'path'");
         }
     };
-    let new_content = match args.get("new_content").and_then(|v| v.as_str()) {
-        Some(c) => c.to_string(),
-        None => {
-            return tool_error(id, "missing required argument 'new_content'");
-        }
-    };
-    let old_content = args
-        .get("old_content")
-        .and_then(|v| v.as_str())
-        .map(String::from);
 
-    let verdict = if name == "validate_change_with_workspace" {
-        let workspace_root = match args.get("workspace_root").and_then(|v| v.as_str()) {
-            Some(r) => r.to_string(),
+    let verdict = if name == "attest_path" {
+        let workspace_root = args
+            .get("workspace_root")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let v = attest(&path, workspace_root.as_deref());
+        if let Some(ref ws) = workspace_root {
+            // Best-effort log append; never fail the tool call on it.
+            let _ = append_attestation_log(ws, &v);
+        }
+        serde_json::to_value(&v).unwrap_or(Value::Null)
+    } else {
+        let new_content = match args.get("new_content").and_then(|v| v.as_str()) {
+            Some(c) => c.to_string(),
             None => {
-                return tool_error(id, "missing required argument 'workspace_root'");
+                return tool_error(id, "missing required argument 'new_content'");
             }
         };
-        validate_change_with_workspace(
-            &path,
-            &new_content,
-            old_content.as_deref(),
-            &workspace_root,
-        )
-        .to_value()
-    } else {
-        validate_change(&path, &new_content, old_content.as_deref()).to_value()
+        let old_content = args
+            .get("old_content")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        if name == "validate_change_with_workspace" {
+            let workspace_root = match args.get("workspace_root").and_then(|v| v.as_str()) {
+                Some(r) => r.to_string(),
+                None => {
+                    return tool_error(id, "missing required argument 'workspace_root'");
+                }
+            };
+            validate_change_with_workspace(
+                &path,
+                &new_content,
+                old_content.as_deref(),
+                &workspace_root,
+            )
+            .to_value()
+        } else {
+            validate_change(&path, &new_content, old_content.as_deref()).to_value()
+        }
     };
     JsonRpcResponse {
         jsonrpc: "2.0",

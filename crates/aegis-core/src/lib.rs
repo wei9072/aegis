@@ -10,6 +10,7 @@ pub mod ir;
 pub mod graph;
 pub mod signals;
 pub mod incremental;
+pub mod attest;
 pub mod enforcement;
 pub mod reasons;
 pub mod security;

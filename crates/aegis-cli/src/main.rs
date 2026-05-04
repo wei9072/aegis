@@ -99,6 +99,27 @@ enum Command {
     /// model name, and which env var holds your API key. Writes the
     /// TOML file; does NOT export anything to your shell.
     Setup,
+
+    /// Post-write attestation: read on-disk content of `path` and
+    /// run absolute checks (Ring 0 syntax + Ring 0.7 security +
+    /// optional Ring R2 cycle). Designed for PostToolUse hooks /
+    /// CI pipelines so writes that bypass the pre-write gate still
+    /// get judged. Appends a JSONL row to
+    /// `<workspace>/.aegis/attestations.jsonl`.
+    Attest {
+        /// File whose on-disk content should be attested.
+        path: PathBuf,
+        /// Workspace root for cycle detection. If omitted, only
+        /// single-file checks run.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Skip the JSONL log append (verdict is still printed).
+        #[arg(long)]
+        no_log: bool,
+        /// Emit verdict as JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -199,6 +220,54 @@ fn main() -> ExitCode {
                 json,
             ),
         },
+        Command::Attest {
+            path,
+            workspace,
+            no_log,
+            json,
+        } => cmd_attest(path, workspace, no_log, json),
+    }
+}
+
+fn cmd_attest(
+    path: PathBuf,
+    workspace: Option<PathBuf>,
+    no_log: bool,
+    json: bool,
+) -> ExitCode {
+    use aegis_core::attest::{append_attestation_log, attest};
+    let path_str = path.to_string_lossy().into_owned();
+    let workspace_str = workspace.as_ref().map(|p| p.to_string_lossy().into_owned());
+    let verdict = attest(&path_str, workspace_str.as_deref());
+
+    // Best-effort log append; failure does not affect exit code.
+    if !no_log {
+        if let Some(ref ws) = workspace_str {
+            if let Err(e) = append_attestation_log(ws, &verdict) {
+                eprintln!("aegis attest: log append failed: {e}");
+            }
+        }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&verdict).unwrap());
+    } else {
+        println!("attest {} → {}", verdict.path, verdict.decision);
+        if !verdict.content_sha256.is_empty() {
+            println!("  sha256: {}", verdict.content_sha256);
+        }
+        for r in &verdict.reasons {
+            let layer = r.get("layer").and_then(|v| v.as_str()).unwrap_or("?");
+            let rule = r.get("rule_id").and_then(|v| v.as_str()).unwrap_or("?");
+            let detail = r.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+            println!("  - [{layer} {rule}] {detail}");
+        }
+    }
+
+    if verdict.decision == "BLOCK" {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
