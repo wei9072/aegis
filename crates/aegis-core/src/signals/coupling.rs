@@ -51,3 +51,39 @@ pub fn fan_out_signal(filepath: &str) -> Result<f64, String> {
     };
     Ok(fan_out_from_code_with(&code, adapter) as f64)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::languages::javascript::JavaScriptAdapter;
+    use crate::ast::languages::python::PythonAdapter;
+    use crate::ast::languages::typescript::TypeScriptAdapter;
+
+    #[test]
+    fn python_relative_import_is_counted() {
+        let code = "from . import foo\nfrom .bar import baz\nimport os\n";
+        let n = fan_out_from_code_with(code, &PythonAdapter);
+        assert!(n >= 2, "expected relative imports + os; got fan_out={n}");
+    }
+
+    #[test]
+    fn typescript_export_from_is_counted() {
+        let code = "export { a } from './a';\nexport * from './b';\n";
+        let n = fan_out_from_code_with(code, &TypeScriptAdapter);
+        assert!(n >= 2, "expected ./a + ./b; got fan_out={n}");
+    }
+
+    #[test]
+    fn typescript_dynamic_import_is_counted() {
+        let code = "const m = import('./dyn');\n";
+        let n = fan_out_from_code_with(code, &TypeScriptAdapter);
+        assert!(n >= 1, "expected dynamic import('./dyn'); got fan_out={n}");
+    }
+
+    #[test]
+    fn javascript_export_from_and_dynamic_import_counted() {
+        let code = "export { a } from './a';\nimport('./b');\n";
+        let n = fan_out_from_code_with(code, &JavaScriptAdapter);
+        assert!(n >= 2, "expected ./a + ./b; got fan_out={n}");
+    }
+}

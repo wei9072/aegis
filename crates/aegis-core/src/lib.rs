@@ -11,6 +11,8 @@ pub mod graph;
 pub mod signals;
 pub mod incremental;
 pub mod enforcement;
+pub mod security;
 pub mod scan;
 pub mod validate;
+pub mod workspace;
 pub mod signal_layer_pyapi;

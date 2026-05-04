@@ -71,6 +71,7 @@ fn is_chain_node(kind: &str) -> bool {
         "attribute" | "call" | "subscript"
         // TypeScript / JavaScript
         | "member_expression" | "call_expression" | "subscript_expression"
+        | "optional_chain"
         // Java
         | "method_invocation" | "field_access"
         // Go
@@ -91,8 +92,33 @@ fn is_chain_node(kind: &str) -> bool {
     )
 }
 
+/// Wrappers that don't add to chain depth themselves but must be
+/// transparently traversed so the receiver beneath them is still
+/// found. Without this, `(await foo()).bar` and `(x as T).y` cut
+/// the chain off at the wrapper.
+fn is_transparent_wrapper(kind: &str) -> bool {
+    matches!(
+        kind,
+        "parenthesized_expression"
+            | "await_expression"
+            | "non_null_expression"      // TS `x!`
+            | "as_expression"            // TS `x as T`
+            | "type_assertion"           // TS `<T>x`
+            | "satisfies_expression"     // TS `x satisfies T`
+    )
+}
+
 fn default_chain_depth(node: Node) -> usize {
     let kind = node.kind();
+    // Transparent wrappers — recurse into the inner expression
+    // without consuming a depth unit. `(await x).y.z` should still
+    // count as depth 3.
+    if is_transparent_wrapper(kind) {
+        if let Some(inner) = node.named_child(0) {
+            return default_chain_depth(inner);
+        }
+        return 0;
+    }
     // Member-access / field-access shapes — recurse into the
     // receiver and add 1.
     if matches!(
@@ -107,6 +133,7 @@ fn default_chain_depth(node: Node) -> usize {
             | "scoped_property_access_expression"
             | "selector"
             | "try_expression"
+            | "optional_chain"
     ) {
         // Most grammars expose the receiver as field "object" or
         // "operand" or "expression". Rust `field_expression` uses
@@ -155,4 +182,47 @@ fn default_chain_depth(node: Node) -> usize {
     }
 
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::languages::javascript::JavaScriptAdapter;
+    use crate::ast::languages::typescript::TypeScriptAdapter;
+    use tree_sitter::Parser;
+
+    fn parse_depth(code: &str, adapter: &dyn LanguageAdapter) -> usize {
+        let mut p = Parser::new();
+        p.set_language(adapter.tree_sitter_language()).unwrap();
+        let tree = p.parse(code, None).unwrap();
+        adapter.max_chain_depth(tree.root_node())
+    }
+
+    #[test]
+    fn ts_optional_chain_counts() {
+        let code = "const x = a?.b?.c?.d;\n";
+        let d = parse_depth(code, &TypeScriptAdapter);
+        assert!(d >= 3, "a?.b?.c?.d should yield depth>=3, got {d}");
+    }
+
+    #[test]
+    fn ts_await_does_not_truncate_chain() {
+        let code = "async function f() { return (await x()).a.b.c; }\n";
+        let d = parse_depth(code, &TypeScriptAdapter);
+        assert!(d >= 3, "(await x()).a.b.c should yield depth>=3, got {d}");
+    }
+
+    #[test]
+    fn js_optional_chain_counts() {
+        let code = "const x = a?.b?.c;\n";
+        let d = parse_depth(code, &JavaScriptAdapter);
+        assert!(d >= 2, "a?.b?.c should yield depth>=2, got {d}");
+    }
+
+    #[test]
+    fn ts_non_null_assertion_does_not_truncate() {
+        let code = "const x = a!.b.c.d;\n";
+        let d = parse_depth(code, &TypeScriptAdapter);
+        assert!(d >= 3, "a!.b.c.d should yield depth>=3, got {d}");
+    }
 }

@@ -268,9 +268,14 @@ LLM provider). Run `aegis languages` for the live registry.
 | Dart | ✅ | ✅ | 🟡 | `.dart` |
 | Rust | ✅ | ✅ | ✅ | `.rs` |
 
-🟡 = the default chain-depth walker under-counts on this language's
-AST shape; per-language overrides are the planned fix path
-(`LanguageAdapter::max_chain_depth`).
+🟡 = explicitly verified to under-count on this language's AST shape;
+per-language overrides are the planned fix path
+(`LanguageAdapter::max_chain_depth`). **Note:** the default walker is
+union-of-known-shapes across grammars — only Java/Dart have been
+explicitly hand-verified, so other languages may also under-count
+silently if their grammar's receiver field name differs from the
+fallback list. File a bug with a minimal repro if you hit a case the
+walker misses.
 
 Adding a language is one Cargo dep + one adapter file under
 `crates/aegis-core/src/ast/languages/` + one `.scm` query —
