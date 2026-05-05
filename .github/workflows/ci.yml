@@ -1,7 +1,6 @@
-# V2.0 — continuous integration. Runs on every push + PR.
-# Single job: build + test the workspace on Linux x86_64. Platform
-# matrix lives in release.yml (only fires on tags so PRs don't burn
-# 5×2 minutes per change).
+# V2 continuous integration. Runs on every push + PR.
+# Single job: build + test the 3-crate workspace on Linux x86_64.
+# Platform matrix lives in release.yml (only fires on tags).
 
 name: ci
 
@@ -22,10 +21,11 @@ jobs:
         run: cargo build --workspace --locked
       - name: cargo test
         run: cargo test --workspace --locked
-      - name: aegis smoke
+      - name: aegis-mcp smoke
         run: |
-          ./target/debug/aegis languages
-          ./target/debug/aegis check Cargo.toml
+          # MCP server should answer initialize over stdio JSON-RPC.
+          # V2 has no `aegis` CLI binary — `aegis-mcp` is the only
+          # application; everything else is library code in aegis-core.
           echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
             | ./target/debug/aegis-mcp \
             | grep -q '"protocolVersion"'
