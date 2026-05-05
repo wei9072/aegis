@@ -1,16 +1,17 @@
 //! Signal extraction aggregator.
 //!
-//! Filename retained from the V0.x PyO3 era for diff continuity;
-//! the `_pyapi` suffix is now historical — the file is pure Rust as
-//! of V1.10. A rename is a backlogged hygiene item.
+//! Combines the four Ring 0.5 sub-walks (fan_out, chain_depth, smells,
+//! local-import resolution lives separately because it needs a real
+//! `file_path`) into a single Vec<SignalData> per parsed file. The V1
+//! `severity_for` mapping is retained as internal metadata so callers
+//! that want a hint about whether a regression is "verifiably bad" or
+//! "heuristically suspicious" still have it. The findings layer does
+//! NOT surface severity — it's history that didn't get pulled forward.
 
 use serde::{Deserialize, Serialize};
 
 use crate::ast::parsed_file::ParsedFile;
-use crate::signals::{
-    chain_depth_from_parsed, chain_depth_signal, fan_out_from_parsed, fan_out_signal,
-    smell_counts, smell_counts_from_parsed,
-};
+use crate::signals::{chain_depth, fan_out, smell_counts};
 
 /// S7.1 — How seriously the cost-regression layer should treat a
 /// regression of this signal.
@@ -107,29 +108,13 @@ pub fn severity_for(name: &str) -> SignalSeverity {
     }
 }
 
-/// Pure-Rust signal extraction. Returns the union of:
-/// - Ring 0.5 structural metrics (fan_out, max_chain_depth)
-/// - Phase 2 LLM-failure smell counters (empty handlers, TODOs,
-///   unreachable code, cyclomatic complexity, nesting depth,
-///   suspicious literals)
-///
-/// All counters participate in cost-aware regression — block fires
-/// only when a counter goes UP relative to old_content.
-pub fn extract_signals_native(filepath: &str) -> Result<Vec<SignalData>, String> {
-    let fan_out = fan_out_signal(filepath)?;
-    let depth = chain_depth_signal(filepath)?;
-    let smells = smell_counts(filepath).unwrap_or_default();
-    Ok(assemble_signal_data(fan_out, depth, &smells, filepath))
-}
-
-/// Layer 1-shared variant — extract every Ring 0.5 signal from a
-/// pre-parsed `ParsedFile`. Single tree, no re-parse, no disk read.
-/// Replaces the 3-independent-parser pattern in `extract_signals_native`.
-pub fn extract_signals_from_parsed(parsed: &ParsedFile<'_>, filepath: &str) -> Vec<SignalData> {
-    let fan_out = fan_out_from_parsed(parsed) as f64;
-    let depth = chain_depth_from_parsed(parsed);
-    let smells = smell_counts_from_parsed(parsed);
-    assemble_signal_data(fan_out, depth, &smells, filepath)
+/// Extract every Ring 0.5 signal from a pre-parsed file. Single
+/// tree, no re-parse, no disk read.
+pub fn extract_signals(parsed: &ParsedFile<'_>, filepath: &str) -> Vec<SignalData> {
+    let fan_out_value = fan_out(parsed) as f64;
+    let depth = chain_depth(parsed);
+    let smells = smell_counts(parsed);
+    assemble_signal_data(fan_out_value, depth, &smells, filepath)
 }
 
 fn assemble_signal_data(

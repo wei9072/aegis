@@ -31,10 +31,9 @@
 //! free-form per-violation data should live, and even then only
 //! identifier-derived data.
 
-use tree_sitter::{Node, Parser};
+use tree_sitter::Node;
 
 use crate::ast::parsed_file::ParsedFile;
-use crate::ast::registry::LanguageRegistry;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SecurityViolation {
@@ -47,37 +46,16 @@ pub struct SecurityViolation {
     pub severity: String, // "block" | "warn"
 }
 
-/// Run Ring 0.7 on a file. Returns violations not silenced by
-/// `aegis-allow` comments.
-pub fn check_security(filepath: &str, code: &str) -> Vec<SecurityViolation> {
-    let Some(adapter) = LanguageRegistry::global().for_path(filepath) else {
-        return vec![];
-    };
-    let mut parser = Parser::new();
-    if parser.set_language(adapter.tree_sitter_language()).is_err() {
-        return vec![];
-    }
-    let Some(tree) = parser.parse(code, None) else {
-        return vec![];
-    };
-    let src = code.as_bytes();
-    let mut out: Vec<SecurityViolation> = Vec::new();
-    walk(tree.root_node(), src, &mut out);
-    // Text-based rules (CORS pair, regex on whole file).
-    out.extend(scan_text_rules(code));
-    suppress_allowed(out, code)
-}
-
-/// Layer 1-shared variant — run Ring 0.7 against a pre-parsed
-/// `ParsedFile`. No re-parse. `aegis-allow` suppression still runs
-/// (the user-facing semantics don't change in this PR; that becomes
-/// `user_acknowledged` annotation in PR 4).
-pub fn check_security_from_parsed(parsed: &ParsedFile<'_>) -> Vec<SecurityViolation> {
+/// Run security rules against a pre-parsed file. Returns the raw
+/// list of pattern matches; `aegis-allow` annotation is handled by
+/// the findings layer (it sets `user_acknowledged` on the matching
+/// finding rather than dropping it).
+pub fn check_security(parsed: &ParsedFile<'_>) -> Vec<SecurityViolation> {
     let src = parsed.source_bytes();
     let mut out: Vec<SecurityViolation> = Vec::new();
     walk(parsed.root_node(), src, &mut out);
     out.extend(scan_text_rules(parsed.source()));
-    suppress_allowed(out, parsed.source())
+    out
 }
 
 fn walk(node: Node, src: &[u8], out: &mut Vec<SecurityViolation>) {
@@ -564,34 +542,6 @@ fn scan_text_rules(code: &str) -> Vec<SecurityViolation> {
     out
 }
 
-// ─── allow-comment suppression ───────────────────────────────────
-fn suppress_allowed(violations: Vec<SecurityViolation>, code: &str) -> Vec<SecurityViolation> {
-    let lines: Vec<&str> = code.lines().collect();
-    violations
-        .into_iter()
-        .filter(|v| !is_silenced(v, &lines))
-        .collect()
-}
-
-fn is_silenced(v: &SecurityViolation, lines: &[&str]) -> bool {
-    let needle_specific = format!("aegis-allow: {}", v.rule_id);
-    let needle_all = "aegis-allow: all";
-    let line_idx = v.start_line.saturating_sub(1);
-    if let Some(line) = lines.get(line_idx) {
-        if line.contains(&needle_specific) || line.contains(needle_all) {
-            return true;
-        }
-    }
-    if line_idx > 0 {
-        if let Some(prev) = lines.get(line_idx - 1) {
-            if prev.contains(&needle_specific) || prev.contains(needle_all) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 fn push(out: &mut Vec<SecurityViolation>, node: Node, rule_id: &str, severity: &str, message: String) {
     let s = node.start_position();
     let e = node.end_position();
@@ -609,13 +559,14 @@ fn push(out: &mut Vec<SecurityViolation>, node: Node, rule_id: &str, severity: &
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use crate::ast::parsed_file::parse;
 
     fn check(suffix: &str, code: &str) -> Vec<SecurityViolation> {
-        let mut tmp = tempfile::Builder::new().suffix(suffix).tempfile().unwrap();
-        tmp.write_all(code.as_bytes()).unwrap();
-        tmp.flush().unwrap();
-        check_security(tmp.path().to_str().unwrap(), code)
+        // Pick any path with the right extension — parse() only cares
+        // about extension dispatch; no IO occurs.
+        let path = format!("test{suffix}");
+        let pf = parse(&path, code).expect("language adapter exists for test extension");
+        check_security(&pf)
     }
 
     #[test]
@@ -723,13 +674,17 @@ mod tests {
     }
 
     #[test]
-    fn sec006_anchors_on_real_line_so_aegis_allow_works() {
-        // S1.7: SEC006 line was hardcoded to 1, so // aegis-allow on
-        // the actual CORS config line had no effect. Now anchored.
-        let code = "const config = {\n  origin: \"*\",  // aegis-allow: SEC006\n  credentials: true,\n};\n";
+    fn sec006_anchors_on_real_line() {
+        // SEC006's wildcard+credentials check anchors at the real
+        // line where the wildcard origin appears (not line 1) so the
+        // findings layer can apply aegis-allow annotation correctly.
+        let code = "const config = {\n  origin: \"*\",\n  credentials: true,\n};\n";
         let v = check(".js", code);
-        assert!(!v.iter().any(|v| v.rule_id == "SEC006"),
-            "expected SEC006 silenced via aegis-allow, got {v:?}");
+        let f = v
+            .iter()
+            .find(|v| v.rule_id == "SEC006")
+            .expect("expected SEC006");
+        assert_eq!(f.start_line, 2, "violation must anchor at the wildcard line");
     }
 
     #[test]
@@ -767,11 +722,17 @@ mod tests {
     }
 
     #[test]
-    fn aegis_allow_silences_specific_rule() {
+    fn aegis_allow_no_longer_filters_at_security_layer() {
+        // V2: suppress logic moved up to the findings layer (sets
+        // user_acknowledged: true on the wrapped Finding). The raw
+        // SecurityViolation list always contains every match.
         let v = check(
             ".py",
             "import requests  # aegis-allow: SEC003\nrequests.get(url, verify=False)  # aegis-allow: SEC003\n",
         );
-        assert!(!v.iter().any(|v| v.rule_id == "SEC003"), "got {v:?}");
+        assert!(
+            v.iter().any(|v| v.rule_id == "SEC003"),
+            "SEC003 should still appear at this layer; suppression is now annotative, not subtractive"
+        );
     }
 }

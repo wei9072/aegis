@@ -12,7 +12,6 @@
 use tree_sitter::Node;
 
 use crate::ast::parsed_file::ParsedFile;
-use crate::ast::registry::LanguageRegistry;
 
 /// Output of a single-file structural smell scan.
 #[derive(Debug, Default, Clone)]
@@ -71,33 +70,10 @@ pub struct SmellCounts {
     pub per_import_usage: std::collections::HashMap<String, f64>,
 }
 
-/// Walk a file once and return all smell counters.
-pub fn smell_counts(filepath: &str) -> Result<SmellCounts, String> {
-    let code = std::fs::read_to_string(filepath).map_err(|e| e.to_string())?;
-    smell_counts_for_code(filepath, &code)
-}
-
-/// S7.7 — same scan but operating on in-memory `code` rather than
-/// reading from disk. Used by WorkspaceIndex::summarize_file so the
-/// per-file SmellCounts can be cached alongside imports and symbols
-/// without an extra disk hit.
-pub fn smell_counts_for_code(filepath: &str, code: &str) -> Result<SmellCounts, String> {
-    let Some(adapter) = LanguageRegistry::global().for_path(filepath) else {
-        return Ok(SmellCounts::default());
-    };
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(adapter.tree_sitter_language())
-        .map_err(|e| e.to_string())?;
-    let tree = parser.parse(code, None).ok_or("parse returned None")?;
-    Ok(scan(tree.root_node(), code.as_bytes()))
-}
-
-/// Layer 1-shared variant — run the smell scan on a pre-parsed
-/// `ParsedFile`. The 5 sub-walks (imports, main walker, cross-module
-/// chains, import usage, type leakage, text markers) all run on the
-/// shared tree without re-parsing.
-pub fn smell_counts_from_parsed(parsed: &ParsedFile<'_>) -> SmellCounts {
+/// Run the smell scan on a pre-parsed file. Five internal sub-walks
+/// (imports, main walker, cross-module chains, import usage, type
+/// leakage, text markers) run on the shared tree without re-parsing.
+pub fn smell_counts(parsed: &ParsedFile<'_>) -> SmellCounts {
     scan(parsed.root_node(), parsed.source_bytes())
 }
 
@@ -867,31 +843,41 @@ mod tests {
         tmp
     }
 
+    /// Test helper: parse tmp file and run smell_counts. Replaces the
+    /// V1 disk-based smell_counts(filepath) API removed in V2 PR 8.
+    fn smells_for(tmp: &tempfile::NamedTempFile) -> SmellCounts {
+        let path_str = tmp.path().to_string_lossy().into_owned();
+        let code = std::fs::read_to_string(tmp.path()).unwrap();
+        let parsed = crate::ast::parsed_file::parse(&path_str, &code)
+            .expect("test fixture extension must have an adapter");
+        smell_counts(&parsed)
+    }
+
     #[test]
     fn empty_except_python() {
         let tmp = write_tmp(".py", "try:\n    x = 1\nexcept Exception:\n    pass\n");
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert!(c.empty_handler_count >= 1.0, "expected empty_handler>=1, got {c:?}");
     }
 
     #[test]
     fn empty_catch_typescript() {
         let tmp = write_tmp(".ts", "try { foo(); } catch (e) { }\n");
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert!(c.empty_handler_count >= 1.0, "expected empty catch>=1, got {c:?}");
     }
 
     #[test]
     fn unfinished_markers_counted() {
         let tmp = write_tmp(".py", "# TODO: implement this\n# FIXME: race condition\nx = 1\n");
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert!(c.unfinished_marker_count >= 2.0, "got {c:?}");
     }
 
     #[test]
     fn rust_todo_macro_counted() {
         let tmp = write_tmp(".rs", "fn f() { todo!() }\n");
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert!(c.unfinished_marker_count >= 1.0, "got {c:?}");
     }
 
@@ -901,7 +887,7 @@ mod tests {
             ".py",
             "def f():\n    return 1\n    x = 2\n    y = 3\n",
         );
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert!(c.unreachable_stmt_count >= 2.0, "got {c:?}");
     }
 
@@ -911,7 +897,7 @@ mod tests {
             ".py",
             "def f(x):\n    if x:\n        pass\n    elif x == 1:\n        pass\n    for i in range(3):\n        pass\n",
         );
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert!(c.cyclomatic_complexity >= 3.0, "got {c:?}");
     }
 
@@ -921,28 +907,28 @@ mod tests {
             ".py",
             "def f():\n    if a:\n        if b:\n            if c:\n                if d:\n                    pass\n",
         );
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert!(c.nesting_depth >= 4.0, "got {c:?}");
     }
 
     #[test]
     fn suspicious_literal_secret_prefix() {
         let tmp = write_tmp(".py", "API_KEY = \"sk-abcd1234efgh5678ijkl\"\n");
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert!(c.suspicious_literal_count >= 1.0, "got {c:?}");
     }
 
     #[test]
     fn suspicious_literal_localhost_with_port() {
         let tmp = write_tmp(".py", "URL = \"localhost:5432\"\n");
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert!(c.suspicious_literal_count >= 1.0, "got {c:?}");
     }
 
     #[test]
     fn mutable_default_arg_python() {
         let tmp = write_tmp(".py", "def f(items=[]):\n    items.append(1)\n");
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert!(c.mutable_default_arg_count >= 1.0, "got {c:?}");
     }
 
@@ -952,7 +938,7 @@ mod tests {
             ".py",
             "def f():\n    result = compute()\n    log(result)\n    result = fetch()\n",
         );
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert!(c.shadowed_local_count >= 1.0, "got {c:?}");
     }
 
@@ -962,7 +948,7 @@ mod tests {
             ".py",
             "def f(items):\n    total = 0\n    for x in items:\n        total = total + x\n",
         );
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert_eq!(c.shadowed_local_count, 0.0, "accumulator should not flag, got {c:?}");
     }
 
@@ -972,7 +958,7 @@ mod tests {
             ".py",
             "def test_one():\n    assert True\n\ndef test_two():\n    assert True\n\ndef helper():\n    pass\n",
         );
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert!(c.test_count >= 2.0, "got {c:?}");
     }
 
@@ -982,7 +968,7 @@ mod tests {
             ".ts",
             "describe('x', () => {\n  it('does y', () => {});\n  it('does z', () => {});\n});\n",
         );
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert!(c.test_count >= 2.0, "got {c:?}");
     }
 
@@ -996,8 +982,8 @@ mod tests {
              requests.get('a')\nrequests.post('b')\nrequests.put('c')\n\
              requests.delete('d')\nrequests.options('e')\n",
         );
-        let l = smell_counts(light.path().to_str().unwrap()).unwrap();
-        let h = smell_counts(heavy.path().to_str().unwrap()).unwrap();
+        let l = smells_for(&light);
+        let h = smells_for(&heavy);
         assert!(
             h.member_access_count > l.member_access_count,
             "heavy={h:?}, light={l:?}"
@@ -1016,8 +1002,8 @@ mod tests {
             ".py",
             "from numpy import ndarray\ndef process(data: ndarray, opts: dict) -> ndarray:\n    return data\n",
         );
-        let b = smell_counts(bare.path().to_str().unwrap()).unwrap();
-        let t = smell_counts(typed.path().to_str().unwrap()).unwrap();
+        let b = smells_for(&bare);
+        let t = smells_for(&typed);
         assert_eq!(b.type_leakage_count, 0.0, "no imports → no leakage; got {b:?}");
         assert!(
             t.type_leakage_count >= 2.0,
@@ -1033,7 +1019,7 @@ mod tests {
             ".py",
             "class Foo:\n    def bar(self):\n        return self.x.y.z\n",
         );
-        let i = smell_counts(intra.path().to_str().unwrap()).unwrap();
+        let i = smells_for(&intra);
         assert_eq!(i.import_usage_count, 0.0, "self.x.y.z is intra-class; got {i:?}");
 
         // requests.get / requests.post / requests.delete — all rooted
@@ -1042,7 +1028,7 @@ mod tests {
             ".py",
             "import requests\nrequests.get('a')\nrequests.post('b')\nrequests.delete('c')\n",
         );
-        let e = smell_counts(extern_uses.path().to_str().unwrap()).unwrap();
+        let e = smells_for(&extern_uses);
         assert!(e.import_usage_count >= 3.0, "expected >=3; got {e:?}");
         // Per-import map should also be populated.
         assert_eq!(
@@ -1059,7 +1045,7 @@ mod tests {
             ".py",
             "def show(order):\n    return Order.customer.address.country\n",
         );
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert!(c.cross_module_chain_count >= 1.0, "got {c:?}");
     }
 
@@ -1071,7 +1057,7 @@ mod tests {
             ".py",
             "class Foo:\n    def bar(self):\n        return self.x.y\n",
         );
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert_eq!(c.cross_module_chain_count, 0.0, "got {c:?}");
     }
 
@@ -1083,14 +1069,14 @@ mod tests {
             ".py",
             "from store import session\nsession.user.profile.email_address\n",
         );
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert!(c.cross_module_chain_count >= 1.0, "got {c:?}");
     }
 
     #[test]
     fn clean_file_has_zero_smells() {
         let tmp = write_tmp(".py", "def add(a, b):\n    return a + b\n");
-        let c = smell_counts(tmp.path().to_str().unwrap()).unwrap();
+        let c = smells_for(&tmp);
         assert_eq!(c.empty_handler_count, 0.0);
         assert_eq!(c.unfinished_marker_count, 0.0);
         assert_eq!(c.unreachable_stmt_count, 0.0);

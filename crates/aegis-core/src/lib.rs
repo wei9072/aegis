@@ -21,15 +21,12 @@
 //! V1 ValidateVerdict / decision / reasons / severity all removed.
 
 pub mod ast;
-pub mod ir;
-pub mod graph;
-pub mod signals;
-pub mod incremental;
 pub mod enforcement;
 pub mod findings;
 pub mod security;
+pub mod signals;
+pub mod signal_extraction;
 pub mod workspace;
-pub mod signal_layer_pyapi;
 
 pub use findings::{
     gather_findings, gather_findings_with_workspace, Finding, FindingKind, Range,

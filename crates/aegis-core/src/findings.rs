@@ -24,11 +24,11 @@ use serde_json::{json, Map, Value};
 
 use crate::ast::parsed_file::{parse as parse_file, ParsedFile};
 use crate::ast::registry::LanguageRegistry;
-use crate::enforcement::syntax_violations_from_parsed;
-use crate::security::check_security_from_parsed;
-use crate::signal_layer_pyapi::extract_signals_from_parsed;
-use crate::signals::unresolved_local_import_count_from_parsed;
-use crate::workspace::{public_symbols_lost, summarize_file_from_parsed, WorkspaceIndex};
+use crate::enforcement::syntax_violations;
+use crate::security::check_security;
+use crate::signal_extraction::extract_signals;
+use crate::signals::unresolved_local_import_count;
+use crate::workspace::{public_symbols_lost, summarize_file, WorkspaceIndex};
 
 /// Wire-format schema version for the V2 findings shape. Independent
 /// of the V1 `VERDICT_SCHEMA_VERSION` so consumers can branch on
@@ -178,9 +178,9 @@ pub fn gather_findings(
     let mut findings = Vec::new();
     let file_path = PathBuf::from(path);
 
-    // Syntax (Ring 0)
-    for v in syntax_violations_from_parsed(&parsed_new, path) {
-        let mut f = Finding::new(FindingKind::Syntax, "ring0_violation", file_path.clone())
+    // Syntax findings — tree-sitter ERROR/MISSING anchors.
+    for v in syntax_violations(&parsed_new, path) {
+        let mut f = Finding::new(FindingKind::Syntax, "syntax_error", file_path.clone())
             .with_range(Range {
                 start_line: v.start_line,
                 start_col: v.start_col,
@@ -189,15 +189,15 @@ pub fn gather_findings(
             })
             .with_context("node_kind", json!(v.kind))
             .with_context("message", json!(v.message));
-        f = annotate_acknowledgement(f, "ring0_violation", new_content);
+        f = annotate_acknowledgement(f, "syntax_error", new_content);
         findings.push(f);
     }
 
-    // Security (Ring 0.7) — emit even if Ring 0 fired; LLM can choose
-    // to ignore Ring 0.7 findings on a syntactically broken file.
-    // V2 stops short-circuiting because findings are descriptive.
-    for sv in check_security_from_parsed(&parsed_new) {
-        let f = Finding::new(FindingKind::Security, &sv.rule_id, file_path.clone())
+    // Security findings — emit every match; LLM decides which matter.
+    // V2 doesn't short-circuit on syntax errors; LLM can choose to
+    // ignore security findings on a syntactically broken file.
+    for sv in check_security(&parsed_new) {
+        let mut f = Finding::new(FindingKind::Security, &sv.rule_id, file_path.clone())
             .with_range(Range {
                 start_line: sv.start_line,
                 start_col: sv.start_col,
@@ -206,23 +206,25 @@ pub fn gather_findings(
             })
             .with_context("severity_hint", json!(sv.severity))
             .with_context("message", json!(sv.message));
-        // Note: check_security_from_parsed already filters via
-        // suppress_allowed in V1. PR 6 will swap that for annotation;
-        // for now, suppressed findings simply don't appear here, so
-        // we don't need to set user_acknowledged from a separate scan.
+        // V2: aegis-allow comments annotate, do not filter. Each
+        // security match is checked individually because a single
+        // file may have several SEC findings, only some of which the
+        // user has acknowledged.
+        let rule_id = sv.rule_id.clone();
+        f = annotate_acknowledgement(f, &rule_id, new_content);
         findings.push(f);
     }
 
     // Signals (Ring 0.5) — emit value & delta as context.
-    let new_sigs = extract_signals_from_parsed(&parsed_new, path);
+    let new_sigs = extract_signals(&parsed_new, path);
     let old_sigs = parsed_old
         .as_ref()
-        .map(|p| extract_signals_from_parsed(p, path));
+        .map(|p| extract_signals(p, path));
     let new_unresolved =
-        unresolved_local_import_count_from_parsed(&parsed_new, path);
+        unresolved_local_import_count(&parsed_new, path);
     let old_unresolved = parsed_old
         .as_ref()
-        .map(|p| unresolved_local_import_count_from_parsed(p, path));
+        .map(|p| unresolved_local_import_count(p, path));
 
     let mut new_values: std::collections::BTreeMap<String, f64> =
         new_sigs.iter().map(|s| (s.name.clone(), s.value)).collect();
@@ -274,8 +276,8 @@ pub fn gather_findings_with_workspace(
 
     let parsed_new_for_ws = parse_file(path, new_content);
     let after = match parsed_new_for_ws.as_ref() {
-        Some(p) => baseline.with_change_from_parsed(&path_buf, p),
-        None => baseline.with_change(&path_buf, new_content),
+        Some(p) => baseline.with_change(&path_buf, p),
+        None => baseline.clone(),
     };
 
     // file_role finding — pure context, no judgment about whether the
@@ -317,12 +319,12 @@ pub fn gather_findings_with_workspace(
 
     // Public-symbol loss
     let new_summary = match parsed_new_for_ws.as_ref() {
-        Some(p) => summarize_file_from_parsed(&path_buf, p),
+        Some(p) => summarize_file(&path_buf, p),
         None => return findings,
     };
     let old_summary = if let Some(old) = old_content {
         match parse_file(path, old) {
-            Some(p) => summarize_file_from_parsed(&path_buf, &p),
+            Some(p) => summarize_file(&path_buf, &p),
             None => baseline.files.get(&path_buf).cloned().unwrap_or_default(),
         }
     } else {
@@ -415,7 +417,7 @@ mod tests {
     fn syntax_finding_emitted_on_broken_python() {
         let f = gather_findings("broken.py", "def foo(\n", None);
         assert!(f.iter().any(|fnd| fnd.kind == FindingKind::Syntax
-            && fnd.rule_id == "ring0_violation"));
+            && fnd.rule_id == "syntax_error"));
     }
 
     #[test]
@@ -439,16 +441,21 @@ mod tests {
     }
 
     #[test]
-    fn aegis_allow_marks_user_acknowledged_for_syntax() {
-        // Syntax acknowledgement is rare but the path should work.
-        // Use a security rule for the realistic case.
+    fn aegis_allow_annotates_security_finding() {
+        // V2 semantics: aegis-allow comments do NOT drop the finding;
+        // they set user_acknowledged: true so the consuming agent
+        // knows the user explicitly opted out of this rule on this
+        // line.
         let code = "import requests\nrequests.get(url, verify=False)  # aegis-allow: SEC003\n";
         let f = gather_findings("foo.py", code, None);
-        // V1 suppress_allowed currently STILL filters security at the
-        // check_security level, so we'd see no security finding.
-        // PR 6 will switch to annotation. For now, just verify the
-        // rest of the pipeline is sane.
-        assert!(f.iter().any(|fnd| fnd.kind == FindingKind::Signal));
+        let sec003 = f
+            .iter()
+            .find(|fnd| fnd.kind == FindingKind::Security && fnd.rule_id == "SEC003")
+            .expect("SEC003 must still appear");
+        assert!(
+            sec003.user_acknowledged,
+            "aegis-allow on the same line should set user_acknowledged"
+        );
     }
 
     #[test]
