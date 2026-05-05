@@ -1,100 +1,32 @@
-# Integrations — adding Aegis without changing your workflow
+# Integrations
 
-You're already using Cursor / Claude Code / Aider / Copilot / Continue
-/ your-own-agent. Aegis should not require you to switch tools. The
-right shape is a **side-channel enforcement layer** that sits at one
-of three boundaries:
+V2 has exactly one integration: **the MCP server**.
 
-```
-   ┌──────────────────────────┐
-   │  Your AI coding tool     │  (unchanged)
-   │  (Cursor/Aider/etc.)     │
-   └────────────┬─────────────┘
-                │ writes files
-                ▼
-   ┌──────────────────────────┐
-   │  Your codebase           │
-   └────────────┬─────────────┘
-                │
-        ┌───────┼────────┐
-        │       │        │
-        ▼       ▼        ▼
-     [git]   [PR/CI]   [MCP]
-       │        │        │
-       └────────┴────────┘
-                │
-            Aegis checks
-        (rejects bad transitions)
+```bash
+cargo install --path crates/aegis-mcp
 ```
 
-Three boundaries → three ready-to-use integrations:
-
-| # | Path | Best for | Setup time | Status |
-| :--- | :--- | :--- | :--- | :--- |
-| 1 | [Git pre-commit hook](git_pre_commit.md) | Solo developers, side projects | 2 min | ✓ ready |
-| 2 | [GitHub Action / CI gate](github_action.md) | Teams with PR review | 5 min | ✓ ready |
-| 3 | [MCP server](mcp_design.md) | Cursor / Claude Code users | 5 min config | ✅ `validate_change` shipped (`cargo install --path crates/aegis-mcp` then `aegis-mcp`) |
-
-LSP plugins, per-IDE extensions, and other paths are deferred per
-[`docs/post_launch_discipline.md`](../post_launch_discipline.md) —
-build when real demand justifies them.
+Then point your MCP-aware client (Claude Code / Cursor / your own
+agent) at the `aegis-mcp` binary over stdio. See
+[`AGENTS.md`](../../AGENTS.md) for client-specific config snippets
+and the `validate_file` tool contract.
 
 ---
 
-## Which one fits you
+## V1 integrations removed
 
-- **You're a solo dev pushing to your own repo** → start with the
-  pre-commit hook. Five lines of bash. Catches structural
-  regressions before they enter git history.
-- **You're on a team, every change goes through PR review** → the
-  GitHub Action gives every PR an Aegis check status. Same effect
-  as pre-commit but at the merge boundary, and visible to reviewers.
-- **You're using Cursor or Claude Code with MCP** → install with
-  `cargo install --path crates/aegis-mcp`, run `aegis-mcp`,
-  configure per [the MCP doc](mcp_design.md), or inspect the
-  runnable client smoke example at
-  [`examples/integration/mcp-server/`](../../examples/integration/mcp-server/).
-  Only `validate_change` exposed in V1.10 (intentionally narrow
-  surface); ask for `validate_diff` / `get_signals` if you need them.
+V1 shipped three integration paths — Git pre-commit hook, GitHub
+Action / CI gate, and MCP server. V2 keeps only the MCP server.
 
-You can stack them. The git hook + CI gate + MCP server are
-complementary: each catches a different timing of the same kind of
-mistake.
+The pre-commit hook and GitHub Action were thin wrappers around
+`aegis check`, which itself was a thin wrapper around the V1
+`validate_change` decision logic. With V2's "describe facts, agent
+decides" architecture, there is no `decision: BLOCK` to drive a
+pass/fail exit code from a hook — and synthesizing one from
+findings would re-introduce the judgment layer that V2 removed.
 
----
-
-## What Aegis enforces (regardless of integration)
-
-Whatever path you pick, Aegis's verdict vocabulary stays the same:
-
-- **Ring 0** — syntax violations (tree-sitter ERROR / MISSING
-  nodes) → `BLOCK`
-- **Ring 0.5** — structural signals (`fan_out`, `max_chain_depth`)
-  → numeric output, no verdict by themselves
-- **Cost-aware regression** — when `old_content` is supplied (MCP
-  mode) or across iterations (`aegis pipeline run`):
-  `sum(signals_after) > sum(signals_before)` → `BLOCK` / `ROLLBACK`
-
-For a single commit / PR, the relevant gates are Ring 0 + the
-single-file signals from `aegis check`. For multi-turn agent flows
-(where the LLM iterates), the regression detection becomes the
-load-bearing piece — that's the MCP path or `aegis pipeline run`.
-
----
-
-## What Aegis does NOT do across any integration
-
-The framing from the project's
-[critical principle](../gap3_control_plane.md#critical-principle)
-applies here too:
-
-- ❌ **No automatic retry.** Aegis tells you a change is bad. The
-  agent / human decides whether to retry. Aegis does not loop.
-- ❌ **No prompt rewriting.** Aegis does not feed verdicts back into
-  the LLM as "here's how to fix it". The verdict is pure observation.
-- ❌ **No model-of-the-developer's-intent.** Aegis judges code state,
-  not "what you meant".
-
-These are the same rules whether the integration is a git hook, CI
-gate, or MCP tool call. They keep Aegis a *constraint system*, not
-an *optimizer*.
+If you need a CI gate, run your real toolchain (`cargo build`,
+`tsc`, `pyright`, `ruff`, your test suite) — those produce
+deterministic pass/fail and they understand newer language syntax
+than tree-sitter does. Let aegis-mcp focus on what it's good at:
+giving the LLM agent rich context mid-loop.

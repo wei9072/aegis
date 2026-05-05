@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aegis-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aegis-index",
  "bincode",
@@ -32,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "aegis-index"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "aegis-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aegis-core",
  "serde",

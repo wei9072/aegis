@@ -1,22 +1,33 @@
-//! `aegis-core` — Ring 0 / Ring 0.5 analysis primitives.
+//! `aegis-core` — V2 analysis primitives.
 //!
-//! Pure-rlib crate. As of V1.10, all PyO3 surface has been removed
-//! (the `aegis-pyshim` cdylib that consumed it was deleted in the
-//! same release). Callers — `aegis-cli`, `aegis-mcp`, `aegis-runtime` —
-//! use the `*_native` functions directly.
+//! Two infrastructure layers + finding generators:
+//!
+//! - **Layer 1 (parse)**: `ast::parse(path, source) -> ParsedFile`
+//!   produces a tree-sitter tree shared by all downstream consumers.
+//!   Always returns Some when an adapter exists, even on broken
+//!   syntax — judgment about syntactic validity is a finding, not a
+//!   parse-layer short-circuit.
+//!
+//! - **Layer 2 (workspace)**: `workspace::WorkspaceIndex` aggregates
+//!   per-file `FileSummary` records (imports, public symbols, signal
+//!   values) into a reverse index that supports fan_in / cycle /
+//!   role / z-score queries. mtime-cached via `aegis-index`.
+//!
+//! - **Findings (`findings::gather_findings*`)**: the V2 wire format.
+//!   Each finding is a fact (Syntax / Signal / Security / Workspace
+//!   kind) with file + range + context. No decision, no severity.
+//!   The consuming agent decides what to act on.
+//!
+//! V1 ValidateVerdict / decision / reasons / severity all removed.
 
 pub mod ast;
 pub mod ir;
 pub mod graph;
 pub mod signals;
 pub mod incremental;
-pub mod attest;
 pub mod enforcement;
 pub mod findings;
-pub mod reasons;
 pub mod security;
-pub mod scan;
-pub mod validate;
 pub mod workspace;
 pub mod signal_layer_pyapi;
 
