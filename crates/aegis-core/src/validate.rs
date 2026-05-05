@@ -481,10 +481,18 @@ pub fn validate_change_with_workspace(
     // re-parse only changed files, not the whole tree every time.
     let baseline = WorkspaceIndex::build_cached(root);
 
+    // V2 PR 3: parse new_content once for all workspace operations
+    // (with_change + later find_cycle pass below). Falls back to the
+    // disk path if parse fails — should not happen, but defensive.
+    let parsed_new_for_ws = parse_file(path, new_content);
+
     // S7.2 + S7.3: file-role classification with z-scores against
     // the workspace baseline. Compute against the *post-change*
     // index so the role reflects what we're about to commit.
-    let after_for_role = baseline.with_change(&path_buf, new_content);
+    let after_for_role = match parsed_new_for_ws.as_ref() {
+        Some(p) => baseline.with_change_from_parsed(&path_buf, p),
+        None => baseline.with_change(&path_buf, new_content),
+    };
     let role = after_for_role.role_hint(&path_buf);
     let fan_in = after_for_role.fan_in(&path_buf);
     let fan_out_proj = after_for_role.fan_out(&path_buf);
@@ -552,9 +560,16 @@ pub fn validate_change_with_workspace(
     }
 
     // --- Public-symbol loss ---
-    let new_summary = summarize_file(&path_buf, new_content);
+    // V2 PR 3: reuse the parsed tree we already produced when possible.
+    let new_summary = match parsed_new_for_ws.as_ref() {
+        Some(p) => crate::workspace::summarize_file_from_parsed(&path_buf, p),
+        None => summarize_file(&path_buf, new_content),
+    };
     let old_summary = if let Some(old) = old_content {
-        summarize_file(&path_buf, old)
+        match parse_file(path, old) {
+            Some(p) => crate::workspace::summarize_file_from_parsed(&path_buf, &p),
+            None => summarize_file(&path_buf, old),
+        }
     } else {
         baseline.files.get(&path_buf).cloned().unwrap_or_default()
     };

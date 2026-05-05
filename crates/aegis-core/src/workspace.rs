@@ -23,8 +23,9 @@ use std::sync::{Mutex, OnceLock};
 use aegis_index::{InMemoryStore, IndexStore};
 use tree_sitter::{Parser, Query, QueryCursor};
 
+use crate::ast::parsed_file::{parse as parse_file, ParsedFile};
 use crate::ast::registry::LanguageRegistry;
-use crate::signals::{smell_counts_for_code, unresolved_local_import_count};
+use crate::signals::{smell_counts_from_parsed, unresolved_local_import_count};
 
 /// Per-file structural snapshot at a point in time.
 #[derive(Debug, Clone, Default)]
@@ -94,6 +95,20 @@ impl WorkspaceIndex {
             files: self.files.clone(),
         };
         let summary = summarize_file(path, new_content);
+        out.files.insert(path.to_path_buf(), summary);
+        out
+    }
+
+    /// V2 PR 3: Layer 1-shared variant of `with_change` — reuse a
+    /// pre-parsed tree instead of re-parsing `new_content`. Use this
+    /// when the caller already holds a `ParsedFile` (e.g., the
+    /// validate path that just produced one for Ring 0/0.5/0.7).
+    pub fn with_change_from_parsed(&self, path: &Path, parsed: &ParsedFile<'_>) -> Self {
+        let mut out = WorkspaceIndex {
+            root: self.root.clone(),
+            files: self.files.clone(),
+        };
+        let summary = summarize_file_from_parsed(path, parsed);
         out.files.insert(path.to_path_buf(), summary);
         out
     }
@@ -330,26 +345,36 @@ impl WorkspaceIndex {
 }
 
 /// Per-file summary: extract imports + public symbol names.
+///
+/// V2 PR 3: now thin — parses via Layer 1 `parse_file`, then defers
+/// to `summarize_file_from_parsed`. Callers that already hold a
+/// `ParsedFile` should use `summarize_file_from_parsed` directly to
+/// avoid re-parsing.
 pub fn summarize_file(path: &Path, code: &str) -> FileSummary {
     let path_str = path.to_string_lossy();
-    let Some(adapter) = LanguageRegistry::global().for_path(&path_str) else {
+    let Some(parsed) = parse_file(&path_str, code) else {
         return FileSummary::default();
     };
+    summarize_file_from_parsed(path, &parsed)
+}
+
+/// V2 PR 3: shared infrastructure variant — extract imports + public
+/// symbols + per-file numeric signals from a pre-parsed `ParsedFile`.
+/// Single tree, single walk per concern. Used by both the
+/// disk-driven `summarize_file` path and validate_change's
+/// `with_change_from_parsed` path so the workspace cache and the
+/// active validation share one parse.
+pub fn summarize_file_from_parsed(path: &Path, parsed: &ParsedFile<'_>) -> FileSummary {
+    let adapter = parsed.adapter();
     let lang = adapter.tree_sitter_language();
-    let mut parser = Parser::new();
-    if parser.set_language(lang).is_err() {
-        return FileSummary::default();
-    }
-    let Some(tree) = parser.parse(code, None) else {
-        return FileSummary::default();
-    };
-    let src = code.as_bytes();
+    let src = parsed.source_bytes();
+    let root = parsed.root_node();
 
     // Imports: reuse the language adapter's import_query.
     let mut imports = HashSet::new();
     if let Ok(query) = Query::new(lang, adapter.import_query()) {
         let mut qc = QueryCursor::new();
-        for m in qc.matches(&query, tree.root_node(), src) {
+        for m in qc.matches(&query, root, src) {
             for cap in m.captures {
                 if let Ok(text) = cap.node.utf8_text(src) {
                     imports.insert(adapter.normalize_import(text));
@@ -362,44 +387,37 @@ pub fn summarize_file(path: &Path, code: &str) -> FileSummary {
     // Heuristic per language; missing the long tail is fine — Ring R2
     // is a delta check, so consistency matters more than completeness.
     let mut public_symbols = HashSet::new();
-    extract_public_symbols(tree.root_node(), src, &mut public_symbols);
+    extract_public_symbols(root, src, &mut public_symbols);
 
     let mut imported_symbols = HashSet::new();
-    extract_imported_symbols(tree.root_node(), src, &mut imported_symbols);
+    extract_imported_symbols(root, src, &mut imported_symbols);
 
     // S7.7 — populate per-file numeric signals so project z-scores
     // can be computed without re-parsing each file when stats are
-    // queried. This adds the smell scan to summarize_file; for
-    // workspaces of any size the cost is amortised across the
-    // mtime cache (S5).
+    // queried.
     let mut signals: HashMap<String, f64> = HashMap::new();
     signals.insert("fan_out".into(), imports.len() as f64);
     signals.insert("public_symbols".into(), public_symbols.len() as f64);
     signals.insert("imported_symbols".into(), imported_symbols.len() as f64);
-    if let Ok(s) = smell_counts_for_code(&path_str, code) {
-        signals.insert("max_chain_depth".into(), 0.0); // filled below
-        signals.insert("empty_handler_count".into(), s.empty_handler_count);
-        signals.insert("unfinished_marker_count".into(), s.unfinished_marker_count);
-        signals.insert("unreachable_stmt_count".into(), s.unreachable_stmt_count);
-        signals.insert("cyclomatic_complexity".into(), s.cyclomatic_complexity);
-        signals.insert("nesting_depth".into(), s.nesting_depth);
-        signals.insert("suspicious_literal_count".into(), s.suspicious_literal_count);
-        signals.insert("mutable_default_arg_count".into(), s.mutable_default_arg_count);
-        signals.insert("shadowed_local_count".into(), s.shadowed_local_count);
-        signals.insert("test_count".into(), s.test_count);
-        signals.insert("member_access_count".into(), s.member_access_count);
-        signals.insert("type_leakage_count".into(), s.type_leakage_count);
-        signals.insert("cross_module_chain_count".into(), s.cross_module_chain_count);
-        signals.insert("import_usage_count".into(), s.import_usage_count);
-    }
-    // chain_depth lives on adapter — compute directly off the parsed
-    // tree we already have.
-    if let Some(a) = LanguageRegistry::global().for_path(&path_str) {
-        signals.insert(
-            "max_chain_depth".into(),
-            a.max_chain_depth(tree.root_node()) as f64,
-        );
-    }
+    let s = smell_counts_from_parsed(parsed);
+    signals.insert("empty_handler_count".into(), s.empty_handler_count);
+    signals.insert("unfinished_marker_count".into(), s.unfinished_marker_count);
+    signals.insert("unreachable_stmt_count".into(), s.unreachable_stmt_count);
+    signals.insert("cyclomatic_complexity".into(), s.cyclomatic_complexity);
+    signals.insert("nesting_depth".into(), s.nesting_depth);
+    signals.insert("suspicious_literal_count".into(), s.suspicious_literal_count);
+    signals.insert("mutable_default_arg_count".into(), s.mutable_default_arg_count);
+    signals.insert("shadowed_local_count".into(), s.shadowed_local_count);
+    signals.insert("test_count".into(), s.test_count);
+    signals.insert("member_access_count".into(), s.member_access_count);
+    signals.insert("type_leakage_count".into(), s.type_leakage_count);
+    signals.insert("cross_module_chain_count".into(), s.cross_module_chain_count);
+    signals.insert("import_usage_count".into(), s.import_usage_count);
+    signals.insert(
+        "max_chain_depth".into(),
+        adapter.max_chain_depth(root) as f64,
+    );
+    let _ = path; // path retained in API for future use; not needed by parsed-tree path
 
     FileSummary {
         imports,
