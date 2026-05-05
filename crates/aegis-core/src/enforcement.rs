@@ -1,15 +1,16 @@
-//! Ring 0 syntax-validity check — language-agnostic via the
-//! registry. Returns one violation string per failing file with the
-//! same shape V0.x callers expect.
+//! Syntax-violation extraction. Walks a pre-parsed tree looking for
+//! ERROR / MISSING nodes and returns located violations with 1-based
+//! line/col anchors.
+//!
+//! V2 stops short-circuiting on syntax errors — emitting these as
+//! findings lets the consuming agent decide whether they matter
+//! given the change context. Tree-sitter is error-tolerant by
+//! design; downstream signal/security walkers cope with degraded
+//! trees by simply not matching where the AST is corrupted.
 
-use std::fs;
+use crate::ast::parsed_file::ParsedFile;
 
-use crate::ast::registry::LanguageRegistry;
-
-/// Located syntax violation: where the bad node is.
-/// Populated by `check_syntax_native_detailed`; consumed by
-/// `validate_change` to enrich MCP responses so upstream agents can
-/// jump to the actual line instead of bisecting blindly.
+/// Located syntax violation: where a bad node sits in the source.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SyntaxViolation {
     pub message: String,
@@ -20,43 +21,19 @@ pub struct SyntaxViolation {
     pub kind: String, // "error" | "missing"
 }
 
-/// Pure-Rust Ring 0 syntax check. Returns
-/// `Result<Vec<String>, String>`; non-empty means the file failed
-/// to parse cleanly.
-pub fn check_syntax_native(filepath: &str) -> Result<Vec<String>, String> {
-    Ok(check_syntax_native_detailed(filepath)?
-        .into_iter()
-        .map(|v| v.message)
-        .collect())
-}
-
-/// Same Ring 0 check but returns located violations with line/col
-/// ranges and node kind. Used by MCP enrichment.
-pub fn check_syntax_native_detailed(filepath: &str) -> Result<Vec<SyntaxViolation>, String> {
-    let code = fs::read_to_string(filepath).map_err(|e| e.to_string())?;
-
-    let registry = LanguageRegistry::global();
-    let adapter = match registry.for_path(filepath) {
-        Some(a) => a,
-        None => return Ok(vec![]),
-    };
-
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(adapter.tree_sitter_language())
-        .map_err(|e| e.to_string())?;
-    let tree = parser
-        .parse(&code, None)
-        .ok_or_else(|| "parse returned None".to_string())?;
-
-    let root = tree.root_node();
+/// Extract syntax violations from a pre-parsed file. Returns the
+/// first 5 ERROR/MISSING anchors (cap to keep findings compact —
+/// agents only need anchors, not the full failure list). Returns
+/// empty when the parse is clean.
+///
+/// `filepath` is used only for the human-readable message text — no
+/// IO happens.
+pub fn syntax_violations(parsed: &ParsedFile<'_>, filepath: &str) -> Vec<SyntaxViolation> {
+    let root = parsed.root_node();
     if !root.has_error() {
-        return Ok(vec![]);
+        return vec![];
     }
 
-    // Walk to find ERROR / MISSING nodes. Cap at first 5 to keep
-    // the verdict compact; the agent only needs anchors, not the
-    // full failure list.
     let mut out = Vec::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
@@ -68,7 +45,7 @@ pub fn check_syntax_native_detailed(filepath: &str) -> Result<Vec<SyntaxViolatio
             let e = node.end_position();
             out.push(SyntaxViolation {
                 message: format!(
-                    "[Ring 0] {} node at {}:{}–{}:{} in '{}'",
+                    "[Syntax] {} node at {}:{}–{}:{} in '{}'",
                     if node.is_missing() { "MISSING" } else { "ERROR" },
                     s.row + 1,
                     s.column + 1,
@@ -80,7 +57,11 @@ pub fn check_syntax_native_detailed(filepath: &str) -> Result<Vec<SyntaxViolatio
                 start_col: s.column + 1,
                 end_line: e.row + 1,
                 end_col: e.column + 1,
-                kind: if node.is_missing() { "missing".into() } else { "error".into() },
+                kind: if node.is_missing() {
+                    "missing".into()
+                } else {
+                    "error".into()
+                },
             });
         }
         let mut cursor = node.walk();
@@ -93,7 +74,7 @@ pub fn check_syntax_native_detailed(filepath: &str) -> Result<Vec<SyntaxViolatio
         // a generic violation pointing at the file.
         out.push(SyntaxViolation {
             message: format!(
-                "[Ring 0] Syntax error detected in '{}'. Fix syntax before proceeding.",
+                "[Syntax] Syntax error detected in '{}'. Fix syntax before proceeding.",
                 filepath
             ),
             start_line: 1,
@@ -103,47 +84,32 @@ pub fn check_syntax_native_detailed(filepath: &str) -> Result<Vec<SyntaxViolatio
             kind: "error".into(),
         });
     }
-    Ok(out)
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use crate::ast::parsed_file::parse;
 
-    fn tmp_with(suffix: &str, body: &[u8]) -> tempfile::NamedTempFile {
-        let mut tmp = tempfile::Builder::new().suffix(suffix).tempfile().unwrap();
-        tmp.write_all(body).unwrap();
-        tmp.flush().unwrap();
-        tmp
+    #[test]
+    fn clean_python_yields_no_violations() {
+        let pf = parse("a.py", "def hello():\n    return 42\n").unwrap();
+        assert!(syntax_violations(&pf, "a.py").is_empty());
     }
 
     #[test]
-    fn test_valid_python_file() {
-        let tmp = tmp_with(".py", b"def hello():\n    return 42\n");
-        assert!(check_syntax_native(tmp.path().to_str().unwrap()).unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_invalid_python_file() {
-        let tmp = tmp_with(".py", b"def err(\n");
-        let v = check_syntax_native(tmp.path().to_str().unwrap()).unwrap();
+    fn broken_python_yields_violation() {
+        let pf = parse("a.py", "def err(\n").unwrap();
+        let v = syntax_violations(&pf, "a.py");
         assert_eq!(v.len(), 1);
-        assert!(v[0].contains("[Ring 0]"));
+        assert!(v[0].message.contains("[Syntax]"));
     }
 
     #[test]
-    fn test_unknown_extension_returns_no_violations() {
-        let tmp = tmp_with(".whatever", b"this is not parseable code");
-        assert!(check_syntax_native(tmp.path().to_str().unwrap()).unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_high_fan_out_not_blocked() {
-        let body: Vec<u8> = (0..20)
-            .flat_map(|i| format!("import mod_{}\n", i).into_bytes())
-            .collect();
-        let tmp = tmp_with(".py", &body);
-        assert!(check_syntax_native(tmp.path().to_str().unwrap()).unwrap().is_empty());
+    fn high_fan_out_is_not_a_syntax_error() {
+        let body: String = (0..20).map(|i| format!("import mod_{}\n", i)).collect();
+        let pf = parse("a.py", &body).unwrap();
+        assert!(syntax_violations(&pf, "a.py").is_empty());
     }
 }

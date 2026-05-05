@@ -1,13 +1,12 @@
-# V2.0 — cross-platform release artifacts.
+# V2 cross-platform release artifacts.
 #
-# Triggers on tag push (v*.*.*). Builds `aegis` + `aegis-mcp` for
-# the 5×2 platform matrix (Linux x86_64/aarch64, macOS x86_64/aarch64,
-# Windows x86_64) and uploads them to the GitHub Release.
+# Triggers on tag push (v*.*.*). Builds `aegis-mcp` for the 5-platform
+# matrix (Linux x86_64/aarch64, macOS x86_64/aarch64, Windows x86_64)
+# and uploads to the GitHub Release.
 #
-# Pre-V2.0 the workflow does not run on every push — only on tags.
-# To kick off a release manually:
+# To kick off a release:
 #
-#   git tag v0.1.0 && git push origin v0.1.0
+#   git tag v0.2.0 && git push origin v0.2.0
 #
 # Artifacts attach to the auto-created GitHub Release for that tag.
 
@@ -56,14 +55,12 @@ jobs:
         if: matrix.cross == true
         run: cargo install cross --locked
 
-      - name: Build aegis + aegis-mcp
+      - name: Build aegis-mcp
         shell: bash
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} -p aegis-cli
             cross build --release --target ${{ matrix.target }} -p aegis-mcp
           else
-            cargo build --release --target ${{ matrix.target }} -p aegis-cli
             cargo build --release --target ${{ matrix.target }} -p aegis-mcp
           fi
 
@@ -74,12 +71,10 @@ jobs:
           STAGE="aegis-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "$STAGE"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/aegis.exe" "$STAGE/"
             cp "target/${{ matrix.target }}/release/aegis-mcp.exe" "$STAGE/"
             7z a "${STAGE}.zip" "$STAGE/"
             echo "ASSET=${STAGE}.zip" >> "$GITHUB_ENV"
           else
-            cp "target/${{ matrix.target }}/release/aegis" "$STAGE/"
             cp "target/${{ matrix.target }}/release/aegis-mcp" "$STAGE/"
             cp README.md LICENSE "$STAGE/"
             tar -czf "${STAGE}.tar.gz" "$STAGE"

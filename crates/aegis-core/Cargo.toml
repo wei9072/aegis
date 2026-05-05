@@ -49,8 +49,8 @@ tree-sitter-kotlin = "=0.3.4"
 tree-sitter-dart = "=0.0.3"
 
 # Sibling crates with pure-Rust types used by aegis-core.
-aegis-trace = { path = "../aegis-trace" }
-aegis-decision = { path = "../aegis-decision" }
+# V2: aegis-trace and aegis-decision deleted along with the pipeline
+# crates — neither was actually referenced from aegis-core source.
 aegis-index = { path = "../aegis-index" }
 sha2 = { workspace = true }
 

@@ -1,26 +1,24 @@
-# Aegis Cargo workspace.
+# Aegis Cargo workspace (V2).
 #
-# Per docs/v1_rust_port_plan.md, the V1 port lives under crates/.
-# Each crate is a single responsibility; aegis-pyshim is the only
-# crate that depends on PyO3 features intended for the maturin
-# extension boundary, and it deletes itself at V1.10.
+# V2 architecture is MCP-only. The pipeline / loop / executor / planner
+# crates from V1 are removed: their judgment-driven role is replaced by
+# the consuming LLM agent reading findings emitted by aegis-core.
+#
+# Surviving crates:
+#   aegis-core   — Layer 1 parse + Layer 2 workspace + finding generators
+#   aegis-index  — mtime-aware workspace cache (Layer 2 backing store)
+#   aegis-mcp    — single MCP server binary; the only application
 
 [workspace]
 resolver = "2"
 members = [
     "crates/aegis-core",
-    "crates/aegis-trace",
-    "crates/aegis-decision",
-    "crates/aegis-ir",
     "crates/aegis-index",
-    "crates/aegis-providers",
-    "crates/aegis-runtime",
-    "crates/aegis-cli",
     "crates/aegis-mcp",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/wei9072/aegis"

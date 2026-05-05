@@ -23,8 +23,9 @@ use std::sync::{Mutex, OnceLock};
 use aegis_index::{InMemoryStore, IndexStore};
 use tree_sitter::{Parser, Query, QueryCursor};
 
+use crate::ast::parsed_file::{parse as parse_file, ParsedFile};
 use crate::ast::registry::LanguageRegistry;
-use crate::signals::{smell_counts_for_code, unresolved_local_import_count};
+use crate::signals::{smell_counts, unresolved_local_import_count};
 
 /// Per-file structural snapshot at a point in time.
 #[derive(Debug, Clone, Default)]
@@ -45,7 +46,7 @@ pub struct FileSummary {
 
 /// Eagerly-built workspace index. One pass over every supported
 /// source file under `root`.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct WorkspaceIndex {
     pub root: PathBuf,
     pub files: HashMap<PathBuf, FileSummary>,
@@ -77,7 +78,13 @@ impl WorkspaceIndex {
             root,
             store.as_ref(),
             |p| LanguageRegistry::global().for_path(&p.to_string_lossy()).is_some(),
-            |path, code| summarize_file(path, code),
+            |path, code| {
+                let path_str = path.to_string_lossy();
+                match parse_file(&path_str, code) {
+                    Some(parsed) => summarize_file(path, &parsed),
+                    None => FileSummary::default(),
+                }
+            },
         );
         WorkspaceIndex {
             root: root.to_path_buf(),
@@ -86,14 +93,14 @@ impl WorkspaceIndex {
     }
 
     /// Apply a hypothetical change: replace (or insert) `path` with
-    /// the parsed summary of `new_content`. Returns a fresh index
-    /// (cheap — only the one entry differs).
-    pub fn with_change(&self, path: &Path, new_content: &str) -> Self {
+    /// the parsed summary of `parsed`. Returns a fresh index — cheap;
+    /// only the one entry differs from `self`.
+    pub fn with_change(&self, path: &Path, parsed: &ParsedFile<'_>) -> Self {
         let mut out = WorkspaceIndex {
             root: self.root.clone(),
             files: self.files.clone(),
         };
-        let summary = summarize_file(path, new_content);
+        let summary = summarize_file(path, parsed);
         out.files.insert(path.to_path_buf(), summary);
         out
     }
@@ -322,34 +329,32 @@ impl WorkspaceIndex {
         let mut total: f64 = 0.0;
         for (path, _) in &self.files {
             if let Ok(code) = std::fs::read_to_string(path) {
-                total += unresolved_local_import_count(&path.to_string_lossy(), &code);
+                let path_str = path.to_string_lossy().into_owned();
+                if let Some(parsed) = parse_file(&path_str, &code) {
+                    total += unresolved_local_import_count(&parsed, &path_str);
+                }
             }
         }
         total
     }
 }
 
-/// Per-file summary: extract imports + public symbol names.
-pub fn summarize_file(path: &Path, code: &str) -> FileSummary {
-    let path_str = path.to_string_lossy();
-    let Some(adapter) = LanguageRegistry::global().for_path(&path_str) else {
-        return FileSummary::default();
-    };
+/// Per-file summary: extract imports + public symbols + per-file
+/// numeric signals from a pre-parsed file. Used by both the
+/// workspace-cache build (which parses each file once via Layer 1)
+/// and validate's `with_change` path (which reuses the parsed tree
+/// already produced for Ring 0.5 / 0.7).
+pub fn summarize_file(path: &Path, parsed: &ParsedFile<'_>) -> FileSummary {
+    let adapter = parsed.adapter();
     let lang = adapter.tree_sitter_language();
-    let mut parser = Parser::new();
-    if parser.set_language(lang).is_err() {
-        return FileSummary::default();
-    }
-    let Some(tree) = parser.parse(code, None) else {
-        return FileSummary::default();
-    };
-    let src = code.as_bytes();
+    let src = parsed.source_bytes();
+    let root = parsed.root_node();
 
     // Imports: reuse the language adapter's import_query.
     let mut imports = HashSet::new();
     if let Ok(query) = Query::new(lang, adapter.import_query()) {
         let mut qc = QueryCursor::new();
-        for m in qc.matches(&query, tree.root_node(), src) {
+        for m in qc.matches(&query, root, src) {
             for cap in m.captures {
                 if let Ok(text) = cap.node.utf8_text(src) {
                     imports.insert(adapter.normalize_import(text));
@@ -362,44 +367,37 @@ pub fn summarize_file(path: &Path, code: &str) -> FileSummary {
     // Heuristic per language; missing the long tail is fine — Ring R2
     // is a delta check, so consistency matters more than completeness.
     let mut public_symbols = HashSet::new();
-    extract_public_symbols(tree.root_node(), src, &mut public_symbols);
+    extract_public_symbols(root, src, &mut public_symbols);
 
     let mut imported_symbols = HashSet::new();
-    extract_imported_symbols(tree.root_node(), src, &mut imported_symbols);
+    extract_imported_symbols(root, src, &mut imported_symbols);
 
     // S7.7 — populate per-file numeric signals so project z-scores
     // can be computed without re-parsing each file when stats are
-    // queried. This adds the smell scan to summarize_file; for
-    // workspaces of any size the cost is amortised across the
-    // mtime cache (S5).
+    // queried.
     let mut signals: HashMap<String, f64> = HashMap::new();
     signals.insert("fan_out".into(), imports.len() as f64);
     signals.insert("public_symbols".into(), public_symbols.len() as f64);
     signals.insert("imported_symbols".into(), imported_symbols.len() as f64);
-    if let Ok(s) = smell_counts_for_code(&path_str, code) {
-        signals.insert("max_chain_depth".into(), 0.0); // filled below
-        signals.insert("empty_handler_count".into(), s.empty_handler_count);
-        signals.insert("unfinished_marker_count".into(), s.unfinished_marker_count);
-        signals.insert("unreachable_stmt_count".into(), s.unreachable_stmt_count);
-        signals.insert("cyclomatic_complexity".into(), s.cyclomatic_complexity);
-        signals.insert("nesting_depth".into(), s.nesting_depth);
-        signals.insert("suspicious_literal_count".into(), s.suspicious_literal_count);
-        signals.insert("mutable_default_arg_count".into(), s.mutable_default_arg_count);
-        signals.insert("shadowed_local_count".into(), s.shadowed_local_count);
-        signals.insert("test_count".into(), s.test_count);
-        signals.insert("member_access_count".into(), s.member_access_count);
-        signals.insert("type_leakage_count".into(), s.type_leakage_count);
-        signals.insert("cross_module_chain_count".into(), s.cross_module_chain_count);
-        signals.insert("import_usage_count".into(), s.import_usage_count);
-    }
-    // chain_depth lives on adapter — compute directly off the parsed
-    // tree we already have.
-    if let Some(a) = LanguageRegistry::global().for_path(&path_str) {
-        signals.insert(
-            "max_chain_depth".into(),
-            a.max_chain_depth(tree.root_node()) as f64,
-        );
-    }
+    let s = smell_counts(parsed);
+    signals.insert("empty_handler_count".into(), s.empty_handler_count);
+    signals.insert("unfinished_marker_count".into(), s.unfinished_marker_count);
+    signals.insert("unreachable_stmt_count".into(), s.unreachable_stmt_count);
+    signals.insert("cyclomatic_complexity".into(), s.cyclomatic_complexity);
+    signals.insert("nesting_depth".into(), s.nesting_depth);
+    signals.insert("suspicious_literal_count".into(), s.suspicious_literal_count);
+    signals.insert("mutable_default_arg_count".into(), s.mutable_default_arg_count);
+    signals.insert("shadowed_local_count".into(), s.shadowed_local_count);
+    signals.insert("test_count".into(), s.test_count);
+    signals.insert("member_access_count".into(), s.member_access_count);
+    signals.insert("type_leakage_count".into(), s.type_leakage_count);
+    signals.insert("cross_module_chain_count".into(), s.cross_module_chain_count);
+    signals.insert("import_usage_count".into(), s.import_usage_count);
+    signals.insert(
+        "max_chain_depth".into(),
+        adapter.max_chain_depth(root) as f64,
+    );
+    let _ = path; // path retained in API for future use; not needed by parsed-tree path
 
     FileSummary {
         imports,
@@ -631,12 +629,16 @@ fn walk_dir_inner(
         let path = entry.path();
         if path.is_dir() {
             walk_dir_inner(&path, files, false)?;
-        } else if let Some(_adapter) =
-            LanguageRegistry::global().for_path(&path.to_string_lossy())
+        } else if LanguageRegistry::global()
+            .for_path(&path.to_string_lossy())
+            .is_some()
         {
             if let Ok(code) = std::fs::read_to_string(&path) {
-                let summary = summarize_file(&path, &code);
-                files.insert(path, summary);
+                let path_str = path.to_string_lossy().into_owned();
+                if let Some(parsed) = parse_file(&path_str, &code) {
+                    let summary = summarize_file(&path, &parsed);
+                    files.insert(path, summary);
+                }
             }
         }
     }
@@ -756,10 +758,17 @@ mod tests {
         std::fs::write(path, body).unwrap();
     }
 
+    /// Test helper: parse `code` then summarize. Mirrors the V1
+    /// disk-driven `summarize_file(path, code)` API removed in V2 PR 8.
+    fn summarize(path_str: &str, code: &str) -> FileSummary {
+        let parsed = parse_file(path_str, code).expect("test fixture must parse");
+        summarize_file(Path::new(path_str), &parsed)
+    }
+
     #[test]
     fn extracts_python_public_symbols() {
-        let s = summarize_file(
-            Path::new("foo.py"),
+        let s = summarize(
+            "foo.py",
             "def public_fn():\n    pass\n\ndef _private():\n    pass\n\nclass Public:\n    pass\n",
         );
         assert!(s.public_symbols.contains("public_fn"));
@@ -769,14 +778,11 @@ mod tests {
 
     #[test]
     fn detects_lost_public_symbol() {
-        let before = summarize_file(
-            Path::new("api.py"),
+        let before = summarize(
+            "api.py",
             "def keep():\n    pass\n\ndef will_be_removed():\n    pass\n",
         );
-        let after = summarize_file(
-            Path::new("api.py"),
-            "def keep():\n    pass\n",
-        );
+        let after = summarize("api.py", "def keep():\n    pass\n");
         let lost = public_symbols_lost(&before, &after);
         assert!(lost.contains(&"will_be_removed".to_string()));
         assert!(!lost.contains(&"keep".to_string()));
@@ -904,10 +910,7 @@ mod tests {
     fn export_default_is_tracked() {
         // S1.8: previously TS `export default class Foo {}` was
         // invisible to public_symbols, so removing it slipped through.
-        let s = summarize_file(
-            Path::new("foo.ts"),
-            "export default class Foo { greet() {} }\n",
-        );
+        let s = summarize("foo.ts", "export default class Foo { greet() {} }\n");
         assert!(
             s.public_symbols.contains("default") || s.public_symbols.contains("Foo"),
             "expected `default` or `Foo` in public_symbols; got {:?}",
@@ -923,7 +926,10 @@ mod tests {
         let idx = WorkspaceIndex::build(dir.path());
         assert!(!idx.has_cycle());
         // Hypothetical: a.py starts importing b → cycle.
-        let next = idx.with_change(&dir.path().join("a.py"), "from .b import y\n");
+        let a_path = dir.path().join("a.py");
+        let new_content = "from .b import y\n";
+        let parsed = parse_file(&a_path.to_string_lossy(), new_content).expect("parses");
+        let next = idx.with_change(&a_path, &parsed);
         assert!(next.has_cycle(), "expected cycle after change");
     }
 }

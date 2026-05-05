@@ -17,36 +17,32 @@ use std::path::{Path, PathBuf};
 
 use tree_sitter::{Query, QueryCursor};
 
-use crate::ast::registry::LanguageRegistry;
+use crate::ast::parsed_file::ParsedFile;
 
-/// Count relative imports in `code` that don't resolve to an
-/// existing sibling file. `file_path` is the file the imports live
-/// in; its parent directory is the resolution root.
-pub fn unresolved_local_import_count(file_path: &str, code: &str) -> f64 {
-    let registry = LanguageRegistry::global();
-    let Some(adapter) = registry.for_path(file_path) else {
-        return 0.0;
+/// Count unresolved relative imports using a pre-parsed file.
+/// `file_path` is required because the resolution root is
+/// `file_path.parent()` — the parse tree alone can't tell us where
+/// on disk we are.
+pub fn unresolved_local_import_count(
+    parsed: &ParsedFile<'_>,
+    file_path: &str,
+) -> f64 {
+    let adapter = parsed.adapter();
+    let parent = match Path::new(file_path).parent() {
+        Some(p) => p.to_path_buf(),
+        None => return 0.0,
     };
-    let parent = Path::new(file_path).parent().map(PathBuf::from);
-    let Some(parent) = parent else { return 0.0 };
-
     let lang = adapter.tree_sitter_language();
-    let mut parser = tree_sitter::Parser::new();
-    if parser.set_language(lang).is_err() {
-        return 0.0;
-    }
-    let Some(tree) = parser.parse(code, None) else {
-        return 0.0;
-    };
     let Ok(query) = Query::new(lang, adapter.import_query()) else {
         return 0.0;
     };
     let mut qc = QueryCursor::new();
     let mut unresolved: f64 = 0.0;
     let extensions = adapter.extensions();
-    for m in qc.matches(&query, tree.root_node(), code.as_bytes()) {
+    let src = parsed.source_bytes();
+    for m in qc.matches(&query, parsed.root_node(), src) {
         for cap in m.captures {
-            let Ok(raw) = cap.node.utf8_text(code.as_bytes()) else {
+            let Ok(raw) = cap.node.utf8_text(src) else {
                 continue;
             };
             let cleaned = adapter.normalize_import(raw);
@@ -58,13 +54,9 @@ pub fn unresolved_local_import_count(file_path: &str, code: &str) -> f64 {
             }
         }
     }
-    // S1.6: Python `from . import name` doesn't capture `name` via the
-    // import_query (only the relative_import module is captured). So
-    // we additionally walk the AST for `import_from_statement` whose
-    // module_name is bare `.` and check whether the imported names
-    // resolve to sibling files.
     if file_path.ends_with(".py") || file_path.ends_with(".pyi") {
-        unresolved += scan_python_bare_dot_imports(tree.root_node(), code.as_bytes(), &parent, extensions);
+        unresolved +=
+            scan_python_bare_dot_imports(parsed.root_node(), src, &parent, extensions);
     }
     unresolved
 }
@@ -250,7 +242,9 @@ mod tests {
         let main_py = dir.path().join("main.py");
         std::fs::write(&main_py, "from .ghost_module import x\n").unwrap();
         let code = std::fs::read_to_string(&main_py).unwrap();
-        let n = unresolved_local_import_count(main_py.to_str().unwrap(), &code);
+        let path_str = main_py.to_string_lossy().into_owned();
+        let parsed = crate::ast::parsed_file::parse(&path_str, &code).expect("parses");
+        let n = unresolved_local_import_count(&parsed, &path_str);
         assert!(n >= 1.0, "expected unresolved>=1, got {n}");
     }
 
@@ -261,7 +255,9 @@ mod tests {
         let main_py = dir.path().join("main.py");
         std::fs::write(&main_py, "from .helpers import x\n").unwrap();
         let code = std::fs::read_to_string(&main_py).unwrap();
-        let n = unresolved_local_import_count(main_py.to_str().unwrap(), &code);
+        let path_str = main_py.to_string_lossy().into_owned();
+        let parsed = crate::ast::parsed_file::parse(&path_str, &code).expect("parses");
+        let n = unresolved_local_import_count(&parsed, &path_str);
         assert_eq!(n, 0.0, "resolved import should not count, got {n}");
     }
 
@@ -271,7 +267,9 @@ mod tests {
         let main_ts = dir.path().join("main.ts");
         std::fs::write(&main_ts, "import { x } from './ghost';\n").unwrap();
         let code = std::fs::read_to_string(&main_ts).unwrap();
-        let n = unresolved_local_import_count(main_ts.to_str().unwrap(), &code);
+        let path_str = main_ts.to_string_lossy().into_owned();
+        let parsed = crate::ast::parsed_file::parse(&path_str, &code).expect("parses");
+        let n = unresolved_local_import_count(&parsed, &path_str);
         assert!(n >= 1.0, "expected unresolved>=1, got {n}");
     }
 
@@ -282,7 +280,9 @@ mod tests {
         let main_ts = dir.path().join("main.ts");
         std::fs::write(&main_ts, "import { x } from './real';\n").unwrap();
         let code = std::fs::read_to_string(&main_ts).unwrap();
-        let n = unresolved_local_import_count(main_ts.to_str().unwrap(), &code);
+        let path_str = main_ts.to_string_lossy().into_owned();
+        let parsed = crate::ast::parsed_file::parse(&path_str, &code).expect("parses");
+        let n = unresolved_local_import_count(&parsed, &path_str);
         assert_eq!(n, 0.0, "resolved should not count, got {n}");
     }
 
@@ -294,7 +294,9 @@ mod tests {
         let main_py = dir.path().join("main.py");
         std::fs::write(&main_py, "from . import ghost_sibling\n").unwrap();
         let code = std::fs::read_to_string(&main_py).unwrap();
-        let n = unresolved_local_import_count(main_py.to_str().unwrap(), &code);
+        let path_str = main_py.to_string_lossy().into_owned();
+        let parsed = crate::ast::parsed_file::parse(&path_str, &code).expect("parses");
+        let n = unresolved_local_import_count(&parsed, &path_str);
         assert!(n >= 1.0, "expected unresolved>=1, got {n}");
     }
 
@@ -305,7 +307,9 @@ mod tests {
         let main_py = dir.path().join("main.py");
         std::fs::write(&main_py, "from . import real_sibling\n").unwrap();
         let code = std::fs::read_to_string(&main_py).unwrap();
-        let n = unresolved_local_import_count(main_py.to_str().unwrap(), &code);
+        let path_str = main_py.to_string_lossy().into_owned();
+        let parsed = crate::ast::parsed_file::parse(&path_str, &code).expect("parses");
+        let n = unresolved_local_import_count(&parsed, &path_str);
         assert_eq!(n, 0.0, "resolved bare-dot import should not count, got {n}");
     }
 
@@ -315,7 +319,9 @@ mod tests {
         let main_py = dir.path().join("main.py");
         std::fs::write(&main_py, "import numpy\nimport tensorflow\n").unwrap();
         let code = std::fs::read_to_string(&main_py).unwrap();
-        let n = unresolved_local_import_count(main_py.to_str().unwrap(), &code);
+        let path_str = main_py.to_string_lossy().into_owned();
+        let parsed = crate::ast::parsed_file::parse(&path_str, &code).expect("parses");
+        let n = unresolved_local_import_count(&parsed, &path_str);
         assert_eq!(n, 0.0, "external imports out of scope, got {n}");
     }
 }

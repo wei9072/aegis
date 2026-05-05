@@ -1,240 +1,217 @@
 # Instructions for AI coding agents (Claude Code, Cursor, Aider, etc.)
 
-This file tells you, the AI agent, how to help a user adopt Aegis
+This file tells you, the AI agent, how to help a user adopt Aegis V2
 in **their** project. The user almost certainly typed something like
-"add Aegis to my repo" — they will not read installation docs. You
-will. Follow the commands here verbatim; don't paraphrase, don't skip.
+"add Aegis to my repo". Follow these commands verbatim; don't
+paraphrase, don't skip.
 
 If anything in this file conflicts with your interpretation of
-README.md, follow this file. README is for human evaluators; this
-file is for you.
+README.md, follow this file. README is for human evaluators; this is
+for you.
 
 ---
 
-## What Aegis is, in one paragraph
+## What Aegis V2 is, in one paragraph
 
-A behavior harness for LLM-driven workflows. It rejects code-state
-transitions that worsen structural metrics, blocks syntax/cycle
-violations at write time, and emits a machine-readable trace of
-every gate decision. **It does not generate code. It does not
-optimize behavior. It does not retry on failure.** You and the
-user's existing tools handle generation; Aegis sits as a side-channel
-enforcement layer.
+A judgment-free MCP server for LLM-driven coding workflows. The
+single tool, `validate_file`, returns structured **findings** about
+a proposed file write — syntax errors, structural-smell deltas,
+security pattern matches, cross-file cycles, broken-caller lists.
+Aegis does not block writes, does not rank findings, does not say
+"this is bad". You — the consuming agent — decide which findings
+to act on. Aegis only ensures the data is on the table.
 
-Full design context: [`README.md`](README.md) and
-[`docs/v1_validation.md`](docs/v1_validation.md). Read those when
-the user asks "what does this thing actually do".
+Full design context: [`README.md`](README.md). Read that when the
+user asks "what does this thing do".
 
 ---
 
 ## Setup — the canonical install sequence
 
-V1.10 — Aegis is now a single Rust workspace, **zero Python at
-runtime**. Run these in order from the user's home or workspace dir.
+V2 ships a single binary: `aegis-mcp`. Run these from the user's
+home or workspace dir.
 
 ```bash
-# 0. Prerequisites — check before installing.
-git --version              # any recent
+# 0. Prerequisites
+git --version
 cargo --version || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env"
 
-# 1. Clone, enter.
+# 1. Clone, enter
 git clone https://github.com/wei9072/aegis ~/aegis
 cd ~/aegis
 
-# 2. Build (release).  ~1-2 min first time; <10s incremental.
-cargo build --release --workspace
+# 2. Build + install. ~1-2 min first time.
+cargo install --path crates/aegis-mcp
 
-# 3. VERIFY (do not skip).
-./target/release/aegis languages          # prints supported languages
-./target/release/aegis check Cargo.toml   # zero-signal smoke test
+# 3. Verify (do not skip)
+which aegis-mcp           # confirms $PATH installation
+aegis-mcp --version 2>&1 | head -1 || echo "(aegis-mcp does not have --version; absence of 'command not found' is the success signal)"
 ```
 
-Install system-wide (so `aegis` is on `$PATH`):
+After step 3 succeeds, `aegis-mcp` is ready to be configured as an
+MCP server in your client.
 
-```bash
-cargo install --path crates/aegis-cli
-cargo install --path crates/aegis-mcp     # optional — MCP server
-```
-
-After step 3 passes, the `aegis` CLI works without a Python
-interpreter on the box. Common causes if it doesn't build:
+Common breakage:
 
 - `cargo: command not found` → restart shell or `source "$HOME/.cargo/env"`.
-- `failed to compile aegis-core` → ensure your Rust toolchain is recent (1.74+); `rustup update`.
-
-Cross-platform release artifacts (Linux x86_64/aarch64, macOS
-x86_64/aarch64, Windows x86_64) ship via GitHub Releases — see
-V2.0 in [`docs/v1_rust_port_plan.md`](docs/v1_rust_port_plan.md).
+- `failed to compile aegis-core` → `rustup update` (need 1.74+).
 
 ---
 
-## Integration — pick exactly one for the user's situation
+## Integration — configure the MCP client
 
-Ask the user (or infer from their workflow) which boundary they want
-Aegis to enforce at:
+Aegis V2 is an MCP server. The user's existing agent (Cursor / Claude
+Code / your own) already speaks MCP; you just need to register
+`aegis-mcp` in their client config.
 
-| If the user... | Use this path |
+### Claude Code
+
+Add to `~/.config/claude-code/mcp.json` (path may vary):
+
+```jsonc
+{
+  "mcpServers": {
+    "aegis": {
+      "command": "aegis-mcp"
+    }
+  }
+}
+```
+
+### Cursor
+
+Add to Cursor's MCP settings (Settings → MCP):
+
+```jsonc
+{
+  "aegis": {
+    "command": "aegis-mcp"
+  }
+}
+```
+
+### Generic MCP client
+
+Stdio transport, JSON-RPC 2.0, protocol version `2025-06-18`. No
+flags. No env vars required.
+
+After the client is configured, restart it. The tool `validate_file`
+should appear in the available tools list.
+
+---
+
+## Using the `validate_file` tool
+
+Schema (call this from the agent loop whenever it's about to write
+a file):
+
+```jsonc
+{
+  "name": "validate_file",
+  "arguments": {
+    "path": "src/auth.py",
+    "new_content": "...",                  // required
+    "old_content": "...",                  // optional — enables value_before/after/delta
+    "workspace_root": "/abs/path/to/project"  // optional — adds Workspace-kind findings
+  }
+}
+```
+
+Return shape:
+
+```json
+{
+  "schema_version": "v2.0",
+  "findings": [
+    { "kind": "...", "rule_id": "...", "file": "...", "range": {...}, "context": {...}, "user_acknowledged": false }
+  ]
+}
+```
+
+`kind` is one of: `syntax`, `signal`, `security`, `workspace`. There
+is **no** `decision`, **no** `severity`, **no** rank ordering. You
+decide what to do based on the findings + your own task context.
+
+### When to pass `workspace_root`
+
+- **Always pass it** when the change touches public API, shared
+  modules, or anywhere a cycle could form. Adds cycle detection +
+  broken-caller lists.
+- **Skip it** for purely local edits where speed matters and cross-
+  file impact is impossible (e.g., editing a test fixture or a
+  README).
+
+First call with a new `workspace_root` builds the workspace index
+(parses every supported file once — typically 1-3 seconds for a
+mid-sized repo). Subsequent calls only re-parse files whose mtime
+changed; usually < 50ms.
+
+### `aegis-allow` comments
+
+If the user has `# aegis-allow: SEC003` (or `// aegis-allow: SEC003`,
+or `aegis-allow: all`) on a line, Aegis still emits the matching
+finding but sets `user_acknowledged: true`. **You should respect
+this acknowledgement** — the user has explicitly opted out of that
+rule for that line.
+
+---
+
+## Things you should NOT do
+
+- **Do not block writes solely on a finding's existence.** A `signal`
+  finding with `delta: 1` is not automatically bad. A `security`
+  finding with `severity_hint: "block"` is a hint, not a verdict.
+  Reason about it.
+- **Do not retry until findings disappear.** If the user wrote
+  `# TODO: revisit` deliberately, an `unfinished_marker_count`
+  finding will fire forever. Acknowledge it (via `aegis-allow` or
+  by reasoning) and move on.
+- **Do not call `validate_file` on every keystroke.** Call before
+  committing a file write — once per write attempt is the right
+  cadence.
+- **Do not look for V1 tools.** `validate_change`,
+  `validate_change_with_workspace`, `attest_path` no longer exist.
+  Everything is `validate_file` now.
+- **Do not look for the `aegis` CLI binary.** V2 has only
+  `aegis-mcp`. There is no `aegis check` / `aegis pipeline run` /
+  `aegis attest` anymore.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+| :--- | :--- | :--- |
+| MCP client doesn't see `validate_file` tool | Server didn't start | Run `aegis-mcp` directly in a shell — should hang waiting for stdio input. If it errors, the binary is broken; rebuild. |
+| First `validate_file` call with `workspace_root` is slow | Workspace bootstrap | Expected on first call. Subsequent calls are fast. |
+| Findings empty for a `.py` file | File has unsupported extension OR is in a path the registry doesn't recognize | Verify the path argument has a supported extension. See README's "Supported source languages" table. |
+| `findings: []` even on broken syntax | Path uses an unsupported extension | Aegis emits no findings for unsupported file types — same as V1's `SKIP` decision. Switch to a supported language file or accept that Aegis has no opinion. |
+| Inconsistent findings across calls | External writer modified files between calls | Aegis re-stats files via mtime; if mtime didn't change after a content change, the cache stays stale. Touch the file or restart `aegis-mcp`. |
+
+---
+
+## V1 → V2 migration cheat-sheet
+
+| V1 | V2 |
 | :--- | :--- |
-| Has a personal project, wants `git commit` to block bad changes | **A. Pre-commit hook** |
-| Has a team repo with PRs, wants reviewers to see Aegis status | **B. GitHub Action** |
-| Is in Cursor / Claude Code / has their own LLM agent loop | **C. Wrap their LLM with `LLMGateway`** |
-
-Don't stack paths until the user has lived with one for at least a
-day. They are complementary, but layering before the basics work is
-how you build untrustable setups.
-
-### Path A — Pre-commit hook
-
-Drop this verbatim into the user's project at `.git/hooks/pre-commit`,
-then `chmod +x .git/hooks/pre-commit`:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-files=$(git diff --cached --name-only --diff-filter=ACM \
-        | grep -E '\.(py|pyi|ts|tsx|js|mjs|cjs|jsx|go|java|cs|php|swift|kt|dart)$' || true)
-[ -z "$files" ] && exit 0
-echo "$files" | xargs -I{} aegis check "$OLDPWD/{}"
-```
-
-Verify by triggering a known-fail (paste this into the user's repo
-to confirm the hook works, then revert):
-
-```bash
-echo "def add(a, b)" > /tmp/aegis_test_broken.py
-cp /tmp/aegis_test_broken.py ./broken_test.py
-git add broken_test.py
-git commit -m "should be blocked"   # expect: rejected with [Ring 0] message
-git restore --staged broken_test.py
-rm broken_test.py
-```
-
-Reference: [`docs/integrations/git_pre_commit.md`](docs/integrations/git_pre_commit.md)
-(read this if the user asks for variations).
-
-### Path B — GitHub Action
-
-Add `.github/workflows/aegis.yml` to the user's repo. The full
-workflow is in [`docs/integrations/github_action.md`](docs/integrations/github_action.md);
-copy it verbatim. Then tell the user to mark the "Aegis Ring 0"
-check as required in branch protection (you can't do this for them
-— it's a GitHub UI action).
-
-### Path C — Wrap the user's LLM in `LLMGateway`
-
-As of V1.10, the integration is the `aegis pipeline run` binary
-subcommand or the `aegis-mcp` server. There is no longer a Python
-in-process API to wrap — the agent invokes the binary as a child
-process or talks to `aegis-mcp` over stdio.
-
-```bash
-# Drive a single multi-turn pipeline run.
-export AEGIS_PROVIDER=openai          # or openrouter | groq
-export OPENAI_API_KEY=...             # or AEGIS_API_KEY / OPENROUTER_API_KEY / GROQ_API_KEY
-aegis pipeline run \
-  --task "rename the foo helper to bar across the codebase" \
-  --root . \
-  --max-iters 3 \
-  --json
-```
-
-For LLM clients with their own loop (Cursor / Claude Code / custom
-agent), use the MCP server — `cargo install --path crates/aegis-mcp`
-then add `aegis-mcp` to the MCP client config per
-[`docs/integrations/mcp_design.md`](docs/integrations/mcp_design.md).
-The agent calls `validate_change(path, new_content, old_content?)`
-mid-loop and gets a structured verdict back. Only `validate_change`
-exposed (intentionally narrow surface — if the user needs the other
-tools, tell them to file an issue).
+| `aegis check path/to/file.py` | Call `validate_file` MCP tool with that file's content |
+| `aegis-mcp` `validate_change` tool | Renamed to `validate_file` (same first three args) |
+| `aegis-mcp` `validate_change_with_workspace` | Folded into `validate_file` — pass `workspace_root` |
+| `aegis-mcp` `attest_path` | Removed. The agent already has the content in hand; pass it to `validate_file` instead. |
+| `aegis pipeline run` | Removed. The agent IS the pipeline now. |
+| `aegis scan` | Removed. Workspace bootstrap is implicit on first `workspace_root` call. |
+| `decision: "BLOCK" / "WARN" / "PASS" / "SKIP"` | Removed. Read `findings[]` and reason. |
+| `reasons[]` with `layer + decision + reason` | Replaced by `findings[]` with `kind + rule_id + context`. |
+| `severity` on signals | Removed entirely. |
+| `signals_after`, `signals_before`, `regression_detail`, `signal_deltas` | Folded into Signal-kind findings' `context.{value_before,value_after,delta}`. |
+| Pre-commit hook with `aegis check` | Either run `cargo build` + your normal linter, or call `aegis-mcp` from a hook script using its stdio JSON-RPC. |
 
 ---
 
-## Rules you must follow when working on / with Aegis
+## When in doubt
 
-These are the project's framing constraints. PRs that violate them
-get reverted; suggestions that violate them get rejected. **Do not
-propose any of these to the user.**
-
-1. **Do not add automatic retry.** If `gateway.generate_and_validate()`
-   raises, the agent / human decides what to do next. Aegis does not
-   loop until it gets a passing response.
-2. **Do not feed verifier output back into the LLM prompt.** The
-   verdict is observation, not coaching. If the user wants the LLM
-   to "know what was wrong", they edit the prompt themselves —
-   you do not auto-construct hint strings from `gateway.last_trace`.
-3. **Do not propose new gates / decision patterns / verifier types
-   without checking [`docs/post_launch_discipline.md`](docs/post_launch_discipline.md).**
-   That file lists 5 explicit categories of features deferred until
-   real-user demand justifies them.
-4. **Do not propose extracting `aegis-core` as a generic framework.**
-   See [`docs/future_abstraction.md`](docs/future_abstraction.md) —
-   three trigger conditions must be met first; they aren't yet.
-5. **Do not modify `crates/aegis-decision/src/task.rs::TaskVerdict`** to add
-   feedback / hint / next_plan / advice / guidance fields. The cargo
-   contract test `crates/aegis-decision/tests/contract.rs` enforces
-   rule 2 structurally.
-
-If a user request implies any of these, stop and explain that the
-request would change Aegis from a constraint system into an optimizer,
-and ask whether they want a discussion thread instead of a PR.
-
----
-
-## Where things are
-
-Cheatsheet for "I need to find X in this repo":
-
-| You need... | Look at... |
-| :--- | :--- |
-| Understand what Aegis is for humans | [`README.md`](README.md) |
-| Single-file static analysis (Ring 0 + 0.5) | `aegis check <files>` (or `--json`) |
-| List supported source languages | `aegis languages` (or `aegis languages --json`) |
-| Drive an LLM-backed multi-turn refactor | `aegis pipeline run --task "..." --root . [--scope sub] --max-iters N` (env: `AEGIS_PROVIDER`, `AEGIS_MODEL`, `AEGIS_API_KEY`) |
-| MCP server for Cursor / Claude Code | `aegis-mcp` (stdio JSON-RPC; protocol `2025-06-18`) |
-| LLM-provider trait + first impl | [`crates/aegis-providers/src/lib.rs`](crates/aegis-providers/src/lib.rs), [`openai.rs`](crates/aegis-providers/src/openai.rs) |
-| Add a new LLM provider | mirror `OpenAIChatProvider`; implement the `LLMProvider` trait |
-| Add a new source language | one Cargo dep + one [`crates/aegis-core/src/ast/languages/<lang>.rs`](crates/aegis-core/src/ast/languages/) adapter + one [`crates/aegis-core/queries/<lang>.scm`](crates/aegis-core/queries/) query, then register in [`registry.rs`](crates/aegis-core/src/ast/registry.rs). Per-language checklist in [`docs/multi_language_plan.md`](docs/multi_language_plan.md). |
-| Run all tests | `cargo test --workspace` |
-| Cross-model sweep | (script not yet ported; see V1.8 in [`docs/v1_rust_port_plan.md`](docs/v1_rust_port_plan.md) — the harness is gated on API quotas, not code) |
-| Understand the V1.6 evidence | [`docs/v1_validation.md`](docs/v1_validation.md) |
-| Understand what V2 looks like | [`docs/gap3_control_plane.md`](docs/gap3_control_plane.md) (design only, not implemented) |
-| Understand what's deferred | [`docs/post_launch_discipline.md`](docs/post_launch_discipline.md) |
-
----
-
-## When things go wrong
-
-If a user reports something Aegis blocks that they think shouldn't
-be blocked:
-
-1. Run `aegis pipeline run --task "..." --root . --json` (or
-   `aegis check <files> --json`) to capture the full per-iteration
-   trace / signals.
-2. Identify which gate fired (the `layer` field).
-3. **Don't** propose modifying the gate logic to let it pass.
-4. **Do** open an issue at https://github.com/wei9072/aegis/issues
-   with: their input, the trace, and why they think the block was
-   wrong. This is V0.x evidence — false positives + false negatives
-   both refine the system.
-
-If a user reports Aegis didn't block something it should have:
-
-1. Same — capture the trace and what they expected.
-2. **Don't** propose adding a new gate inline.
-3. **Do** open an issue. The fix path is "add a scenario that
-   reproduces this, then design the gate that catches it" — not
-   reactive patches.
-
----
-
-## Status (so you don't promise things that aren't real)
-
-What works in V0.x: [`README.md`'s Status section](README.md#status).
-Don't promise the user features marked 🟡 or ❌ — they don't exist
-yet, and "I'll just build a quick version" is exactly what
-[`docs/post_launch_discipline.md`](docs/post_launch_discipline.md)
-is meant to prevent.
-
-If you're unsure whether a capability exists: grep the codebase
-before claiming it does. The code is the source of truth; this
-file and README can drift, the code can't.
+Default behaviour: ignore findings whose `user_acknowledged: true`.
+For everything else, reason about each finding's `context` against
+what the user asked you to do, and decide. Don't fail-stop on
+finding count; fail-stop only when the finding's facts genuinely
+contradict the user's intent.

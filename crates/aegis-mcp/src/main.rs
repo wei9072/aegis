@@ -1,25 +1,26 @@
-//! `aegis-mcp` — V1.9 / V1.10 Rust MCP server.
+//! `aegis-mcp` — V2 MCP server.
 //!
 //! Hand-rolled JSON-RPC 2.0 over stdio (MCP transport). One tool:
-//! `validate_change(path, new_content, old_content?)` — runs Ring 0
-//! syntax check + Ring 0.5 signal extraction + cost-aware regression
-//! detection on a proposed file write. Returns `{decision, reasons,
-//! signals_after, signals_before?, regression_detail?}`.
+//! `validate_file(path, new_content, old_content?, workspace_root?)`.
+//! Returns a flat `findings[]` array. No decision, no severity — the
+//! consuming LLM agent decides what to do with each finding.
 //!
-//! Mirrors the V0.x Python `aegis_mcp/server.py` contract pinned in
-//! `docs/integrations/mcp_design.md`. Intentionally narrow surface
-//! (no `validate_diff`, no `get_signals`, no `retry`/`hint`/`explain`
-//! tools — see post_launch_discipline.md framing).
+//! When `workspace_root` is supplied, Ring R2 (cross-file) findings
+//! are added to the result: cycle introduction, public-symbol-removed
+//! with caller list, file_role with z-scores. The workspace index is
+//! built lazily on first call (via aegis-core's mtime cache) and
+//! reused across subsequent calls — no separate "scan" command
+//! needed; bootstrap happens transparently.
 //!
 //! Why hand-rolled JSON-RPC: avoids dragging in `rmcp` for a server
-//! that exposes a single tool. ~250 LOC vs. ~1MB of dependency
-//! bloat. Spec compliance verified against Anthropic's MCP client
-//! integration tests in V0.x.
+//! that exposes a single tool. Spec compliance verified against
+//! Anthropic's MCP client integration tests in V0.x.
 
 use std::io::{self, BufRead, Write};
 
-use aegis_core::attest::{append_attestation_log, attest};
-use aegis_core::validate::{validate_change, validate_change_with_workspace};
+use aegis_core::findings::{
+    gather_findings, gather_findings_with_workspace, FINDINGS_SCHEMA_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -86,10 +87,7 @@ fn main() -> io::Result<()> {
         // Notifications (no id) are silent.
         let id = match req.id.clone() {
             Some(v) => v,
-            None => {
-                // Process notification methods (initialized) silently.
-                continue;
-            }
+            None => continue,
         };
         let response = match req.method.as_str() {
             "initialize" => handle_initialize(id),
@@ -138,23 +136,34 @@ fn handle_initialize(id: Value) -> JsonRpcResponse {
 }
 
 fn handle_tools_list(id: Value) -> JsonRpcResponse {
-    let single_file_tool = json!({
-        "name": "validate_change",
-        "description": "Fast single-file gate. Run Aegis Ring 0 (syntax) + \
-                        Ring 0.5 (structural signals + cost regression) + \
-                        Ring 0.7 (security anti-patterns) on a proposed file \
-                        write. Returns the decision without applying the \
-                        change. Pure observation — never coaches the agent. \
-                        Use this when the change is contained to one file or \
-                        when speed matters more than cross-file safety.",
+    let validate_file = json!({
+        "name": "validate_file",
+        "description": "Run aegis findings on a proposed file write. Returns a \
+                        flat findings[] list — no decision, no severity, no \
+                        verdict. Each finding is a fact (syntax error, signal \
+                        delta, security pattern match, cross-file cycle, public \
+                        symbol removal, file role with z-scores). The consuming \
+                        agent decides which to act on. \
+                        \
+                        Layer 1 findings (Syntax, Signal, Security) are always \
+                        produced. Pass `workspace_root` to additionally produce \
+                        Layer 2 (Workspace) findings — cycle detection, broken \
+                        callers, file role classification. The workspace index \
+                        is built lazily on first call and cached across \
+                        subsequent calls (mtime-aware). \
+                        \
+                        Pass `old_content` to get value_before / value_after / \
+                        delta on Signal findings, otherwise signals report \
+                        absolute counts only.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path the agent intends to write (used as \
-                                    filename for syntax/structural analysis \
-                                    only — no side effects to disk)."
+                    "description": "Path the agent intends to write. Used as \
+                                    the filename for syntax/structural analysis \
+                                    and as the resolution root for relative \
+                                    imports. No side effects to disk."
                 },
                 "new_content": {
                     "type": "string",
@@ -162,80 +171,27 @@ fn handle_tools_list(id: Value) -> JsonRpcResponse {
                 },
                 "old_content": {
                     "type": "string",
-                    "description": "Optional. If provided, enables cost-aware \
-                                    regression detection by comparing structural \
-                                    signal totals before vs after."
+                    "description": "Optional. The file's previous contents. When \
+                                    supplied, Signal findings include value_before \
+                                    / value_after / delta in their context."
+                },
+                "workspace_root": {
+                    "type": "string",
+                    "description": "Optional. Absolute path to the project root. \
+                                    When supplied, adds Workspace-kind findings \
+                                    (cycle_introduced, public_symbol_removed, \
+                                    file_role with z-scores). The workspace \
+                                    index is built lazily on first call."
                 }
             },
             "required": ["path", "new_content"]
-        }
-    });
-    let workspace_tool = json!({
-        "name": "validate_change_with_workspace",
-        "description": "Workspace-aware gate (Ring 0 + 0.5 + 0.7 + R2). Adds \
-                        cross-file checks on top of validate_change: detects \
-                        when a change introduces a module import cycle, or \
-                        deletes a public symbol that other files in the \
-                        workspace still reference. Slower than validate_change \
-                        because it walks the workspace tree; prefer this when \
-                        the change touches a public API or shared module.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Absolute or workspace-relative path the \
-                                    agent intends to write."
-                },
-                "new_content": {
-                    "type": "string",
-                    "description": "Full file contents the agent intends to write."
-                },
-                "old_content": {
-                    "type": "string",
-                    "description": "Optional baseline for cost-aware regression."
-                },
-                "workspace_root": {
-                    "type": "string",
-                    "description": "Absolute path to the project root. Used to \
-                                    build a one-shot workspace index for cycle \
-                                    detection and public-symbol reference \
-                                    tracking."
-                }
-            },
-            "required": ["path", "new_content", "workspace_root"]
-        }
-    });
-    let attest_tool = json!({
-        "name": "attest_path",
-        "description": "Post-write attestation. Reads on-disk content of \
-                        `path` and runs absolute checks (Ring 0 syntax + \
-                        Ring 0.7 security + optional Ring R2 cycle). Use \
-                        from PostToolUse hooks / CI / after any write that \
-                        bypasses the pre-write gate. Writes the verdict to \
-                        `<workspace_root>/.aegis/attestations.jsonl` for \
-                        audit when workspace_root is provided.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Absolute path of the file to attest."
-                },
-                "workspace_root": {
-                    "type": "string",
-                    "description": "Optional. Enables Ring R2 cycle detection \
-                                    and JSONL audit log."
-                }
-            },
-            "required": ["path"]
         }
     });
     JsonRpcResponse {
         jsonrpc: "2.0",
         id,
         result: Some(json!({
-            "tools": [single_file_tool, workspace_tool, attest_tool]
+            "tools": [validate_file]
         })),
         error: None,
     }
@@ -243,10 +199,7 @@ fn handle_tools_list(id: Value) -> JsonRpcResponse {
 
 fn handle_tools_call(id: Value, params: &Value) -> JsonRpcResponse {
     let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    if !matches!(
-        name,
-        "validate_change" | "validate_change_with_workspace" | "attest_path"
-    ) {
+    if name != "validate_file" {
         return JsonRpcResponse {
             jsonrpc: "2.0",
             id,
@@ -264,57 +217,41 @@ fn handle_tools_call(id: Value, params: &Value) -> JsonRpcResponse {
             return tool_error(id, "missing required argument 'path'");
         }
     };
-
-    let verdict = if name == "attest_path" {
-        let workspace_root = args
-            .get("workspace_root")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let v = attest(&path, workspace_root.as_deref());
-        if let Some(ref ws) = workspace_root {
-            // Best-effort log append; never fail the tool call on it.
-            let _ = append_attestation_log(ws, &v);
-        }
-        serde_json::to_value(&v).unwrap_or(Value::Null)
-    } else {
-        let new_content = match args.get("new_content").and_then(|v| v.as_str()) {
-            Some(c) => c.to_string(),
-            None => {
-                return tool_error(id, "missing required argument 'new_content'");
-            }
-        };
-        let old_content = args
-            .get("old_content")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        if name == "validate_change_with_workspace" {
-            let workspace_root = match args.get("workspace_root").and_then(|v| v.as_str()) {
-                Some(r) => r.to_string(),
-                None => {
-                    return tool_error(id, "missing required argument 'workspace_root'");
-                }
-            };
-            validate_change_with_workspace(
-                &path,
-                &new_content,
-                old_content.as_deref(),
-                &workspace_root,
-            )
-            .to_value()
-        } else {
-            validate_change(&path, &new_content, old_content.as_deref()).to_value()
+    let new_content = match args.get("new_content").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => {
+            return tool_error(id, "missing required argument 'new_content'");
         }
     };
+    let old_content = args
+        .get("old_content")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let workspace_root = args
+        .get("workspace_root")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let findings = if let Some(ws) = workspace_root.as_deref() {
+        gather_findings_with_workspace(&path, &new_content, old_content.as_deref(), ws)
+    } else {
+        gather_findings(&path, &new_content, old_content.as_deref())
+    };
+
+    let payload = json!({
+        "schema_version": FINDINGS_SCHEMA_VERSION,
+        "findings": findings,
+    });
+
     JsonRpcResponse {
         jsonrpc: "2.0",
         id,
         result: Some(json!({
             "content": [{
                 "type": "text",
-                "text": serde_json::to_string(&verdict).unwrap_or_default(),
+                "text": serde_json::to_string(&payload).unwrap_or_default(),
             }],
-            "structuredContent": verdict,
+            "structuredContent": payload,
             "isError": false
         })),
         error: None,
