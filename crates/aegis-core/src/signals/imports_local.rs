@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use tree_sitter::{Query, QueryCursor};
 
+use crate::ast::parsed_file::ParsedFile;
 use crate::ast::registry::LanguageRegistry;
 
 /// Count relative imports in `code` that don't resolve to an
@@ -65,6 +66,48 @@ pub fn unresolved_local_import_count(file_path: &str, code: &str) -> f64 {
     // resolve to sibling files.
     if file_path.ends_with(".py") || file_path.ends_with(".pyi") {
         unresolved += scan_python_bare_dot_imports(tree.root_node(), code.as_bytes(), &parent, extensions);
+    }
+    unresolved
+}
+
+/// Layer 1-shared variant — count unresolved relative imports using a
+/// pre-parsed `ParsedFile`. `file_path` is still required because the
+/// resolution root is `file_path.parent()` (the parse tree alone
+/// can't tell us where on disk we are).
+pub fn unresolved_local_import_count_from_parsed(
+    parsed: &ParsedFile<'_>,
+    file_path: &str,
+) -> f64 {
+    let adapter = parsed.adapter();
+    let parent = match Path::new(file_path).parent() {
+        Some(p) => p.to_path_buf(),
+        None => return 0.0,
+    };
+    let lang = adapter.tree_sitter_language();
+    let Ok(query) = Query::new(lang, adapter.import_query()) else {
+        return 0.0;
+    };
+    let mut qc = QueryCursor::new();
+    let mut unresolved: f64 = 0.0;
+    let extensions = adapter.extensions();
+    let src = parsed.source_bytes();
+    for m in qc.matches(&query, parsed.root_node(), src) {
+        for cap in m.captures {
+            let Ok(raw) = cap.node.utf8_text(src) else {
+                continue;
+            };
+            let cleaned = adapter.normalize_import(raw);
+            if !is_relative_import(&cleaned) {
+                continue;
+            }
+            if !import_resolves(&parent, &cleaned, extensions) {
+                unresolved += 1.0;
+            }
+        }
+    }
+    if file_path.ends_with(".py") || file_path.ends_with(".pyi") {
+        unresolved +=
+            scan_python_bare_dot_imports(parsed.root_node(), src, &parent, extensions);
     }
     unresolved
 }

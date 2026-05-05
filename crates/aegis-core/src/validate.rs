@@ -19,11 +19,12 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+use crate::ast::parsed_file::{parse as parse_file, ParsedFile};
 use crate::ast::registry::LanguageRegistry;
-use crate::enforcement::check_syntax_native_detailed;
-use crate::security::check_security;
-use crate::signal_layer_pyapi::{extract_signals_native, SignalData};
-use crate::signals::unresolved_local_import_count;
+use crate::enforcement::syntax_violations_from_parsed;
+use crate::security::check_security_from_parsed;
+use crate::signal_layer_pyapi::{extract_signals_from_parsed, SignalData};
+use crate::signals::unresolved_local_import_count_from_parsed;
 use crate::workspace::{public_symbols_lost, summarize_file, WorkspaceIndex};
 
 /// Wire-format schema version. Bump when the verdict shape changes
@@ -181,48 +182,49 @@ pub fn validate_change(
         };
     }
 
-    let tmp_new = match write_temp(&suffix, new_content) {
-        Ok(p) => p,
-        Err(e) => {
+    // V2 PR 2: parse once, share the tree across Ring 0 / 0.5 / 0.7.
+    // No more temp-file dance — the AST consumers all take &ParsedFile.
+    let parsed_new = match parse_file(path, new_content) {
+        Some(p) => p,
+        None => {
+            // Adapter exists (the suffix check above passed), but parse
+            // returned None — defensive; should not occur with current
+            // grammars. Fall back to a structured ring0_5 error.
             return ValidateVerdict {
                 schema_version: VERDICT_SCHEMA_VERSION.into(),
                 decision: "BLOCK".into(),
                 reasons: vec![json!({
-                    "layer": "ring0",
+                    "layer": "ring0_5",
                     "decision": "block",
-                    "reason": "tempfile_error",
-                    "detail": e,
+                    "reason": "parse_failed",
+                    "detail": format!("parser returned None for {path:?}"),
                 })],
                 signals_after: Map::new(),
                 signals_before: None,
                 regression_detail: None,
                 signal_deltas: None,
                 primary_blocker: None,
-            file_role: None,
+                file_role: None,
             };
         }
     };
 
-    let mut ring0_failed = false;
-    if let Ok(violations) = check_syntax_native_detailed(&tmp_new) {
-        if !violations.is_empty() {
-            ring0_failed = true;
-        }
-        for v in violations {
-            reasons.push(json!({
-                "layer": "ring0",
-                "decision": "block",
-                "reason": "ring0_violation",
-                "detail": v.message,
-                "range": {
-                    "start_line": v.start_line,
-                    "start_col": v.start_col,
-                    "end_line": v.end_line,
-                    "end_col": v.end_col,
-                },
-                "node_kind": v.kind,
-            }));
-        }
+    let violations = syntax_violations_from_parsed(&parsed_new, path);
+    let ring0_failed = !violations.is_empty();
+    for v in violations {
+        reasons.push(json!({
+            "layer": "ring0",
+            "decision": "block",
+            "reason": "ring0_violation",
+            "detail": v.message,
+            "range": {
+                "start_line": v.start_line,
+                "start_col": v.start_col,
+                "end_line": v.end_line,
+                "end_col": v.end_col,
+            },
+            "node_kind": v.kind,
+        }));
     }
 
     // S2.2: layer short-circuit. When Ring 0 (syntax) fails, every
@@ -231,7 +233,6 @@ pub fn validate_change(
     // emit noise. Return immediately with just the Ring 0 reasons so
     // the upstream agent gets a clean "fix syntax first" signal.
     if ring0_failed {
-        cleanup(&tmp_new);
         let primary = primary_blocker(&reasons);
         return ValidateVerdict {
             schema_version: VERDICT_SCHEMA_VERSION.into(),
@@ -242,7 +243,7 @@ pub fn validate_change(
             regression_detail: None,
             signal_deltas: None,
             primary_blocker: primary,
-        file_role: None,
+            file_role: None,
         };
     }
 
@@ -250,7 +251,7 @@ pub fn validate_change(
     // Distinct from cost regression: these are absolute BLOCKs
     // because the patterns have no legitimate use we couldn't
     // refactor. `aegis-allow: <rule-id>` line comments opt out.
-    for sv in check_security(path, new_content) {
+    for sv in check_security_from_parsed(&parsed_new) {
         reasons.push(crate::reasons::ring0_7_security(
             &sv.rule_id,
             &sv.severity,
@@ -264,44 +265,17 @@ pub fn validate_change(
         ));
     }
 
-    let new_sigs = match extract_signals_native(&tmp_new) {
-        Ok(mut v) => {
-            // Workspace-sensitive: the AST-only extract_signals_native
-            // can't see the parent directory of the *real* file, so
-            // we run unresolved_local_import_count here against the
-            // claimed `path`. If `path` doesn't have a real parent
-            // on disk (e.g. unit-test fixtures), this is a no-op.
-            v.push(SignalData {
-                name: "unresolved_local_import_count".into(),
-                value: unresolved_local_import_count(path, new_content),
-                file_path: path.to_string(),
-                description: "Relative imports that don't resolve to an existing file".into(),
-                severity: crate::signal_layer_pyapi::severity_for(
-                    "unresolved_local_import_count",
-                ),
-            });
-            v
-        }
-        Err(e) => {
-            cleanup(&tmp_new);
-            return ValidateVerdict {
-                schema_version: VERDICT_SCHEMA_VERSION.into(),
-                decision: "BLOCK".into(),
-                reasons: vec![json!({
-                    "layer": "ring0_5",
-                    "decision": "block",
-                    "reason": "signal_extraction_failed",
-                    "detail": e,
-                })],
-                signals_after: Map::new(),
-                signals_before: None,
-                regression_detail: None,
-                signal_deltas: None,
-                primary_blocker: None,
-            file_role: None,
-            };
-        }
-    };
+    let mut new_sigs = extract_signals_from_parsed(&parsed_new, path);
+    // unresolved_local_import_count needs the real `path` (not a temp
+    // location) to resolve relative imports against the actual parent
+    // dir on disk. Run it separately and append.
+    new_sigs.push(SignalData {
+        name: "unresolved_local_import_count".into(),
+        value: unresolved_local_import_count_from_parsed(&parsed_new, path),
+        file_path: path.to_string(),
+        description: "Relative imports that don't resolve to an existing file".into(),
+        severity: crate::signal_layer_pyapi::severity_for("unresolved_local_import_count"),
+    });
 
     let mut signals_after: Map<String, Value> = Map::new();
     for s in &new_sigs {
@@ -319,18 +293,17 @@ pub fn validate_change(
     let mut signal_deltas: Option<Map<String, Value>> = None;
 
     if let Some(old) = old_content {
-        if let Ok(old_path) = write_temp(&suffix, old) {
-            let mut old_sigs = extract_signals_native(&old_path).unwrap_or_default();
+        if let Some(parsed_old) = parse_file(path, old) {
+            let mut old_sigs = extract_signals_from_parsed(&parsed_old, path);
             old_sigs.push(SignalData {
                 name: "unresolved_local_import_count".into(),
-                value: unresolved_local_import_count(path, old),
+                value: unresolved_local_import_count_from_parsed(&parsed_old, path),
                 file_path: path.to_string(),
                 description: "Relative imports that don't resolve to an existing file".into(),
                 severity: crate::signal_layer_pyapi::severity_for(
                     "unresolved_local_import_count",
                 ),
             });
-            cleanup(&old_path);
 
             let mut sb: Map<String, Value> = Map::new();
             for s in &old_sigs {
@@ -434,7 +407,8 @@ pub fn validate_change(
         }
     }
 
-    cleanup(&tmp_new);
+    // V2 PR 2: no temp files to clean up — parse runs directly on
+    // in-memory content via ParsedFile.
 
     let any_block = reasons
         .iter()
@@ -622,21 +596,9 @@ pub fn validate_change_with_workspace(
     verdict
 }
 
-fn write_temp(suffix: &str, content: &str) -> Result<String, String> {
-    let dir = std::env::temp_dir();
-    let pid = std::process::id();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let path = dir.join(format!("aegis-validate-{pid}-{ts}{suffix}"));
-    std::fs::write(&path, content).map_err(|e| e.to_string())?;
-    Ok(path.to_string_lossy().into_owned())
-}
-
-fn cleanup(path: &str) {
-    let _ = std::fs::remove_file(path);
-}
+// V2 PR 2: write_temp / cleanup deleted. validate_change now operates
+// entirely on in-memory ParsedFile — no temp file race conditions, no
+// disk round-trip, no umask exposure on /tmp.
 
 #[cfg(test)]
 mod tests {

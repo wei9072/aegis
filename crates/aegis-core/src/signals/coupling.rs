@@ -6,6 +6,7 @@
 
 use tree_sitter::{Query, QueryCursor};
 
+use crate::ast::parsed_file::ParsedFile;
 use crate::ast::registry::LanguageRegistry;
 use crate::ir::model::IrNode;
 
@@ -50,6 +51,30 @@ pub fn fan_out_signal(filepath: &str) -> Result<f64, String> {
         return Ok(0.0);
     };
     Ok(fan_out_from_code_with(&code, adapter) as f64)
+}
+
+/// Layer 1-shared variant — count unique imports from a pre-parsed
+/// `ParsedFile`. No re-parse, no disk read. Returns 0 when the
+/// adapter's import query fails to compile (defensive — the registry
+/// meta-test guards this at startup, so it shouldn't fire in practice).
+pub fn fan_out_from_parsed(parsed: &ParsedFile<'_>) -> usize {
+    let adapter = parsed.adapter();
+    let lang = adapter.tree_sitter_language();
+    let query = match Query::new(lang, adapter.import_query()) {
+        Ok(q) => q,
+        Err(_) => return 0,
+    };
+    let mut qc = QueryCursor::new();
+    let mut seen = std::collections::HashSet::new();
+    let src = parsed.source_bytes();
+    for m in qc.matches(&query, parsed.root_node(), src) {
+        for cap in m.captures {
+            if let Ok(text) = cap.node.utf8_text(src) {
+                seen.insert(adapter.normalize_import(text));
+            }
+        }
+    }
+    seen.len()
 }
 
 #[cfg(test)]

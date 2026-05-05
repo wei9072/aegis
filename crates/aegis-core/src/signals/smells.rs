@@ -11,6 +11,7 @@
 
 use tree_sitter::Node;
 
+use crate::ast::parsed_file::ParsedFile;
 use crate::ast::registry::LanguageRegistry;
 
 /// Output of a single-file structural smell scan.
@@ -90,6 +91,14 @@ pub fn smell_counts_for_code(filepath: &str, code: &str) -> Result<SmellCounts, 
         .map_err(|e| e.to_string())?;
     let tree = parser.parse(code, None).ok_or("parse returned None")?;
     Ok(scan(tree.root_node(), code.as_bytes()))
+}
+
+/// Layer 1-shared variant — run the smell scan on a pre-parsed
+/// `ParsedFile`. The 5 sub-walks (imports, main walker, cross-module
+/// chains, import usage, type leakage, text markers) all run on the
+/// shared tree without re-parsing.
+pub fn smell_counts_from_parsed(parsed: &ParsedFile<'_>) -> SmellCounts {
+    scan(parsed.root_node(), parsed.source_bytes())
 }
 
 fn scan(root: Node, src: &[u8]) -> SmellCounts {

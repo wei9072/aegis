@@ -33,6 +33,7 @@
 
 use tree_sitter::{Node, Parser};
 
+use crate::ast::parsed_file::ParsedFile;
 use crate::ast::registry::LanguageRegistry;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -65,6 +66,18 @@ pub fn check_security(filepath: &str, code: &str) -> Vec<SecurityViolation> {
     // Text-based rules (CORS pair, regex on whole file).
     out.extend(scan_text_rules(code));
     suppress_allowed(out, code)
+}
+
+/// Layer 1-shared variant — run Ring 0.7 against a pre-parsed
+/// `ParsedFile`. No re-parse. `aegis-allow` suppression still runs
+/// (the user-facing semantics don't change in this PR; that becomes
+/// `user_acknowledged` annotation in PR 4).
+pub fn check_security_from_parsed(parsed: &ParsedFile<'_>) -> Vec<SecurityViolation> {
+    let src = parsed.source_bytes();
+    let mut out: Vec<SecurityViolation> = Vec::new();
+    walk(parsed.root_node(), src, &mut out);
+    out.extend(scan_text_rules(parsed.source()));
+    suppress_allowed(out, parsed.source())
 }
 
 fn walk(node: Node, src: &[u8], out: &mut Vec<SecurityViolation>) {

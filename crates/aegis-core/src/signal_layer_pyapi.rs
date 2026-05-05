@@ -6,7 +6,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::signals::{chain_depth_signal, fan_out_signal, smell_counts};
+use crate::ast::parsed_file::ParsedFile;
+use crate::signals::{
+    chain_depth_from_parsed, chain_depth_signal, fan_out_from_parsed, fan_out_signal,
+    smell_counts, smell_counts_from_parsed,
+};
 
 /// S7.1 — How seriously the cost-regression layer should treat a
 /// regression of this signal.
@@ -115,7 +119,25 @@ pub fn extract_signals_native(filepath: &str) -> Result<Vec<SignalData>, String>
     let fan_out = fan_out_signal(filepath)?;
     let depth = chain_depth_signal(filepath)?;
     let smells = smell_counts(filepath).unwrap_or_default();
+    Ok(assemble_signal_data(fan_out, depth, &smells, filepath))
+}
 
+/// Layer 1-shared variant — extract every Ring 0.5 signal from a
+/// pre-parsed `ParsedFile`. Single tree, no re-parse, no disk read.
+/// Replaces the 3-independent-parser pattern in `extract_signals_native`.
+pub fn extract_signals_from_parsed(parsed: &ParsedFile<'_>, filepath: &str) -> Vec<SignalData> {
+    let fan_out = fan_out_from_parsed(parsed) as f64;
+    let depth = chain_depth_from_parsed(parsed);
+    let smells = smell_counts_from_parsed(parsed);
+    assemble_signal_data(fan_out, depth, &smells, filepath)
+}
+
+fn assemble_signal_data(
+    fan_out: f64,
+    depth: f64,
+    smells: &crate::signals::SmellCounts,
+    filepath: &str,
+) -> Vec<SignalData> {
     fn make(name: &str, value: f64, filepath: &str, description: String) -> SignalData {
         SignalData {
             name: name.to_string(),
@@ -125,7 +147,7 @@ pub fn extract_signals_native(filepath: &str) -> Result<Vec<SignalData>, String>
             severity: severity_for(name),
         }
     }
-    Ok(vec![
+    vec![
         make(
             "fan_out",
             fan_out,
@@ -264,5 +286,5 @@ pub fn extract_signals_native(filepath: &str) -> Result<Vec<SignalData>, String>
                 smells.import_usage_count as usize
             ),
         ),
-    ])
+    ]
 }

@@ -4,6 +4,7 @@
 
 use std::fs;
 
+use crate::ast::parsed_file::ParsedFile;
 use crate::ast::registry::LanguageRegistry;
 
 /// Located syntax violation: where the bad node is.
@@ -50,6 +51,24 @@ pub fn check_syntax_native_detailed(filepath: &str) -> Result<Vec<SyntaxViolatio
         .ok_or_else(|| "parse returned None".to_string())?;
 
     let root = tree.root_node();
+    extract_violations(root, filepath)
+}
+
+/// Layer 1-shared variant — extract Ring 0 syntax violations from a
+/// pre-parsed `ParsedFile`. The parse is reused; this only walks the
+/// tree looking for ERROR / MISSING anchors. `filepath` is only used
+/// for the error-message text (no IO).
+pub fn syntax_violations_from_parsed(
+    parsed: &ParsedFile<'_>,
+    filepath: &str,
+) -> Vec<SyntaxViolation> {
+    extract_violations(parsed.root_node(), filepath).unwrap_or_default()
+}
+
+fn extract_violations(
+    root: tree_sitter::Node<'_>,
+    filepath: &str,
+) -> Result<Vec<SyntaxViolation>, String> {
     if !root.has_error() {
         return Ok(vec![]);
     }
