@@ -12,9 +12,15 @@ pub mod signals;
 pub mod incremental;
 pub mod attest;
 pub mod enforcement;
+pub mod findings;
 pub mod reasons;
 pub mod security;
 pub mod scan;
 pub mod validate;
 pub mod workspace;
 pub mod signal_layer_pyapi;
+
+pub use findings::{
+    gather_findings, gather_findings_with_workspace, Finding, FindingKind, Range,
+    FINDINGS_SCHEMA_VERSION,
+};
